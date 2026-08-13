@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "profile": "full",
+  "platform": {
+    "os": "Windows 10/11",
+    "architecture": "x64",
+    "python": "3.12",
+    "node": "22",
+    "gpu": "NVIDIA CUDA GPU with at least 8 GiB VRAM",
+    "ram_gib_min": 32,
+    "free_disk_gib_min": 100
+  },
+  "repositories": [
+    {
+      "name": "ComfyUI",
+      "url": "https://github.com/Comfy-Org/ComfyUI.git",
+      "revision": "2a68ce33b4c9ea6ee4283e618a74560cefb32694",
+      "target": ".runtime/comfyui"
+    },
+    {
+      "name": "MiniMax H3 Turbo node",
+      "url": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git",
+      "revision": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo"
+    },
+    {
+      "name": "Spectrum v0.2.5",
+      "url": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3.git",
+      "revision": "4b9a7d1163348c67e7e475423f24f8b7abb23565",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-Spectrum-MiniMax-H3"
+    },
+    {
+      "name": "ClipProj",
+      "url": "https://github.com/nicolab28/ComfyUI-ClipProj.git",
+      "revision": "ca9b325e83cb02cb5e652570569c6f3f20fee342",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-ClipProj"
+    },
+    {
+      "name": "Official workflow templates",
+      "url": "https://github.com/Comfy-Org/workflow_templates.git",
+      "revision": "2b7f823136606344f0bccce249898d771b809aa1",
+      "target": ".runtime/workflow_templates"
+    }
+  ],
+  "tools": {
+    "python": {
+      "version": "3.12",
+      "docs": "https://www.python.org/downloads/windows/"
+    },
+    "node": {
+      "version": "22",
+      "docs": "https://nodejs.org/en/download"
+    },
+    "ffmpeg": {
+      "required_commands": ["ffmpeg", "ffprobe"],
+      "docs": "https://ffmpeg.org/download.html"
+    },
+    "tailscale": {
+      "required": true,
+      "docs": "https://tailscale.com/download"
+    }
+  },
+  "policy": {
+    "bind_host": "127.0.0.1",
+    "tailscale_mode": "serve",
+    "funnel": false,
+    "sage_attention": false,
+    "paid_api_nodes": false
+  }
+}

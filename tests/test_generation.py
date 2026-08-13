@@ -1,0 +1,142 @@
+import unittest
+
+from backend.generation import GenerationSettings, normalize_generation_settings
+from backend.workflows import reference_workflow, spectrum_workflow, standard_workflow, turbo_workflow
+
+
+class GenerationSettingsTests(unittest.TestCase):
+    def test_current_defaults_are_preserved(self):
+        self.assertEqual(
+            normalize_generation_settings("text"),
+            GenerationSettings("turbo", 4, 736, 416),
+        )
+        self.assertEqual(
+            normalize_generation_settings("reference"),
+            GenerationSettings("standard", 20, 736, 416),
+        )
+        self.assertEqual(
+            normalize_generation_settings("reference", "spectrum", 16),
+            GenerationSettings("spectrum", 16, 736, 416),
+        )
+        self.assertEqual(
+            normalize_generation_settings("text", "turbo", 4, "512x288", "clipproj"),
+            GenerationSettings("turbo", 4, 512, 288, "clipproj"),
+        )
+
+    def test_safe_ranges_and_presets_are_enforced(self):
+        cases = [
+            ("text", "turbo", 3, "736x416"),
+            ("text", "turbo", 13, "736x416"),
+            ("text", "standard", 7, "736x416"),
+            ("text", "standard", 31, "736x416"),
+            ("reference", "turbo", 4, "736x416"),
+            ("text", "spectrum", 7, "736x416"),
+            ("text", "spectrum", 31, "736x416"),
+            ("text", "standard", 20, "1024x576"),
+        ]
+        for case in cases:
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                normalize_generation_settings(*case)
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("text", encoder="unknown")
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("text", "turbo", 9, turbo_profile="v4")
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("text", turbo_profile="unknown")
+
+    def test_turbo_v4_profile_is_explicit_and_keeps_v1_default(self):
+        self.assertEqual(normalize_generation_settings("text").turbo_profile, "v1")
+        settings = normalize_generation_settings("text", "turbo", 6, turbo_profile="v4")
+        self.assertEqual(settings.turbo_profile, "v4")
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_turbo_uses_selected_steps_and_resolution(self):
+        workflow = turbo_workflow("test", 5, 1, "turbo", steps=6, width=512, height=288)
+        self.assertEqual(workflow["9"]["inputs"]["steps"], 6)
+        self.assertEqual(workflow["104"]["inputs"]["width"], 512)
+        self.assertEqual(workflow["104"]["inputs"]["height"], 288)
+        self.assertEqual(workflow["19"]["class_type"], "MiniMaxH3TurboSampler")
+        self.assertEqual(workflow["18"]["class_type"], "MiniMaxH3TurboLoRA")
+
+    def test_turbo_v4_selects_the_side_by_side_lora(self):
+        workflow = turbo_workflow("test", 5, 11, "turbo-v4", steps=6, turbo_profile="v4")
+        self.assertEqual(
+            workflow["18"]["inputs"]["lora_name"],
+            "minimax_h3_turbo_v4_step600_ema.safetensors",
+        )
+
+    def test_standard_omits_turbo_nodes_and_keeps_frames(self):
+        workflow = standard_workflow(
+            "test", 10, 2, "standard", first_frame_name="first.png",
+            last_frame_name="last.png", steps=8, width=864, height=480,
+        )
+        self.assertNotIn("18", workflow)
+        self.assertNotIn("19", workflow)
+        self.assertEqual(workflow["17"]["inputs"]["sampler_name"], "res_multistep")
+        self.assertEqual(workflow["9"]["inputs"]["steps"], 8)
+        self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
+        self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
+        self.assertEqual(workflow["104"]["inputs"]["length"], 243)
+
+    def test_reference_uses_selected_standard_profile(self):
+        workflow = reference_workflow(
+            "test", 5, 3, "reference", "face.png", steps=24, width=736, height=416,
+        )
+        self.assertEqual(workflow["124"]["inputs"]["steps"], 24)
+        self.assertEqual(workflow["136"]["inputs"]["width"], 736)
+        self.assertEqual(workflow["136"]["inputs"]["height"], 416)
+        self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
+
+    def test_reference_audio_uses_official_ref_audio_input(self):
+        workflow = reference_workflow(
+            "<Picture 1> speaks in time with <Audio 1>", 5, 12,
+            "reference-audio", "face.png", audio_name="voice.wav",
+        )
+        self.assertEqual(workflow["138"], {
+            "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
+        })
+        self.assertEqual(
+            workflow["136"]["inputs"]["ref_audios"],
+            {"ref_audio_0": ["138", 0]},
+        )
+
+    def test_spectrum_is_separate_from_turbo_and_keeps_frames(self):
+        workflow = spectrum_workflow(
+            "test", 10, 4, "spectrum", first_frame_name="first.png",
+            last_frame_name="last.png", steps=16, width=736, height=416,
+        )
+        self.assertEqual(workflow["17"]["class_type"], "MiniMaxH3SigmaShift")
+        self.assertEqual(workflow["18"]["class_type"], "SpectrumApplyMiniMaxH3")
+        self.assertEqual(workflow["19"]["inputs"]["sampler_name"], "res_multistep")
+        self.assertNotIn("MiniMaxH3TurboSampler", {node["class_type"] for node in workflow.values()})
+        self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
+        self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
+
+    def test_reference_can_use_spectrum_chain(self):
+        workflow = reference_workflow("test", 5, 5, "reference-spectrum", "face.png", steps=16, spectrum=True)
+        self.assertEqual(workflow["124"]["inputs"]["model"], ["129", 0])
+        self.assertEqual(workflow["129"]["class_type"], "SpectrumApplyMiniMaxH3")
+        self.assertEqual(workflow["130"]["inputs"]["sampler_name"], "res_multistep")
+        self.assertNotIn("123", workflow)
+
+    def test_clipproj_replaces_only_the_text_encoder(self):
+        workflow = turbo_workflow(
+            "test", 5, 7, "clipproj", steps=4, width=512, height=288,
+            encoder="clipproj",
+        )
+        self.assertEqual(workflow["13"]["class_type"], "ClipProjLoader")
+        self.assertEqual(workflow["13"]["inputs"]["projection"], "h3_qwen3vl_4b_tap24.safetensors")
+        self.assertEqual(workflow["13"]["inputs"]["mode"], "dynamic")
+        self.assertEqual(workflow["19"]["class_type"], "MiniMaxH3TurboSampler")
+
+    def test_clipproj_reference_uses_resident_mode(self):
+        workflow = reference_workflow(
+            "test", 5, 8, "clipproj-reference", "face.png", encoder="clipproj",
+        )
+        self.assertEqual(workflow["13"]["class_type"], "ClipProjLoader")
+        self.assertEqual(workflow["13"]["inputs"]["mode"], "resident")
+
+
+if __name__ == "__main__":
+    unittest.main()

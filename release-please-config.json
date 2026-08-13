@@ -1,0 +1,11 @@
+{
+  "release-type": "node",
+  "package-name": "h3-mobile-bridge",
+  "include-v-in-tag": true,
+  "changelog-types": [
+    {"type": "feat", "section": "Features"},
+    {"type": "fix", "section": "Bug Fixes"},
+    {"type": "perf", "section": "Performance"},
+    {"type": "refactor", "section": "Refactoring"}
+  ]
+}

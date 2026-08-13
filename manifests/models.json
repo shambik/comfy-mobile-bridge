@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "source_revision": "Pinned revisions are immutable download inputs; verify every file before use.",
+  "models": [
+    {
+      "name": "H3 FL2VA diffusion",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "014cd40f7e177756c6b2473c0d93b1c89a790dd2",
+      "source_path": "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "filename": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 20970379616,
+      "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "name": "H3 REF2VA diffusion",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "014cd40f7e177756c6b2473c0d93b1c89a790dd2",
+      "source_path": "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "filename": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 20970379616,
+      "sha256": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "name": "H3 32B text encoder",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "014cd40f7e177756c6b2473c0d93b1c89a790dd2",
+      "source_path": "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "target_directory": "text_encoders",
+      "bytes": 15687142551,
+      "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "name": "H3 4B ClipProj text encoder",
+      "source_repository": "https://huggingface.co/Comfy-Org/Krea-2",
+      "revision": "952f49d49653cb42e7d6cf7cbfad74738073ec7d",
+      "source_path": "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+      "filename": "qwen3vl_4b_fp8_scaled.safetensors",
+      "target_directory": "text_encoders",
+      "bytes": 5242467968,
+      "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
+      "license_reference": "https://huggingface.co/Comfy-Org/Krea-2"
+    },
+    {
+      "name": "H3 video VAE",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "014cd40f7e177756c6b2473c0d93b1c89a790dd2",
+      "source_path": "vae/minimax_h3_video_vae_fp16.safetensors",
+      "filename": "minimax_h3_video_vae_fp16.safetensors",
+      "target_directory": "vae",
+      "bytes": 5207808496,
+      "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "name": "H3 audio VAE",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "014cd40f7e177756c6b2473c0d93b1c89a790dd2",
+      "source_path": "vae/minimax_h3_audio_vae_fp32.safetensors",
+      "filename": "minimax_h3_audio_vae_fp32.safetensors",
+      "target_directory": "vae",
+      "bytes": 605254808,
+      "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+    },
+    {
+      "name": "Turbo v1 LoRA",
+      "source_repository": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora",
+      "revision": "43a74557ac3f6539db8e0f2a959d03feb7a81480",
+      "source_path": "minimax_h3_turbo_4step_ema_ckpt850.safetensors",
+      "filename": "minimax_h3_turbo_4step_ema_ckpt850.safetensors",
+      "target_directory": "loras",
+      "bytes": 779849816,
+      "sha256": "5a6eeba171cf183020a4ad48774bb2968f29f8168afd6ec17a04987f3528b4ea",
+      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
+    },
+    {
+      "name": "Turbo v4 LoRA",
+      "source_repository": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora",
+      "revision": "43a74557ac3f6539db8e0f2a959d03feb7a81480",
+      "source_path": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "filename": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "target_directory": "loras",
+      "bytes": 779849816,
+      "sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
+      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
+    },
+    {
+      "name": "ClipProj learned projection",
+      "source_repository": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "revision": "ef89d0fc87ec004adc3330641dd6acb79bd785a7",
+      "source_path": "h3_qwen3vl_4b_tap24.safetensors",
+      "filename": "h3_qwen3vl_4b_tap24.safetensors",
+      "target_directory": "clip_projections",
+      "bytes": 52511480,
+      "sha256": "f0f7ecaf4f431f62055888cbd214c607bf4215feb002ef4aa43a3ba6205ac325",
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+    },
+    {
+      "name": "ClipProj identity control",
+      "source_repository": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "revision": "ef89d0fc87ec004adc3330641dd6acb79bd785a7",
+      "source_path": "h3_control_identity.safetensors",
+      "filename": "h3_control_identity.safetensors",
+      "target_directory": "clip_projections",
+      "bytes": 52511408,
+      "sha256": "6bd90824280210c53a5a2de4ddfb6c61a6f921ea3ab5c45fbb55e977629947b9",
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+    },
+    {
+      "name": "ClipProj zero control",
+      "source_repository": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "revision": "ef89d0fc87ec004adc3330641dd6acb79bd785a7",
+      "source_path": "h3_control_zero.safetensors",
+      "filename": "h3_control_zero.safetensors",
+      "target_directory": "clip_projections",
+      "bytes": 52511400,
+      "sha256": "73842bed5a64979e639cff06e0e9fab00e124f908b8a19b85b83130ffa54e3cb",
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+    },
+    {
+      "name": "Turbo node SiLU timestep grid",
+      "source_repository": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo",
+      "revision": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
+      "source_path": "h3_silu_temb_grid.safetensors",
+      "filename": "h3_silu_temb_grid.safetensors",
+      "target_root": "runtime",
+      "target_directory": "comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo",
+      "bytes": 5510600,
+      "sha256": "30eb3c2cc7fb6b470d9717ff840d359313ac27cd64b705e32da1baa10f72d6a8",
+      "license_reference": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo"
+    }
+  ]
+}

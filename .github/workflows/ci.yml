@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build UI
+        run: npm run build
+
+      - name: Install bridge dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run Python tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Validate manifests
+        shell: pwsh
+        run: .\scripts\validate-manifests.ps1
+
+      - name: Scan tracked files
+        shell: pwsh
+        run: .\scripts\scan-repo.ps1
+
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $errors = @()
+          Get-ChildItem .\scripts -Filter *.ps1 -File | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            $errors += $parseErrors
+          }
+          if ($errors.Count -gt 0) { $errors | Format-List; exit 2 }
+
+      - name: Check preflight and bootstrap dry run
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 -Json -SkipGpu -SkipTailscale
+          if ($LASTEXITCODE -notin 0, 2) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1 -DryRun
+
+      - name: Check Git and ignored paths
+        shell: pwsh
+        run: .\scripts\validate-git.ps1 -Range HEAD

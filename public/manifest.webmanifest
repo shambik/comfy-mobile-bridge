@@ -1,0 +1,14 @@
+{
+  "name": "H3 Studio",
+  "short_name": "H3",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0d0c",
+  "theme_color": "#0d0f0e",
+  "lang": "he",
+  "dir": "rtl",
+  "icons": [
+    { "src": "/h3-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
+

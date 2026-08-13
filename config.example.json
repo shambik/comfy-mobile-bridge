@@ -1,0 +1,16 @@
+{
+  "runtime_root": ".runtime",
+  "profile": "full",
+  "app": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "comfy": {
+    "host": "127.0.0.1",
+    "port": 8190
+  },
+  "tailscale": {
+    "enabled": true,
+    "scope": "tailnet"
+  }
+}

@@ -1,0 +1,17 @@
+diff --git a/comfy_extras/nodes_minimax_h3.py b/comfy_extras/nodes_minimax_h3.py
+index 0b1840e..b8d62d0 100644
+--- a/comfy_extras/nodes_minimax_h3.py
++++ b/comfy_extras/nodes_minimax_h3.py
+@@ -128,8 +128,10 @@ class MiniMaxH3ImageToVideo(io.ComfyNode):
+         images = []
+         keyframes = []
+         if first_frame is not None:
+-            # geometry anchor: plain stretch to canvas
+-            img = _resize(first_frame[:1], width, height, "disabled")
++            # geometry anchor: preserve aspect ratio and cover the canvas.
++            # The UI preview uses the same crop, so portraits are not
++            # stretched into a wide frame before H3 sees them.
++            img = _resize(first_frame[:1], width, height, "center")
+             images.append(img)
+             keyframes.append({"resolved_frame_index": 0, "image": img})
+         if last_frame is not None:
