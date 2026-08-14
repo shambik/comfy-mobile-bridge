@@ -16,7 +16,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
-                     CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, INPUT, MODELS,
+                     CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, INPUT, LOGS, MODELS,
                      REF2VA_MODEL, REFERENCE_10S_MARKER, ROOT,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, get_job, get_sequence, init_db, list_jobs,
@@ -99,6 +99,53 @@ async def session(request: Request):
     response = JSONResponse({"csrf_token": token, **public_health()})
     response.set_cookie(COOKIE, token, httponly=True, secure=request.url.scheme == "https", samesite="strict", max_age=86400 * 30)
     return response
+
+
+def read_comfy_log(limit: int = 300) -> list[str]:
+    path = LOGS / "comfy-8190.log"
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return lines[-max(1, min(limit, 1000)):]
+
+
+@app.get("/api/comfy/status")
+async def comfy_status():
+    return {
+        "running": await worker.comfy.ready(),
+        "pid": worker.comfy.process.pid if worker.comfy.process and worker.comfy.process.poll() is None else None,
+        "host": COMFY_HOST,
+        "port": COMFY_PORT,
+    }
+
+
+@app.get("/api/comfy/logs")
+async def comfy_logs(request: Request):
+    try:
+        limit = int(request.query_params.get("tail", "300"))
+    except ValueError:
+        limit = 300
+    return {"running": await worker.comfy.ready(), "lines": read_comfy_log(limit)}
+
+
+@app.post("/api/comfy/start")
+async def start_comfy(request: Request):
+    require_csrf(request)
+    try:
+        await worker.comfy.ensure_started()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return await comfy_status()
+
+
+@app.post("/api/comfy/stop")
+async def stop_comfy(request: Request):
+    require_csrf(request)
+    await worker.comfy.shutdown()
+    return await comfy_status()
 
 
 @app.get("/api/jobs")
@@ -190,7 +237,7 @@ def parse_prompts(raw: str, batch: bool) -> list[str]:
 @app.post("/api/jobs")
 async def create_jobs(
     request: Request,
-    prompt: str = Form(...), mode: str = Form("text"), duration: int = Form(5),
+    prompt: str = Form(...), mode: str = Form("text"), duration: float = Form(5),
     engine: str | None = Form(None), steps: int | None = Form(None),
     resolution: str | None = Form(None),
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
@@ -200,8 +247,8 @@ async def create_jobs(
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
 ):
     require_csrf(request)
-    if mode not in ("text", "opening", "closing", "frames", "reference") or duration not in (5, 10):
-        raise HTTPException(400, "Invalid mode or duration")
+    if mode not in ("text", "opening", "closing", "frames", "reference") or not 0.5 <= duration <= 60:
+        raise HTTPException(400, "Duration must be between 0.5 and 60 seconds")
     try:
         generation = normalize_generation_settings(
             mode, engine, steps, resolution, encoder, turbo_profile,
@@ -224,8 +271,8 @@ async def create_jobs(
         raise HTTPException(400, "Reference audio is available in reference mode only")
     if generation.turbo_profile == "v4" and not (MODELS / "loras" / TURBO_LORAS["v4"]).exists():
         raise HTTPException(409, "Turbo v4 is not installed yet")
-    if mode == "reference" and duration == 10 and not REFERENCE_10S_MARKER.exists():
-        raise HTTPException(409, "10-second reference mode is not ready")
+    if mode == "reference" and duration > 5 and not REFERENCE_10S_MARKER.exists():
+        raise HTTPException(409, "Reference mode above 5 seconds is not ready")
     prompts = parse_prompts(prompt, batch)
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")

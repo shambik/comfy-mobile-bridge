@@ -30,7 +30,7 @@ def _create_jobs_table(db):
         id TEXT PRIMARY KEY,
         prompt TEXT NOT NULL,
         mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference')),
-        duration INTEGER NOT NULL CHECK(duration IN (5,10)),
+        duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
@@ -66,9 +66,8 @@ def _create_jobs_table(db):
         finished_at TEXT,
         CHECK((engine='turbo' AND steps BETWEEN 4 AND 12) OR
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
-        CHECK((width=512 AND height=288) OR
-              (width=736 AND height=416) OR
-              (width=864 AND height=480)),
+        CHECK(width BETWEEN 256 AND 2048 AND height BETWEEN 256 AND 2048 AND
+              width % 32 = 0 AND height % 32 = 0 AND width * height <= 2000000),
         CHECK(mode <> 'reference' OR engine IN ('standard','spectrum')),
         CHECK((sequence_id IS NULL AND sequence_index IS NULL AND sequence_total IS NULL) OR
               (sequence_id IS NOT NULL AND sequence_index BETWEEN 1 AND sequence_total AND sequence_total BETWEEN 2 AND 20))
@@ -180,7 +179,7 @@ def init_db():
                 "sequence_id", "sequence_index", "sequence_total",
                 "reference_audio_path", "reference_audio_name",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "turbo_profile" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)

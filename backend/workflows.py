@@ -7,6 +7,12 @@ from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
 FPS = 24
 
 
+def h3_frame_count(duration: float) -> int:
+    """Round requested seconds up to H3's 17k+5 frame grid."""
+    frames = max(5, round(duration * FPS))
+    return frames + (5 - frames % 17) % 17
+
+
 def _clip_loader(encoder: str, reference: bool = False) -> dict:
     if encoder == "clipproj":
         return {
@@ -66,7 +72,7 @@ def turbo_workflow(
     encoder: str = "native",
     turbo_profile: str = "v1",
 ):
-    length = 124 if duration == 5 else 243
+    length = h3_frame_count(duration)
     nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
@@ -96,7 +102,7 @@ def standard_workflow(
     height: int = 416,
     encoder: str = "native",
 ):
-    length = 124 if duration == 5 else 243
+    length = h3_frame_count(duration)
     nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
@@ -131,7 +137,7 @@ def spectrum_workflow(
     the native model after the H3 sigma-shift node and uses RES multistep,
     which is one of Spectrum's supported sampler paths.
     """
-    length = 124 if duration == 5 else 243
+    length = h3_frame_count(duration)
     nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
@@ -177,7 +183,7 @@ def reference_workflow(
     spectrum: bool = False,
     encoder: str = "native",
 ):
-    length = 124 if duration == 5 else 243
+    length = h3_frame_count(duration)
     model_node = "129" if spectrum else "127"
     sampler_node = "130" if spectrum else "123"
     nodes = _common_decode(

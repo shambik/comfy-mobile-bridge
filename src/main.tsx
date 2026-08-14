@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Minus, Play, Plus, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing'
 type Engine = 'turbo' | 'standard' | 'spectrum'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
-type Resolution = '512x288' | '736x416' | '864x480'
+type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
+type Page = 'studio' | 'comfy'
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; status: Status; progress: number;
   engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; position?: number;
@@ -36,11 +37,27 @@ const modes: { id: Mode; label: string; hint: string }[] = [
   { id: 'reference', label: 'רפרנס', hint: 'זהות וסגנון מהתמונה' },
 ]
 
-const resolutions: { id: Resolution; label: string; hint: string; width: number; height: number }[] = [
-  { id: '512x288', label: 'חסכוני', hint: '512×288', width: 512, height: 288 },
-  { id: '736x416', label: 'מאוזן', hint: '736×416', width: 736, height: 416 },
-  { id: '864x480', label: 'גבוה', hint: '864×480', width: 864, height: 480 },
+type Aspect = '1:1' | '4:3' | '3:4' | '16:9' | '9:16'
+type ResolutionOption = { id: Resolution; label: string; hint: string; width: number; height: number; aspect: Aspect; megapixels: number }
+const resolutions: ResolutionOption[] = [
+  { id: '512x288', label: 'חסכוני', hint: '512×288 · 0.15MP', width: 512, height: 288, aspect: '16:9', megapixels: 0.15 },
+  { id: '736x416', label: 'מאוזן', hint: '736×416 · 0.31MP', width: 736, height: 416, aspect: '16:9', megapixels: 0.31 },
+  { id: '864x480', label: 'גבוה', hint: '864×480 · 0.41MP', width: 864, height: 480, aspect: '16:9', megapixels: 0.41 },
+  { id: '768x768', label: 'ריבוע טבעי', hint: '768×768 · 0.56MP', width: 768, height: 768, aspect: '1:1', megapixels: 0.56 },
+  { id: '1024x768', label: '4:3 טבעי', hint: '1024×768 · 0.75MP', width: 1024, height: 768, aspect: '4:3', megapixels: 0.75 },
+  { id: '768x1024', label: '3:4 טבעי', hint: '768×1024 · 0.75MP', width: 768, height: 1024, aspect: '3:4', megapixels: 0.75 },
+  { id: '1344x768', label: '16:9 טבעי', hint: '1344×768 · 0.98MP', width: 1344, height: 768, aspect: '16:9', megapixels: 0.98 },
+  { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 0.98MP', width: 768, height: 1344, aspect: '9:16', megapixels: 0.98 },
 ]
+const aspectOptions: Aspect[] = ['1:1', '4:3', '3:4', '16:9', '9:16']
+
+function dimensionsFor(aspect: Aspect, megapixels: number) {
+  const ratios: Record<Aspect, number> = { '1:1': 1, '4:3': 4 / 3, '3:4': 3 / 4, '16:9': 16 / 9, '9:16': 9 / 16 }
+  const ratio = ratios[aspect]
+  const width = Math.max(256, Math.round(Math.sqrt(megapixels * 1_000_000 * ratio) / 32) * 32)
+  const height = Math.max(256, Math.round(Math.sqrt(megapixels * 1_000_000 / ratio) / 32) * 32)
+  return { width, height, id: `${width}x${height}` as Resolution }
+}
 
 type Preferences = {
   engine: Engine
@@ -50,9 +67,11 @@ type Preferences = {
   standardSteps: number
   spectrumSteps: number
   resolution: Resolution
+  aspect: Aspect
+  megapixels: number
 }
 
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', turboSteps: 4, standardSteps: 20, spectrumSteps: 16, resolution: '736x416' }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', turboSteps: 4, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
@@ -66,6 +85,8 @@ function readPreferences(): Preferences {
       standardSteps: Number.isInteger(saved.standardSteps) && saved.standardSteps! >= 8 && saved.standardSteps! <= 30 ? saved.standardSteps! : 20,
       spectrumSteps: Number.isInteger(saved.spectrumSteps) && saved.spectrumSteps! >= 8 && saved.spectrumSteps! <= 30 ? saved.spectrumSteps! : 16,
       resolution: resolutions.some(item => item.id === saved.resolution) ? saved.resolution! : '736x416',
+      aspect: aspectOptions.includes(saved.aspect as Aspect) ? saved.aspect as Aspect : '16:9',
+      megapixels: typeof saved.megapixels === 'number' && saved.megapixels >= 0.1 && saved.megapixels <= 2 ? saved.megapixels : 0.31,
     }
   } catch {
     return defaultPreferences
@@ -98,7 +119,19 @@ function AudioDropzone({ file, onChange }: AudioDropzoneProps) {
   </label>
 }
 
+type ComfyPageProps = { running: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
+
+function ComfyPage({ running, busy, lines, error, onRefresh }: ComfyPageProps) {
+  return <section className="comfy-page">
+    <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><button className="icon-button" onClick={onRefresh} aria-label="Refresh log"><RefreshCw size={18} /></button></div>
+    <div className={`comfy-state ${running ? 'running' : 'stopped'}`}><i /> {running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
+    {error && <div className="error-banner">{error}</div>}
+    <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
+  </section>
+}
+
 function App() {
+  const [page, setPage] = useState<Page>('studio')
   const [csrf, setCsrf] = useState('')
   const [jobs, setJobs] = useState<Job[]>([])
   const [sequences, setSequences] = useState<Sequence[]>([])
@@ -125,6 +158,10 @@ function App() {
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [selectedResults, setSelectedResults] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
+  const [comfyRunning, setComfyRunning] = useState(false)
+  const [comfyBusy, setComfyBusy] = useState(false)
+  const [comfyLogs, setComfyLogs] = useState<string[]>([])
+  const [comfyError, setComfyError] = useState('')
 
   const loadSession = async (): Promise<string | null> => {
     try {
@@ -170,6 +207,29 @@ function App() {
     return () => window.clearInterval(timer)
   }, [csrf])
 
+  const loadComfy = async () => {
+    try {
+      const [statusResponse, logsResponse] = await Promise.all([
+        fetch('/api/comfy/status', { cache: 'no-store' }),
+        fetch('/api/comfy/logs?tail=400', { cache: 'no-store' }),
+      ])
+      if (!statusResponse.ok || !logsResponse.ok) throw new Error('ComfyUI status unavailable')
+      const status = await statusResponse.json()
+      const logs = await logsResponse.json()
+      setComfyRunning(Boolean(status.running))
+      setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
+      setComfyError('')
+    } catch {
+      setComfyError('Unable to read ComfyUI status')
+    }
+  }
+
+  useEffect(() => {
+    void loadComfy()
+    const timer = window.setInterval(() => { void loadComfy() }, 2000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   useEffect(() => {
     if (!referenceImage) { setReferencePreview(''); return }
     const url = URL.createObjectURL(referenceImage); setReferencePreview(url)
@@ -206,10 +266,12 @@ function App() {
   const stepRange = effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
-  const selectedResolution = resolutions.find(item => item.id === preferences.resolution) || resolutions[1]
+  const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
+  const requestedFrames = Math.max(5, Math.round(duration * 24))
+  const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
   const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : 1
   const promptMultiplier = batch ? Math.max(1, paragraphCount) : 1
-  const relativeLoad = selectedResolution.width * selectedResolution.height * duration * generationSteps * engineLoadFactor * promptMultiplier / (736 * 416 * 5 * 4)
+  const relativeLoad = calculatedResolution.width * calculatedResolution.height * duration * generationSteps * engineLoadFactor * promptMultiplier / (736 * 416 * 5 * 4)
   const loadLevel = relativeLoad >= 5 ? 'very-heavy' : relativeLoad >= 2 ? 'heavy' : 'normal'
   const loadLabel = loadLevel === 'very-heavy' ? 'כבד מאוד' : loadLevel === 'heavy' ? 'כבד' : 'רגיל'
   const needsConfirmation = effectiveEngine === 'spectrum' || effectiveEncoder === 'clipproj' || (effectiveEngine === 'turbo' && preferences.turboProfile === 'v4') || connected || relativeLoad >= 2 || (batch && paragraphCount >= 5)
@@ -230,6 +292,25 @@ function App() {
     if (!response.ok) throw new Error(data.detail || 'הפעולה נכשלה')
     await load()
     return data
+  }
+
+  const controlComfy = async (action: 'start' | 'stop') => {
+    if (comfyBusy) return
+    setComfyBusy(true)
+    setComfyError('')
+    try {
+      const sessionToken = csrf || await loadSession()
+      if (!sessionToken) throw new Error('The server session is not ready')
+      const response = await fetch(`/api/comfy/${action}`, { method: 'POST', headers: { 'X-CSRF-Token': sessionToken } })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'ComfyUI action failed')
+      setComfyRunning(Boolean(data.running))
+      await loadComfy()
+    } catch (e) {
+      setComfyError(e instanceof Error ? e.message : 'ComfyUI action failed')
+    } finally {
+      setComfyBusy(false)
+    }
   }
 
   const selectMode = (next: Mode) => {
@@ -290,7 +371,7 @@ function App() {
     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
     form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', preferences.resolution); form.set('connected', String(connected))
+    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', calculatedResolution.id); form.set('connected', String(connected))
     if (effectiveEngine === 'turbo') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
       form.set('first_frame', openingFrame!)
@@ -356,8 +437,14 @@ function App() {
     <header className="topbar">
       <div className="brand-mark"><Clapperboard size={22} /></div>
       <div><h1>H3 Studio</h1><p>יוצרים וידאו מהמחשב שלך</p></div>
-      <button className="icon-button" onClick={() => { void loadSession(); void load() }} aria-label="רענון"><RefreshCw size={18} /></button>
+      <div className="topbar-actions">
+        <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
+        <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
+        <button className="icon-button" onClick={() => { if (page === 'comfy') void loadComfy(); else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
+      </div>
     </header>
+    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onRefresh={() => { void loadComfy() }} /> : <>
 
     <section className="composer">
       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
@@ -450,27 +537,24 @@ function App() {
 
           <div className="setting-block resolution-block">
             <div className="setting-title"><span>רזולוציה</span><small>כפולות 32 שמתאימות ל־H3</small></div>
-            <div className="resolution-grid">
-              {resolutions.map(item => <button type="button" key={item.id} className={preferences.resolution === item.id ? 'active' : ''} aria-pressed={preferences.resolution === item.id} onClick={() => setPreferences(current => ({ ...current, resolution: item.id }))}>
-                <span className="resolution-check">{preferences.resolution === item.id && <Check size={12} />}</span>
-                <strong>{item.label}</strong><small>{item.hint}</small>
-              </button>)}
-            </div>
+            <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
+            <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
+            <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
           </div>
         </div>
 
         <div className="generation-summary">
-          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{preferences.resolution}</b></div>
+          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
           <small>{loadLevel === 'normal' ? 'מוכן ליצירה' : 'לפני השליחה יוצג אישור עומס'}</small>
         </div>
       </div>
 
       <div className="final-row">
-        <div className="duration"><span>משך</span><button className={duration === 5 ? 'active' : ''} onClick={() => setDuration(5)}>5 שנ׳</button><button className={duration === 10 ? 'active' : ''} onClick={() => setDuration(10)} disabled={mode === 'reference' && !reference10Ready}>10 שנ׳</button></div>
+        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => setDuration(Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)))} /><small>H3 מעגל אוטומטית לפריים הקרוב</small></label>
         <button className="create-button" onClick={() => { void submit() }} disabled={sending} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
-      {mode === 'reference' && referenceReady && !reference10Ready && <p className="quiet-warning">רפרנס זמין כרגע ל־5 שניות. 10 שניות ייפתח רק אחרי בדיקת עומס מוצלחת.</p>}
+      {mode === 'reference' && referenceReady && !reference10Ready && <p className="quiet-warning">רפרנס מעל 5 שניות ייפתח רק אחרי בדיקת עומס מוצלחת.</p>}
       {error && <div className="error-banner">{error}</div>}
     </section>
 
@@ -507,7 +591,7 @@ function App() {
           {effectiveEngine === 'turbo' && <span>{preferences.turboProfile.toUpperCase()}</span>}
           <span>{encoderLabel(effectiveEncoder)}</span>
           <span>{generationSteps} סטפים</span>
-          <span>{preferences.resolution}</span>
+          <span>{calculatedResolution.id}</span><span>{h3Frames} frames</span>
           <span>{duration} שנ׳</span>
           {batch && <span>{paragraphCount} משימות</span>}
         </div>
@@ -517,6 +601,7 @@ function App() {
         </div>
       </section>
     </div>}
+    </>}
   </main>
 }
 

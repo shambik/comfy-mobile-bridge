@@ -32,7 +32,7 @@ class GenerationSettingsTests(unittest.TestCase):
             ("reference", "turbo", 4, "736x416"),
             ("text", "spectrum", 7, "736x416"),
             ("text", "spectrum", 31, "736x416"),
-            ("text", "standard", 20, "1024x576"),
+            ("text", "standard", 20, "1025x576"),
         ]
         for case in cases:
             with self.subTest(case=case), self.assertRaises(ValueError):

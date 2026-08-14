@@ -1,11 +1,22 @@
+import re
 from dataclasses import dataclass
 
 
-RESOLUTION_PRESETS = {
-    "512x288": (512, 288),
-    "736x416": (736, 416),
-    "864x480": (864, 480),
-}
+MAX_PIXELS = 2_000_000
+
+
+def parse_resolution(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"(\d+)x(\d+)", value)
+    if not match:
+        raise ValueError("Resolution must use WIDTHxHEIGHT")
+    width, height = (int(item) for item in match.groups())
+    if not 256 <= width <= 2048 or not 256 <= height <= 2048:
+        raise ValueError("Resolution dimensions must be between 256 and 2048")
+    if width % 32 or height % 32:
+        raise ValueError("Resolution dimensions must be multiples of 32")
+    if width * height > MAX_PIXELS:
+        raise ValueError("Resolution is above the 2.0 megapixel safety limit")
+    return width, height
 
 TURBO_STEP_RANGE = (4, 12)
 STANDARD_STEP_RANGE = (8, 30)
@@ -49,9 +60,7 @@ def normalize_generation_settings(
         raise ValueError(f"{resolved_engine.capitalize()} steps must be between {step_min} and {step_max}")
 
     resolved_resolution = resolution or "736x416"
-    if resolved_resolution not in RESOLUTION_PRESETS:
-        raise ValueError("Resolution must be 512x288, 736x416 or 864x480")
-    width, height = RESOLUTION_PRESETS[resolved_resolution]
+    width, height = parse_resolution(resolved_resolution)
     resolved_encoder = encoder or "native"
     if resolved_encoder not in ("native", "clipproj"):
         raise ValueError("Text encoder must be native or clipproj")
