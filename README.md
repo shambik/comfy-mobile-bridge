@@ -7,8 +7,8 @@ private HTTPS access only to devices allowed in the current user's tailnet.
 ## Quick start
 
 ```powershell
-git clone <private-repository-url> h3-mobile-bridge
-Set-Location .\h3-mobile-bridge
+git clone https://github.com/shambik/comfy-mobile-bridge.git comfy-mobile-bridge
+Set-Location .\comfy-mobile-bridge
 .\scripts\preflight.ps1 -Json
 Get-Content .\THIRD_PARTY_NOTICES.md
 .\scripts\bootstrap.ps1 -Profile Full -AcceptLicenses
@@ -57,6 +57,9 @@ the current machine's paths and detected Tailscale hostname and is ignored.
 Use `.\scripts\doctor.ps1 -Deep` to check listeners, Serve, nodes, files,
 hashes, and API health. Use `.\scripts\stop.ps1` to stop only processes
 started by this bridge.
+
+For complete Windows setup and phone-access instructions, see
+[`docs/TAILSCALE.md`](docs/TAILSCALE.md).
 
 ## Development
 
