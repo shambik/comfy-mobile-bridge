@@ -67,10 +67,13 @@ def default_steps(engine: str) -> int:
 
 
 def required_nodes(engine: str, encoder: str) -> set[str]:
-    nodes = {"UNETLoader", "VAELoader", "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo"}
+    nodes = {
+        "UNETLoader", "VAELoader", "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo",
+        "ResolutionSelector", "ComfyMathExpression",
+    }
     nodes.add("ClipProjLoader" if encoder == "clipproj" else "CLIPLoader")
     if engine == "turbo":
-        nodes |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"}
+        nodes |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
     else:
         nodes.add("KSamplerSelect")
     if engine == "spectrum":

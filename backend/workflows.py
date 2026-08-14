@@ -5,12 +5,39 @@ from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      VIDEO_VAE)
 
 FPS = 24
+H3_DURATION_EXPRESSION = "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17"
+H3_ASPECT_RATIOS = {
+    "1:1 (Square)": 1.0,
+    "16:9 (Widescreen)": 16 / 9,
+    "9:16 (Portrait Widescreen)": 9 / 16,
+    "4:3 (Standard)": 4 / 3,
+    "3:4 (Portrait Standard)": 3 / 4,
+}
 
 
 def h3_frame_count(duration: float) -> int:
     """Round requested seconds up to H3's 17k+5 frame grid."""
     frames = max(5, round(duration * FPS))
     return frames + (5 - frames % 17) % 17
+
+
+def _resolution_selector(width: int, height: int) -> dict:
+    ratio = width / height
+    aspect = min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
+    return {
+        "7": {"class_type": "ResolutionSelector", "inputs": {
+            "aspect_ratio": aspect, "megapixels": width * height / 1_000_000, "multiple": 32,
+        }},
+    }
+
+
+def _duration_selector(duration: float) -> dict:
+    return {
+        "105": {"class_type": "PrimitiveFloat", "inputs": {"value": duration}},
+        "106": {"class_type": "ComfyMathExpression", "inputs": {
+            "values.a": ["105", 0], "expression": H3_DURATION_EXPRESSION,
+        }},
+    }
 
 
 def _clip_loader(encoder: str, reference: bool = False) -> dict:
@@ -73,13 +100,16 @@ def turbo_workflow(
     turbo_profile: str = "v1",
 ):
     length = h3_frame_count(duration)
-    nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
+    nodes = _common_decode("104", "17", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
+        **_resolution_selector(width, height),
+        **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "18": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {"model": ["6", 0], "lora_name": TURBO_LORAS[turbo_profile], "strength": 1.0, "low_vram": True}},
+        "17": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["18", 0], "shift_video": 12.0, "shift_audio": 3.0}},
         "19": {"class_type": "MiniMaxH3TurboSampler", "inputs": {}},
-        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["18", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": width, "height": height, "length": length}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["17", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": ["7", 0], "height": ["7", 1], "length": ["106", 1]}},
     })
     if first_frame_name:
         nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
@@ -105,10 +135,12 @@ def standard_workflow(
     length = h3_frame_count(duration)
     nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
+        **_resolution_selector(width, height),
+        **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "9": {"class_type": "BasicScheduler", "inputs": {"model": ["6", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": width, "height": height, "length": length}},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": ["7", 0], "height": ["7", 1], "length": ["106", 1]}},
     })
     if first_frame_name:
         nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
@@ -140,6 +172,8 @@ def spectrum_workflow(
     length = h3_frame_count(duration)
     nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
     nodes.update({
+        **_resolution_selector(width, height),
+        **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "17": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
             "model": ["6", 0], "shift_video": 12.0, "shift_audio": 3.0,
@@ -159,7 +193,7 @@ def spectrum_workflow(
         }},
         "19": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "9": {"class_type": "BasicScheduler", "inputs": {"model": ["18", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": width, "height": height, "length": length}},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {"clip": ["13", 0], "vae": ["11", 0], "prompt": prompt, "width": ["7", 0], "height": ["7", 1], "length": ["106", 1]}},
     })
     if first_frame_name:
         nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
@@ -191,12 +225,14 @@ def reference_workflow(
         seed, prefix, encoder, reference=True,
     )
     nodes.update({
+        **_resolution_selector(width, height),
+        **_duration_selector(duration),
         "127": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
         "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
         "137": {"class_type": "LoadImage", "inputs": {"image": image_name}},
         "136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
             "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": prompt,
-            "width": width, "height": height, "length": length, "ref_image_size": "match",
+            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1], "ref_image_size": "match",
              "ref_images": {"ref_image_0": ["137", 0]}}},
     })
     if audio_name:

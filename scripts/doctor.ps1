@@ -61,7 +61,7 @@ try {
     if ($Deep) {
         try {
             $objectInfo = Invoke-RestMethod -Uri "http://127.0.0.1:$($config.ComfyPort)/object_info" -TimeoutSec 20
-            $required = @('MiniMaxH3ImageToVideo', 'MiniMaxH3ReferenceToVideo', 'MiniMaxH3TurboSampler')
+            $required = @('MiniMaxH3ImageToVideo', 'MiniMaxH3ReferenceToVideo', 'MiniMaxH3TurboSampler', 'MiniMaxH3SigmaShift', 'ResolutionSelector', 'ComfyMathExpression')
             foreach ($node in $required) { Add-DoctorCheck "node_$node" ($null -ne $objectInfo.$node) 'loaded' 5 }
         } catch {
             Add-DoctorCheck 'comfy_object_info' $false $_.Exception.Message 5

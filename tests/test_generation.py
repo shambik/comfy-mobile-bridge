@@ -54,8 +54,14 @@ class WorkflowTests(unittest.TestCase):
     def test_turbo_uses_selected_steps_and_resolution(self):
         workflow = turbo_workflow("test", 5, 1, "turbo", steps=6, width=512, height=288)
         self.assertEqual(workflow["9"]["inputs"]["steps"], 6)
-        self.assertEqual(workflow["104"]["inputs"]["width"], 512)
-        self.assertEqual(workflow["104"]["inputs"]["height"], 288)
+        self.assertEqual(workflow["7"]["class_type"], "ResolutionSelector")
+        self.assertEqual(workflow["7"]["inputs"]["aspect_ratio"], "16:9 (Widescreen)")
+        self.assertAlmostEqual(workflow["7"]["inputs"]["megapixels"], 512 * 288 / 1_000_000)
+        self.assertEqual(workflow["104"]["inputs"]["width"], ["7", 0])
+        self.assertEqual(workflow["104"]["inputs"]["height"], ["7", 1])
+        self.assertEqual(workflow["104"]["inputs"]["length"], ["106", 1])
+        self.assertEqual(workflow["106"]["class_type"], "ComfyMathExpression")
+        self.assertEqual(workflow["17"]["class_type"], "MiniMaxH3SigmaShift")
         self.assertEqual(workflow["19"]["class_type"], "MiniMaxH3TurboSampler")
         self.assertEqual(workflow["18"]["class_type"], "MiniMaxH3TurboLoRA")
 
@@ -77,15 +83,15 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["9"]["inputs"]["steps"], 8)
         self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
         self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
-        self.assertEqual(workflow["104"]["inputs"]["length"], 243)
+        self.assertEqual(workflow["104"]["inputs"]["length"], ["106", 1])
 
     def test_reference_uses_selected_standard_profile(self):
         workflow = reference_workflow(
             "test", 5, 3, "reference", "face.png", steps=24, width=736, height=416,
         )
         self.assertEqual(workflow["124"]["inputs"]["steps"], 24)
-        self.assertEqual(workflow["136"]["inputs"]["width"], 736)
-        self.assertEqual(workflow["136"]["inputs"]["height"], 416)
+        self.assertEqual(workflow["136"]["inputs"]["width"], ["7", 0])
+        self.assertEqual(workflow["136"]["inputs"]["height"], ["7", 1])
         self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
 
     def test_reference_audio_uses_official_ref_audio_input(self):

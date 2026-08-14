@@ -325,7 +325,10 @@ class QueueWorker:
             self._update_parent_progress(job, "starting", 0, estimated_total)
         await self.comfy.ensure_started()
         info = await self.comfy.object_info()
-        required = {"UNETLoader", "VAELoader", "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo"}
+        required = {
+            "UNETLoader", "VAELoader", "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo",
+            "ResolutionSelector", "ComfyMathExpression",
+        }
         encoder = job.get("encoder") or "native"
         if encoder == "clipproj":
             required.add("ClipProjLoader")
@@ -348,7 +351,7 @@ class QueueWorker:
             if not ref_path.exists():
                 raise RuntimeError(f"Reference model is not installed: {REF2VA_MODEL}")
         elif job["engine"] == "turbo":
-            required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler"}
+            required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
         elif job["engine"] == "spectrum":
             required |= {"KSamplerSelect", "MiniMaxH3SigmaShift", "SpectrumApplyMiniMaxH3"}
         else:
