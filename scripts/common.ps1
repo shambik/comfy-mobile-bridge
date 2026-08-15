@@ -47,8 +47,8 @@ function Get-BridgeConfig {
     $comfyRoot = if ($comfyRootValue) { Resolve-LocalPath -Value $comfyRootValue -BasePath $runtime } else { Join-Path $runtime 'comfyui' }
     $python = if ($pythonValue) { Resolve-LocalPath -Value $pythonValue -BasePath $runtime } else { Join-Path $runtime 'python\Scripts\python.exe' }
     $models = if ($modelsValue) { Resolve-LocalPath -Value $modelsValue -BasePath $runtime } else { Join-Path $runtime 'models' }
-    if ([string]$local.app.host -ne '127.0.0.1' -or [string]$local.comfy.host -ne '127.0.0.1') {
-        throw 'app.host and comfy.host must be 127.0.0.1'
+    if (([string]$local.app.host -ne '127.0.0.1' -and [string]$local.app.host -ne '0.0.0.0') -or [string]$local.comfy.host -ne '127.0.0.1') {
+        throw 'comfy.host must be 127.0.0.1; app.host may be 127.0.0.1 or 0.0.0.0'
     }
     if ([int]$local.app.port -lt 1 -or [int]$local.comfy.port -lt 1) {
         throw 'app and ComfyUI ports must be positive'

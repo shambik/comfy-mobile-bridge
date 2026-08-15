@@ -20,6 +20,15 @@ The bootstrap downloads pinned ComfyUI, custom nodes, Python packages, FFmpeg
 checks, Tailscale checks, and external model files. It never stores models,
 runtime files, state, logs, or local configuration in Git.
 
+## GPU conflict warning
+
+The app checks for `FortniteClient-Win64-Shipping.exe` and displays a warning
+when Fortnite is running, because it can compete with ComfyUI for GPU memory
+and make a generation appear stuck. The warning does not close Fortnite.
+
+The app's ComfyUI stop control stops only the ComfyUI process tree; it keeps
+the mobile bridge running so the UI and logs remain available.
+
 For Ref2VA Turbo, bootstrap also downloads and verifies the dedicated
 `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` LoRA. If an
 existing ComfyUI installation is configured in `config.local.json`, bootstrap

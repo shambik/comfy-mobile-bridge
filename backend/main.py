@@ -1,5 +1,7 @@
 import asyncio
+import ctypes
 import json
+import os
 import secrets
 import shutil
 import subprocess
@@ -26,6 +28,43 @@ from .security import COOKIE, new_token, require_csrf
 from .worker import QueueWorker
 
 worker = QueueWorker()
+
+
+def fortnite_running() -> bool:
+    """Detect the Windows Fortnite client without touching or stopping it."""
+    if os.name != "nt":
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq FortniteClient-Win64-Shipping.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return "FortniteClient-Win64-Shipping.exe".lower() in result.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def stop_fortnite() -> bool:
+    """Stop only the Fortnite game process; leave the bridge and ComfyUI alone."""
+    if os.name != "nt" or not fortnite_running():
+        return False
+    try:
+        result = subprocess.run(
+            ["taskkill", "/IM", "FortniteClient-Win64-Shipping.exe", "/T", "/F"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def lock_windows() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.user32.LockWorkStation())
+    except (AttributeError, OSError):
+        return False
 
 
 @asynccontextmanager
@@ -69,6 +108,7 @@ def clipproj_ready() -> bool:
 
 
 def public_health():
+    conflict = fortnite_running()
     return {
         "ok": True,
         "version": APP_VERSION,
@@ -86,6 +126,8 @@ def public_health():
         "reference_turbo_ready": (MODELS / "loras" / REF2VA_TURBO_LORA).exists(),
         "active_job": worker.current_job,
         "active_sequence": worker.current_sequence,
+        "gpu_conflict": conflict,
+        "gpu_conflict_process": "Fortnite" if conflict else None,
     }
 
 
@@ -147,6 +189,23 @@ async def stop_comfy(request: Request):
     require_csrf(request)
     await worker.comfy.shutdown()
     return await comfy_status()
+
+
+@app.post("/api/gpu/fortnite/stop")
+async def stop_fortnite_route(request: Request):
+    require_csrf(request)
+    stopped = await asyncio.to_thread(stop_fortnite)
+    if not stopped and fortnite_running():
+        raise HTTPException(503, "Fortnite could not be closed")
+    return {"stopped": stopped, **public_health()}
+
+
+@app.post("/api/system/lock")
+async def lock_system(request: Request):
+    require_csrf(request)
+    if not await asyncio.to_thread(lock_windows):
+        raise HTTPException(503, "Windows could not be locked")
+    return {"locked": True}
 
 
 @app.get("/api/jobs")
@@ -595,6 +654,14 @@ async def video(job_id: str):
     path = Path(job["output_path"])
     if not path.exists():
         raise HTTPException(404, "Video file is missing")
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@app.get("/api/artifacts/final-video")
+async def final_video_artifact():
+    path = ROOT / "state" / "e2e_belly_of_the_beast" / "belly_of_the_beast_final.mp4"
+    if not path.exists():
+        raise HTTPException(404, "The final video has not been created")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 
 
