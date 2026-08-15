@@ -522,7 +522,9 @@ class QueueWorker:
             video = find_video(prefix)
             if not video:
                 raise RuntimeError("ComfyUI completed but no MP4 was found")
-            probe = await asyncio.to_thread(media_probe, video)
+            probe = await asyncio.to_thread(
+                media_probe, video, require_audio=not bool(job.get("no_audio"))
+            )
 
             if job.get("sequence_id") and job["sequence_index"] < job["sequence_total"]:
                 frame_name = f"sequence_{job['sequence_id']}_shot{job['sequence_index']:02d}_last.png"

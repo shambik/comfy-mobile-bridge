@@ -1,0 +1,3 @@
+display_name: "E2E Music Video"
+short_description: "Build music videos with AGY"
+default_prompt: "Create a music video from my song, lyrics, style, and references using the E2E production workflow."
