@@ -13,22 +13,27 @@ Use this skill as a portable production pipeline. Keep creative decisions explic
 - Confirm the production mode: fully sequential, segmented sequential, independent shots, hybrid, or one continuous clip.
 - Support T2V and I2V per shot. Keep R2V out of the default pipeline until explicitly enabled.
 - Use AGY for audio/lyric analysis, reference planning, frame selection, video QC, and continuity decisions.
+- Conduct AGY consultation as a visible multi-round producer dialogue: show AGY's useful response to the user, state Codex's counterproposal, then ask AGY to review the revision. Never hide the exchange in a terminal and present only a summary.
+- Save AGY prompts, responses, Codex decisions, and the final agreement in a production transcript.
 - Treat a completed ComfyUI job as technically successful only; AGY must approve the visual result before dependent shots continue.
 - Treat generated lettering as unreliable. Avoid signs, captions, logos, labels, and screens unless intentionally required; add required readable text during post-production whenever possible.
 - Preserve checkpoints so a run can resume without regenerating approved shots.
 - Keep generated clips silent unless explicitly requested. Add the original song only after video assembly.
+- Do not create reference images or start generation before the user approves the treatment, continuity strategy, and shot manifest. Draft references must remain clearly labeled.
 
 ## Workflow
 
 1. Validate environment and inputs. Use `scripts/analyze_media.py` for media metadata and frame extraction. Ask the user for anything missing.
-2. Ask AGY to analyze the song, lyrics, BPM, beat grid, sections, lyric timing, energy changes, and visual opportunities.
-3. Build and confirm a creative treatment, character/location bible, continuity map, and shot manifest.
-4. Have AGY review references and create face-visible anchors, location frames, props, wardrobe, and lighting references.
-5. Select T2V for fresh visual resets and I2V for continuity. For each I2V shot, AGY chooses between a prior last frame, a corrected extracted frame, or a fixed anchor.
-6. Generate shots with `scripts/e2e_runner.py`. The runner submits jobs, extracts frames, records state, and can be wrapped by an AGY QC adapter.
-7. Reject and regenerate shots that fail identity, action, lyric, composition, motion, artifact, continuity, or text-legibility review. Inspect every visible sign, caption, logo, label, and screen for gibberish or unwanted lettering.
-8. Concatenate approved silent clips with `scripts/assemble_video.py`, then add the original song and trim the final output to the song duration. Validate streams and duration.
-9. Deliver the final video, silent master, shot clips, prompts, references, AGY reports, manifest, and technical report.
+2. Ask AGY to analyze the song, lyrics, BPM, beat grid, sections, lyric timing, energy changes, and visual opportunities. Show the useful response to the user.
+3. Have Codex propose the treatment, character/location bible, continuity map, and shot manifest. Send it to AGY for critique, show that critique, then send a Codex revision back to AGY for approval. Repeat until approved or the user changes direction.
+4. Show the final agreed treatment and manifest to the user and wait for explicit approval. Do not create references or start ComfyUI generation before approval.
+5. After approval, have AGY review the reference plan. Generate references one at a time, show each to the user, record approval/rejection, and use numbered attempts for replacements.
+6. Select T2V for fresh visual resets and I2V for continuity, unless the approved manifest explicitly restricts the project to I2V. For each I2V shot, AGY chooses the prior last frame, a corrected extracted frame, or a fixed anchor.
+7. Generate shots with `scripts/e2e_runner.py`. The runner submits jobs, extracts frames, records state, and can be wrapped by an AGY QC adapter.
+8. After every completed shot, have AGY inspect identity, action, lyric alignment, composition, motion, artifacts, continuity, and text legibility. Do not continue dependent shots until approved.
+9. Reject and regenerate failed shots with numbered attempts; never overwrite approved artifacts.
+10. Concatenate approved silent clips with `scripts/assemble_video.py`, then add the original song and trim the final output to the song duration. Validate streams and duration.
+11. Deliver the final video, silent master, shot clips, prompts, references, AGY transcript/reports, manifest, and technical report.
 
 ## Default generation policy
 

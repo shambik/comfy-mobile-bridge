@@ -52,8 +52,12 @@ def _as_int(value: Any, default: int) -> int:
 
 def _local_host(value: Any, name: str) -> str:
     host = str(value)
+    # The bridge may bind on all interfaces so a phone can reach it over
+    # Tailscale/LAN. ComfyUI itself remains loopback-only.
+    if name == "app.host" and host == "0.0.0.0":
+        return host
     if host != "127.0.0.1":
-        raise RuntimeError(f"{name} must be 127.0.0.1")
+        raise RuntimeError(f"{name} must be 127.0.0.1 (or app.host may be 0.0.0.0)")
     return host
 
 

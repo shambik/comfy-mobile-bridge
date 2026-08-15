@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import subprocess
 import time
 from pathlib import Path
@@ -35,14 +36,20 @@ def run_ffmpeg(*args: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
     STATE.mkdir(parents=True, exist_ok=True)
     session = requests.Session()
     token = session.get(f"{BASE}/api/session", timeout=30).json()["csrf_token"]
     headers = {"x-csrf-token": token}
-    previous = INITIAL
-    video_files: list[Path] = []
+    existing = sorted(STATE.glob("shot_*.mp4")) if args.resume else []
+    completed_count = len(existing)
+    previous = STATE / f"shot_{completed_count:02d}_last.jpg" if completed_count else INITIAL
+    video_files: list[Path] = existing.copy()
 
-    for index, (duration, direction) in enumerate(SHOTS, 1):
+    for index in range(completed_count + 1, len(SHOTS) + 1):
+        duration, direction = SHOTS[index - 1]
         mp = "0.7 MP" if duration == 10 else "0.5 MP"
         resolution = "1120x640" if duration == 10 else "960x544"
         prompt = (
@@ -83,7 +90,7 @@ def main() -> None:
             print(json.dumps({"shot": index, "status": job["status"], "phase": job.get("phase"), "step": job.get("step"), "total": job.get("total_steps")}), flush=True)
             if job["status"] == "completed":
                 break
-            if job["status"] == "failed":
+            if job["status"] in {"failed", "canceled", "cancelled"}:
                 raise RuntimeError(job.get("error") or f"shot {index} failed")
             time.sleep(15)
 

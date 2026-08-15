@@ -22,10 +22,12 @@ class ComfyClient:
 
     async def ready(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                for endpoint in ("/system_stats", "/object_info", "/models", "/queue"):
-                    response = await client.get(COMFY_URL + endpoint)
-                    response.raise_for_status()
+            # /object_info and /models can be very slow while custom nodes or
+            # large H3 models are loading.  Health reporting must answer a
+            # simple question: is the ComfyUI server responsive?
+            async with httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(COMFY_URL + "/system_stats")
+                response.raise_for_status()
             return True
         except Exception:
             return False
@@ -159,14 +161,35 @@ class ComfyClient:
             pass
 
     async def shutdown(self):
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                await asyncio.to_thread(self.process.wait, 15)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-        if self.log_handle:
-            self.log_handle.close()
+        process = self.process
+        self.process = None
+        try:
+            if process and process.poll() is None:
+                if os.name == "nt":
+                    # ComfyUI/custom nodes can create a child process that owns
+                    # the HTTP listener.  Terminating only the tracked parent
+                    # leaves that child alive and makes the next start attach
+                    # to the wrong instance.  /T is scoped to this exact PID.
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        check=False,
+                    )
+                else:
+                    process.terminate()
+                    try:
+                        await asyncio.to_thread(process.wait, 15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+            if process and process.poll() is None:
+                await asyncio.to_thread(process.wait, 5)
+        finally:
+            if self.log_handle:
+                self.log_handle.close()
+                self.log_handle = None
 
 
 def find_video(prefix: str) -> Path | None:

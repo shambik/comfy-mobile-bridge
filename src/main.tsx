@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Copy, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Copy, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing'
@@ -171,6 +171,8 @@ function App() {
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
+  const [gpuConflict, setGpuConflict] = useState(false)
+  const [gpuBusy, setGpuBusy] = useState(false)
   const [noAudio, setNoAudio] = useState(false)
   const [selectedResults, setSelectedResults] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
@@ -192,6 +194,7 @@ function App() {
       setClipprojReady(data.clipproj_ready)
       setTurboV4Ready(data.turbo_v4_ready)
       setReferenceTurboReady(data.reference_turbo_ready)
+      setGpuConflict(Boolean(data.gpu_conflict))
       return data.csrf_token
     } catch {
       setCsrf('')
@@ -204,7 +207,7 @@ function App() {
       const response = await fetch('/api/jobs', { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
-        setJobs(data.jobs); setSequences(data.sequences || []); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready)
+        setJobs(data.jobs); setSequences(data.sequences || []); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready); setGpuConflict(Boolean(data.gpu_conflict))
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
@@ -324,6 +327,33 @@ function App() {
     } finally {
       setComfyBusy(false)
     }
+  }
+
+  const closeFortnite = async () => {
+    if (gpuBusy || !window.confirm('Close Fortnite to free the GPU for ComfyUI?')) return
+    setGpuBusy(true)
+    try {
+      const sessionToken = csrf || await loadSession()
+      if (!sessionToken) throw new Error('The server session is not ready')
+      const response = await fetch('/api/gpu/fortnite/stop', { method: 'POST', headers: { 'X-CSRF-Token': sessionToken } })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'Fortnite could not be closed')
+      setGpuConflict(Boolean(data.gpu_conflict))
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Fortnite could not be closed')
+    } finally { setGpuBusy(false) }
+  }
+
+  const lockComputer = async () => {
+    if (!window.confirm('Lock this Windows PC now?')) return
+    try {
+      const sessionToken = csrf || await loadSession()
+      if (!sessionToken) throw new Error('The server session is not ready')
+      const response = await fetch('/api/system/lock', { method: 'POST', headers: { 'X-CSRF-Token': sessionToken } })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'The PC could not be locked')
+    } catch (e) { setError(e instanceof Error ? e.message : 'The PC could not be locked') }
   }
 
   const selectMode = (next: Mode) => {
@@ -455,10 +485,12 @@ function App() {
       <div className="topbar-actions">
         <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
+        <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
         <button className="icon-button" onClick={() => { if (page === 'comfy') void loadComfy(); else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
     {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onRefresh={() => { void loadComfy() }} /> : <>
 
     <section className="composer">
