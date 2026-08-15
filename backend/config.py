@@ -82,10 +82,6 @@ COMFY_PORT = _port(os.environ.get("H3_COMFY_PORT", comfy_config.get("port")), 81
 COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
 
 STATE = ROOT / "state"
-INPUT = STATE / "input"
-OUTPUT = STATE / "output"
-TEMP = STATE / "temp"
-USER = STATE / "user"
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
 DB_PATH = STATE / "jobs.sqlite3"
@@ -103,6 +99,13 @@ COMFY_PYTHON = _as_path(
 MODELS = _as_path(
     comfy_config.get("models"), RUNTIME_ROOT / "models", relative_to=RUNTIME_ROOT
 )
+# Use the existing ComfyUI runtime directories by default.  The bridge keeps
+# its own database/log/sequence state above, while ComfyUI shares the same
+# user, input, output, and temp locations as a direct ComfyUI launch.
+INPUT = _as_path(comfy_config.get("input"), COMFY_CODE / "input", relative_to=COMFY_CODE)
+OUTPUT = _as_path(comfy_config.get("output"), COMFY_CODE / "output", relative_to=COMFY_CODE)
+TEMP = _as_path(comfy_config.get("temp"), COMFY_CODE / "temp", relative_to=COMFY_CODE)
+USER = _as_path(comfy_config.get("user"), COMFY_CODE / "user", relative_to=COMFY_CODE)
 SPECTRUM_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-Spectrum-MiniMax-H3"
 CLIPPROJ_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-ClipProj"
 CLIPPROJ_NODE_COMMIT = "ca9b325e83cb02cb5e652570569c6f3f20fee342"
@@ -111,6 +114,7 @@ TURBO_LORAS = {
     "v1": "minimax_h3_turbo_4step_ema_ckpt850.safetensors",
     "v4": "minimax_h3_turbo_v4_step600_ema.safetensors",
 }
+REF2VA_TURBO_LORA = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 TURBO_LORA = TURBO_LORAS["v1"]
 FL2VA_MODEL = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 REF2VA_MODEL = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"

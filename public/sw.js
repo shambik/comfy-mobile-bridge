@@ -1,4 +1,4 @@
-const CACHE = 'h3-shell-v2'
+const CACHE = 'h3-shell-v3'
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(['/', '/manifest.webmanifest', '/h3-icon.svg']))))
 self.addEventListener('activate', event => event.waitUntil(Promise.all([
   caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))),

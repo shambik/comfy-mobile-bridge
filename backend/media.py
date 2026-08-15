@@ -52,7 +52,7 @@ def assemble_clips(clips: list[Path], output: Path) -> dict:
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required for final assembly")
 
-    probes = [media_probe(path) for path in clips]
+    probes = [media_probe(path, require_audio=False) for path in clips]
     durations = [_duration(probe) for probe in probes]
     first_stream = _video_stream(probes[0])
     width = int(first_stream.get("width") or 0)
@@ -62,6 +62,10 @@ def assemble_clips(clips: list[Path], output: Path) -> dict:
 
     inputs: list[str] = []
     filters: list[str] = []
+    has_any_audio = any(
+        any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
+        for probe in probes
+    )
     for index, (clip, duration) in enumerate(zip(clips, durations)):
         inputs += ["-i", str(clip)]
         filters.append(
@@ -70,29 +74,38 @@ def assemble_clips(clips: list[Path], output: Path) -> dict:
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
             f"settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v{index}]"
         )
-        filters.append(
-            f"[{index}:a]aresample=48000,"
-            f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
-            f"asetpts=PTS-STARTPTS[a{index}]"
-        )
+        if has_any_audio:
+            has_audio = any(stream.get("codec_type") == "audio" for stream in probes[index].get("streams", []))
+            audio_source = f"[{index}:a]" if has_audio else f"anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6f},"
+            filters.append(
+                f"{audio_source}aresample=48000,"
+                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                f"asetpts=PTS-STARTPTS[a{index}]"
+            )
 
-    concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(clips)))
-    filters.append(f"{concat_inputs}concat=n={len(clips)}:v=1:a=1[vout][aout]")
+    if has_any_audio:
+        concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(clips)))
+        filters.append(f"{concat_inputs}concat=n={len(clips)}:v=1:a=1[vout][aout]")
+    else:
+        concat_inputs = "".join(f"[v{index}]" for index in range(len(clips)))
+        filters.append(f"{concat_inputs}concat=n={len(clips)}:v=1:a=0[vout]")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", *inputs,
         "-filter_complex", ";".join(filters),
-        "-map", "[vout]", "-map", "[aout]",
+        "-map", "[vout]",
         "-c:v", "libx264", "-preset", "medium", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
         "-movflags", "+faststart", "-y", str(output),
     ]
+    if has_any_audio:
+        command[command.index("-movflags"):command.index("-movflags")] = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
     result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
     if result.returncode:
         raise RuntimeError("Final video assembly failed: " + result.stderr[-3000:])
 
-    final_probe = media_probe(output)
+    final_probe = media_probe(output, require_audio=False)
     return {
         "source_count": len(clips),
         "source_durations": durations,

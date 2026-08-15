@@ -91,6 +91,17 @@
       "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
     },
     {
+      "name": "Ref2VA Turbo 4-step LoRA",
+      "source_repository": "https://huggingface.co/lightx2v/Minimax-h3-Turbo",
+      "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1",
+      "source_path": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "filename": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "target_directory": "loras",
+      "bytes": 1956193000,
+      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
+      "license_reference": "https://huggingface.co/lightx2v/Minimax-h3-Turbo"
+    },
+    {
       "name": "ClipProj learned projection",
       "source_repository": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
       "revision": "ef89d0fc87ec004adc3330641dd6acb79bd785a7",

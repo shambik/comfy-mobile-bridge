@@ -46,13 +46,21 @@ class ComfyClient:
             "--temp-directory", str(TEMP),
             "--user-directory", str(USER),
             "--database-url", "sqlite:///" + str((USER / "comfyui.db").resolve()).replace("\\", "/"),
-            "--disable-auto-launch", "--disable-api-nodes", "--lowvram", "--preview-method", "none",
+            "--disable-auto-launch", "--disable-api-nodes",
+            "--reserve-vram", "0.9", "--enable-dynamic-vram", "--async-offload", "2",
+            "--preview-method", "none",
             "--log-stdout",
         ]
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        child_env = os.environ.copy()
+        # ComfyUI custom nodes may emit Unicode (including emoji) while
+        # loading. Windows can otherwise inherit the user's legacy code page
+        # and crash the child while writing its own diagnostic log.
+        child_env.setdefault("PYTHONUTF8", "1")
+        child_env.setdefault("PYTHONIOENCODING", "utf-8")
         self.process = subprocess.Popen(
             command, cwd=COMFY_CODE, stdout=self.log_handle, stderr=subprocess.STDOUT,
-            creationflags=flags,
+            creationflags=flags, env=child_env,
         )
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
@@ -166,7 +174,7 @@ def find_video(prefix: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def media_probe(path: Path) -> dict:
+def media_probe(path: Path, require_audio: bool = True) -> dict:
     ffprobe = shutil.which("ffprobe")
     ffmpeg = shutil.which("ffmpeg")
     if not ffprobe or not ffmpeg:
@@ -182,7 +190,7 @@ def media_probe(path: Path) -> dict:
     streams = payload.get("streams", [])
     if not any(s.get("codec_type") == "video" for s in streams):
         raise RuntimeError("Output has no video stream")
-    if not any(s.get("codec_type") == "audio" for s in streams):
+    if require_audio and not any(s.get("codec_type") == "audio" for s in streams):
         raise RuntimeError("Output has no audio stream")
     decode = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-f", "null", "-"], capture_output=True, text=True, timeout=300)
     if decode.returncode:

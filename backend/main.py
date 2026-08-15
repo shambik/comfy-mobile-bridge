@@ -17,7 +17,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, INPUT, LOGS, MODELS,
-                     REF2VA_MODEL, REFERENCE_10S_MARKER, ROOT,
+                     REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, get_job, get_sequence, init_db, list_jobs,
                  list_sequences, next_position, now_iso)
@@ -83,6 +83,7 @@ def public_health():
         "clipproj_ready": clipproj_ready(),
         "clipproj_version": CLIPPROJ_NODE_COMMIT[:12],
         "turbo_v4_ready": (MODELS / "loras" / TURBO_LORAS["v4"]).exists(),
+        "reference_turbo_ready": (MODELS / "loras" / REF2VA_TURBO_LORA).exists(),
         "active_job": worker.current_job,
         "active_sequence": worker.current_sequence,
     }
@@ -222,6 +223,41 @@ async def save_audio(upload: UploadFile | None) -> tuple[str | None, str | None]
     return str(target), name
 
 
+async def save_video(upload: UploadFile | None) -> tuple[str | None, str | None]:
+    if not upload or not upload.filename:
+        return None, None
+    allowed = {
+        "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+        "video/x-matroska": ".mkv", "video/mpeg": ".mpeg",
+    }
+    if upload.content_type not in allowed:
+        raise HTTPException(400, "Only MP4, MOV, WebM or MKV videos are allowed")
+    data = await upload.read(500 * 1024 * 1024 + 1)
+    if len(data) > 500 * 1024 * 1024:
+        raise HTTPException(400, "Reference video is larger than 500 MB")
+    name = f"reference_video_{uuid.uuid4().hex}{allowed[upload.content_type]}"
+    target = INPUT / name
+    target.write_bytes(data)
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        target.unlink(missing_ok=True)
+        raise HTTPException(503, "ffprobe is required to validate reference video")
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type",
+             "-of", "json", str(target)], capture_output=True, text=True, timeout=60,
+        )
+        payload = json.loads(result.stdout) if result.returncode == 0 else {}
+        duration = float(payload.get("format", {}).get("duration") or 0)
+        has_video = any(stream.get("codec_type") == "video" for stream in payload.get("streams", []))
+        if not has_video or not 2 <= duration <= 15:
+            raise ValueError
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        target.unlink(missing_ok=True)
+        raise HTTPException(400, "Reference video must contain video and be between 2 and 15 seconds")
+    return str(target), name
+
+
 def parse_prompts(raw: str, batch: bool) -> list[str]:
     raw = raw.strip()
     if not raw:
@@ -243,7 +279,10 @@ async def create_jobs(
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
+    reference_images: list[UploadFile] = File(default=[]),
+    reference_videos: list[UploadFile] = File(default=[]),
     reference_audio: UploadFile | None = File(None),
+    no_audio: bool = Form(False),
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
 ):
     require_csrf(request)
@@ -263,14 +302,24 @@ async def create_jobs(
         raise HTTPException(400, "Text mode does not accept reference media")
     if mode == "frames" and (image or not first_frame or not last_frame):
         raise HTTPException(400, "Combined frame mode requires an opening and a closing image")
-    if mode in ("opening", "closing", "reference") and not image:
+    if mode in ("opening", "closing") and not image:
         raise HTTPException(400, "This mode requires one image")
+    if mode == "reference" and not (image or reference_images or reference_videos):
+        raise HTTPException(400, "Reference mode requires at least one image or video")
     if mode in ("opening", "closing", "reference") and (first_frame or last_frame):
         raise HTTPException(400, "This mode accepts one image only")
+    if mode != "reference" and (reference_images or reference_videos):
+        raise HTTPException(400, "Reference images and videos are available in reference mode only")
+    if len(reference_images) + (1 if image and mode == "reference" else 0) > 9:
+        raise HTTPException(400, "Reference mode supports up to 9 images")
+    if len(reference_videos) > 3:
+        raise HTTPException(400, "Reference mode supports up to 3 videos")
     if mode != "reference" and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
-    if generation.turbo_profile == "v4" and not (MODELS / "loras" / TURBO_LORAS["v4"]).exists():
+    if mode != "reference" and generation.turbo_profile == "v4" and not (MODELS / "loras" / TURBO_LORAS["v4"]).exists():
         raise HTTPException(409, "Turbo v4 is not installed yet")
+    if mode == "reference" and generation.engine == "turbo" and not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
+        raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
     if mode == "reference" and duration > 5 and not REFERENCE_10S_MARKER.exists():
         raise HTTPException(409, "Reference mode above 5 seconds is not ready")
     prompts = parse_prompts(prompt, batch)
@@ -281,11 +330,25 @@ async def create_jobs(
     first_frame_path = first_frame_name = None
     last_frame_path = last_frame_name = None
     saved_paths: list[str] = []
+    reference_image_names: list[str] = []
+    reference_video_names: list[str] = []
     try:
         if image:
             input_path, input_name = await save_image(image)
             if input_path:
                 saved_paths.append(input_path)
+                if mode == "reference" and input_name:
+                    reference_image_names.append(input_name)
+        for reference_image in reference_images:
+            path, name = await save_image(reference_image)
+            if path and name:
+                saved_paths.append(path)
+                reference_image_names.append(name)
+        for reference_video in reference_videos:
+            path, name = await save_video(reference_video)
+            if path and name:
+                saved_paths.append(path)
+                reference_video_names.append(name)
         if reference_audio:
             reference_audio_path, reference_audio_name = await save_audio(reference_audio)
             if reference_audio_path:
@@ -342,14 +405,16 @@ async def create_jobs(
             else:
                 db.execute("""INSERT INTO jobs
                   (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,seed,status,position,input_path,input_name,
+                   reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?)""",
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (job_id, text, mode, duration, generation.engine, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height,
                    str(secrets.randbits(64)), position + index,
-                   input_path, input_name, reference_audio_path, reference_audio_name,
+                   input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
+                   reference_audio_path, reference_audio_name,
                    first_frame_path, first_frame_name,
                    last_frame_path, last_frame_name, now, now))
             created.append(job_id)

@@ -44,9 +44,6 @@ def normalize_generation_settings(
     resolved_engine = engine or ("standard" if mode == "reference" else "turbo")
     if resolved_engine not in ("turbo", "standard", "spectrum"):
         raise ValueError("Engine must be turbo, standard or spectrum")
-    if mode == "reference" and resolved_engine == "turbo":
-        raise ValueError("Reference mode is available with the standard or spectrum engine only")
-
     if resolved_engine == "turbo":
         step_min, step_max, default_steps = (*TURBO_STEP_RANGE, 4)
     elif resolved_engine == "spectrum":
@@ -71,6 +68,8 @@ def normalize_generation_settings(
         raise ValueError("Turbo profile is only available with the turbo engine")
     if resolved_engine == "turbo" and resolved_turbo_profile == "v4" and resolved_steps > 8:
         raise ValueError("Turbo v4 supports 4 to 8 useful steps")
+    if mode == "reference" and resolved_engine == "turbo" and resolved_steps != 4:
+        raise ValueError("Ref2VA Turbo uses exactly 4 steps")
     if resolved_engine != "turbo":
         resolved_turbo_profile = "v1"
     return GenerationSettings(

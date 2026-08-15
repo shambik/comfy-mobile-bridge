@@ -1,7 +1,7 @@
 from copy import deepcopy
 
 from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
-                     FL2VA_MODEL, REF2VA_MODEL, TEXT_ENCODER, TURBO_LORAS,
+                     FL2VA_MODEL, REF2VA_MODEL, REF2VA_TURBO_LORA, TEXT_ENCODER, TURBO_LORAS,
                      VIDEO_VAE)
 
 FPS = 24
@@ -26,7 +26,10 @@ def _resolution_selector(width: int, height: int) -> dict:
     aspect = min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
     return {
         "7": {"class_type": "ResolutionSelector", "inputs": {
-            "aspect_ratio": aspect, "megapixels": width * height / 1_000_000, "multiple": 32,
+            # ResolutionSelector defines 1.0 MP as 1024*1024 pixels.
+            # Keep the app's generated API workflow in the same unit as the
+            # saved ComfyUI workflow instead of converting through decimal MP.
+            "aspect_ratio": aspect, "megapixels": width * height / (1024 * 1024), "multiple": 32,
         }},
     }
 
@@ -68,21 +71,25 @@ def _common_decode(
     prefix: str,
     encoder: str = "native",
     reference: bool = False,
+    include_audio: bool = True,
 ):
     nodes = {
         "11": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
         "13": _clip_loader(encoder, reference=reference),
         "15": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "16": {"class_type": "BasicGuider", "inputs": {"model": [model_node, 0], "conditioning": [condition_node, 0]}},
-        "23": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["14", 0], "vae": ["24", 0]}},
-        "24": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
         "10": {"class_type": "VAEDecode", "inputs": {"samples": ["14", 0], "vae": ["11", 0]}},
         "14": {"class_type": "SamplerCustomAdvanced", "inputs": {
             "noise": ["15", 0], "guider": ["16", 0], "sampler": [sampler_node["id"], 0],
             "sigmas": [sampler_node["scheduler"], 0], "latent_image": [condition_node, 1]}},
-        "91": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "fps": FPS, "audio": ["23", 0], "bit_depth": 8}},
+        "91": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "fps": FPS, "bit_depth": 8}},
         "92": {"class_type": "SaveVideo", "inputs": {"video": ["91", 0], "filename_prefix": prefix, "format": "mp4", "codec": "auto"}},
     }
+    if include_audio or reference:
+        nodes["24"] = {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}}
+    if include_audio:
+        nodes["23"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["14", 0], "vae": ["24", 0]}}
+        nodes["91"]["inputs"]["audio"] = ["23", 0]
     return nodes
 
 
@@ -98,9 +105,10 @@ def turbo_workflow(
     height: int = 416,
     encoder: str = "native",
     turbo_profile: str = "v1",
+    include_audio: bool = True,
 ):
     length = h3_frame_count(duration)
-    nodes = _common_decode("104", "17", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
+    nodes = _common_decode("104", "17", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
         **_resolution_selector(width, height),
         **_duration_selector(duration),
@@ -131,9 +139,10 @@ def standard_workflow(
     width: int = 736,
     height: int = 416,
     encoder: str = "native",
+    include_audio: bool = True,
 ):
     length = h3_frame_count(duration)
-    nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder)
+    nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
         **_resolution_selector(width, height),
         **_duration_selector(duration),
@@ -162,6 +171,7 @@ def spectrum_workflow(
     width: int = 736,
     height: int = 416,
     encoder: str = "native",
+    include_audio: bool = True,
 ):
     """Native H3 with the optional Spectrum v0.2.5 acceleration node.
 
@@ -170,7 +180,7 @@ def spectrum_workflow(
     which is one of Spectrum's supported sampler paths.
     """
     length = h3_frame_count(duration)
-    nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder)
+    nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
         **_resolution_selector(width, height),
         **_duration_selector(duration),
@@ -216,29 +226,58 @@ def reference_workflow(
     height: int = 416,
     spectrum: bool = False,
     encoder: str = "native",
+    turbo: bool = False,
+    image_names: list[str] | None = None,
+    video_names: list[str] | None = None,
+    include_audio: bool = True,
 ):
     length = h3_frame_count(duration)
-    model_node = "129" if spectrum else "127"
-    sampler_node = "130" if spectrum else "123"
+    image_names = image_names or ([image_name] if image_name else [])
+    video_names = video_names or []
+    turbo = bool(turbo)
+    model_node = "129" if turbo else ("129" if spectrum else "127")
+    sampler_node = "130" if turbo else ("130" if spectrum else "123")
     nodes = _common_decode(
         "136", model_node, {"id": sampler_node, "scheduler": "124"},
-        seed, prefix, encoder, reference=True,
+        seed, prefix, encoder, reference=True, include_audio=include_audio,
     )
     nodes.update({
         **_resolution_selector(width, height),
         **_duration_selector(duration),
         "127": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
-        "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
-        "137": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "beta" if turbo else "simple", "steps": steps, "denoise": 1.0}},
         "136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
             "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": prompt,
             "width": ["7", 0], "height": ["7", 1], "length": ["106", 1], "ref_image_size": "match",
-             "ref_images": {"ref_image_0": ["137", 0]}}},
+             "ref_images": {}}},
     })
+    for index, name in enumerate(image_names[:9]):
+        node_id = str(137 + index)
+        nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        nodes["136"]["inputs"]["ref_images"][f"ref_image_{index}"] = [node_id, 0]
+    for index, name in enumerate(video_names[:3]):
+        load_id = str(150 + index * 2)
+        component_id = str(151 + index * 2)
+        nodes[load_id] = {"class_type": "LoadVideo", "inputs": {"file": name}}
+        nodes[component_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [load_id, 0]}}
+        nodes["136"]["inputs"].setdefault("ref_videos", {})[f"ref_video_{index}"] = [component_id, 0]
+        if include_audio:
+            nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
     if audio_name:
         nodes["138"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
         nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["138", 0]}
-    if spectrum:
+    if turbo:
+        nodes.update({
+            "128": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
+                "model": ["127", 0], "lora_name": REF2VA_TURBO_LORA,
+                "strength": 1.0, "low_vram": True,
+            }},
+            "129": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
+                "model": ["128", 0], "shift_video": 12.0, "shift_audio": 3.0,
+            }},
+            "130": {"class_type": "MiniMaxH3TurboSampler", "inputs": {}},
+        })
+    elif spectrum:
         nodes.update({
             "128": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
                 "model": ["127", 0], "shift_video": 12.0, "shift_audio": 3.0,

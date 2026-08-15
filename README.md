@@ -20,6 +20,12 @@ The bootstrap downloads pinned ComfyUI, custom nodes, Python packages, FFmpeg
 checks, Tailscale checks, and external model files. It never stores models,
 runtime files, state, logs, or local configuration in Git.
 
+For Ref2VA Turbo, bootstrap also downloads and verifies the dedicated
+`minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` LoRA. If an
+existing ComfyUI installation is configured in `config.local.json`, bootstrap
+preserves its root, Python, models, and media-directory paths instead of
+switching them to the portable layout.
+
 ## Requirements
 
 - Windows 10/11 x64.

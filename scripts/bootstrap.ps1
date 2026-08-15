@@ -9,6 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repo = Get-RepoRoot
+$runtimeRootProvided = [bool]$RuntimeRoot
 
 try {
     if (-not $AcceptLicenses -and -not $DryRun) {
@@ -112,12 +113,37 @@ try {
         Install-VerifiedDownload -Url $url -Destination $destination -ExpectedBytes ([int64]$model.bytes) -ExpectedSha256 ([string]$model.sha256)
     }
 
+    $ref2vaTurbo = $models.models | Where-Object { $_.filename -eq 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors' }
+    if (-not $ref2vaTurbo) { throw 'The model manifest is missing the Ref2VA Turbo LoRA entry.' }
+    $ref2vaTurboPath = Join-Path (Join-Path $config.Models ([string]$ref2vaTurbo.target_directory)) ([string]$ref2vaTurbo.filename)
+    Assert-VerifiedFile -Path $ref2vaTurboPath -ExpectedBytes ([int64]$ref2vaTurbo.bytes) -ExpectedSha256 ([string]$ref2vaTurbo.sha256)
+    Write-Host "Verified Ref2VA Turbo LoRA: $ref2vaTurboPath"
+
     $localConfig = [ordered]@{
         runtime_root = $RuntimeRoot
         profile = $Profile.ToLowerInvariant()
         app = [ordered]@{ host = '127.0.0.1'; port = 8787 }
         comfy = [ordered]@{ host = '127.0.0.1'; port = 8190 }
         tailscale = [ordered]@{ enabled = (-not $SkipTailscale); scope = 'tailnet'; hostname = $hostname }
+    }
+    # Preserve explicit existing-ComfyUI paths when bootstrap is run against
+    # an installed environment. Fresh installs remain portable by default.
+    $existingConfigPath = Join-Path $repo 'config.local.json'
+    $existingLocal = if (Test-Path -LiteralPath $existingConfigPath -PathType Leaf) {
+        Get-JsonFile -Path $existingConfigPath
+    } else {
+        Get-JsonFile -Path (Join-Path $repo 'config.example.json')
+    }
+    if (-not $runtimeRootProvided -and $existingLocal.PSObject.Properties.Name -contains 'runtime_root' -and [string]$existingLocal.runtime_root) {
+        $localConfig.runtime_root = [string]$existingLocal.runtime_root
+    }
+    if ($existingLocal.app.PSObject.Properties.Name -contains 'python' -and [string]$existingLocal.app.python) {
+        $localConfig.app.python = [string]$existingLocal.app.python
+    }
+    foreach ($property in @('root', 'python', 'models', 'input', 'output', 'temp', 'user')) {
+        if ($existingLocal.comfy.PSObject.Properties.Name -contains $property -and [string]$existingLocal.comfy.$property) {
+            $localConfig.comfy[$property] = [string]$existingLocal.comfy.$property
+        }
     }
     $localConfig | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $repo 'config.local.json') -Encoding UTF8
 

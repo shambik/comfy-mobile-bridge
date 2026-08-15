@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Copy, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing'
@@ -119,6 +119,20 @@ function AudioDropzone({ file, onChange }: AudioDropzoneProps) {
   </label>
 }
 
+function MultiImageDropzone({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+  return <label className={`dropzone multi-dropzone ${files.length ? 'has-image' : ''}`}>
+    <input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={event => onChange(Array.from(event.target.files || []))} />
+    {files.length ? <><ImageIcon size={24} /><strong>{files.length} תמונות רפרנס</strong><span>עד 9 תמונות · JPG, PNG או WebP</span><button type="button" aria-label="הסרת תמונות" onClick={event => { event.preventDefault(); event.stopPropagation(); onChange([]) }}><X size={17} /></button></> : <><ImageIcon size={24} /><strong>הוסף תמונות רפרנס</strong><span>אפשר לבחור עד 9 תמונות</span></>}
+  </label>
+}
+
+function VideoDropzone({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+  return <label className={`dropzone multi-dropzone ${files.length ? 'has-image' : ''}`}>
+    <input type="file" multiple accept="video/mp4,video/quicktime,video/webm,video/x-matroska,video/mpeg" onChange={event => onChange(Array.from(event.target.files || []))} />
+    {files.length ? <><Clapperboard size={24} /><strong>{files.length} סרטוני רפרנס</strong><span>עד 3 סרטונים · 2–15 שניות לכל סרטון</span><button type="button" aria-label="הסרת סרטונים" onClick={event => { event.preventDefault(); event.stopPropagation(); onChange([]) }}><X size={17} /></button></> : <><Clapperboard size={24} /><strong>הוסף סרטוני רפרנס</strong><span>אפשר לבחור עד 3 סרטונים · 2–15 שניות</span></>}
+  </label>
+}
+
 type ComfyPageProps = { running: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
 
 function ComfyPage({ running, busy, lines, error, onRefresh }: ComfyPageProps) {
@@ -142,11 +156,11 @@ function App() {
   const [connected, setConnected] = useState(false)
   const [preferences, setPreferences] = useState<Preferences>(readPreferences)
   const [confirming, setConfirming] = useState(false)
-  const [referenceImage, setReferenceImage] = useState<File | null>(null)
+  const [referenceImages, setReferenceImages] = useState<File[]>([])
+  const [referenceVideos, setReferenceVideos] = useState<File[]>([])
   const [referenceAudio, setReferenceAudio] = useState<File | null>(null)
   const [openingFrame, setOpeningFrame] = useState<File | null>(null)
   const [closingFrame, setClosingFrame] = useState<File | null>(null)
-  const [referencePreview, setReferencePreview] = useState('')
   const [openingPreview, setOpeningPreview] = useState('')
   const [closingPreview, setClosingPreview] = useState('')
   const [sending, setSending] = useState(false)
@@ -156,6 +170,8 @@ function App() {
   const [spectrumReady, setSpectrumReady] = useState(false)
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
+  const [referenceTurboReady, setReferenceTurboReady] = useState(false)
+  const [noAudio, setNoAudio] = useState(false)
   const [selectedResults, setSelectedResults] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
   const [comfyRunning, setComfyRunning] = useState(false)
@@ -175,6 +191,7 @@ function App() {
       setSpectrumReady(data.spectrum_ready)
       setClipprojReady(data.clipproj_ready)
       setTurboV4Ready(data.turbo_v4_ready)
+      setReferenceTurboReady(data.reference_turbo_ready)
       return data.csrf_token
     } catch {
       setCsrf('')
@@ -187,7 +204,7 @@ function App() {
       const response = await fetch('/api/jobs', { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
-        setJobs(data.jobs); setSequences(data.sequences || []); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready)
+        setJobs(data.jobs); setSequences(data.sequences || []); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready)
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
@@ -231,12 +248,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!referenceImage) { setReferencePreview(''); return }
-    const url = URL.createObjectURL(referenceImage); setReferencePreview(url)
-    return () => URL.revokeObjectURL(url)
-  }, [referenceImage])
-
-  useEffect(() => {
     if (!openingFrame) { setOpeningPreview(''); return }
     const url = URL.createObjectURL(openingFrame); setOpeningPreview(url)
     return () => URL.revokeObjectURL(url)
@@ -260,13 +271,15 @@ function App() {
   }, [confirming])
 
   const paragraphCount = useMemo(() => batch ? prompt.trim().split(/\n\s*\n/).filter(Boolean).length : 1, [prompt, batch])
-  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' ? 'standard' : preferences.engine
+  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
   const effectiveEncoder: Encoder = preferences.encoder
-  const generationSteps = effectiveEngine === 'turbo' ? preferences.turboSteps : effectiveEngine === 'spectrum' ? preferences.spectrumSteps : preferences.standardSteps
+  const generationSteps = mode === 'reference' && effectiveEngine === 'turbo' ? 4 : effectiveEngine === 'turbo' ? preferences.turboSteps : effectiveEngine === 'spectrum' ? preferences.spectrumSteps : preferences.standardSteps
   const stepRange = effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
   const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
+  const recommendedMegapixels = duration <= 5 ? 1.5 : duration <= 10 ? 0.7 : 0.5
+  const recommendedResolution = dimensionsFor(preferences.aspect, recommendedMegapixels)
   const requestedFrames = Math.max(5, Math.round(duration * 24))
   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
   const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : 1
@@ -317,12 +330,13 @@ function App() {
     setMode(next)
     setError('')
     if (next !== 'text') setConnected(false)
-    if (next === 'frames') { setReferenceImage(null); setReferenceAudio(null) }
+    if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null) }
     else if (next === 'reference') {
       setOpeningFrame(null)
       setClosingFrame(null)
     } else if (next === 'text') {
-      setReferenceImage(null)
+      setReferenceImages([])
+      setReferenceVideos([])
       setReferenceAudio(null)
       setOpeningFrame(null)
       setClosingFrame(null)
@@ -330,7 +344,7 @@ function App() {
   }
 
   const selectEngine = (engine: Engine) => {
-    if (mode === 'reference' && engine === 'turbo') return
+    if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
     setPreferences(current => ({ ...current, engine }))
   }
@@ -362,7 +376,7 @@ function App() {
     setError('')
     if (!prompt.trim()) return setError('צריך לכתוב פרומפט')
     if (mode === 'frames' && (!openingFrame || !closingFrame)) return setError('צריך לצרף גם פריים פותח וגם פריים סוגר')
-    if (mode === 'reference' && !referenceImage) return setError('צריך לצרף תמונת רפרנס')
+    if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
     if (effectiveEncoder === 'clipproj' && !clipprojReady) return setError('ClipProj עדיין לא מוכן להפעלה')
@@ -371,20 +385,21 @@ function App() {
     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
     form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', calculatedResolution.id); form.set('connected', String(connected))
-    if (effectiveEngine === 'turbo') form.set('turbo_profile', preferences.turboProfile)
+    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', calculatedResolution.id); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
+    if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
       form.set('first_frame', openingFrame!)
       form.set('last_frame', closingFrame!)
     } else if (mode === 'reference') {
-      form.set('image', referenceImage!)
+      referenceImages.forEach(file => form.append('reference_images', file))
+      referenceVideos.forEach(file => form.append('reference_videos', file))
       if (referenceAudio) form.set('reference_audio', referenceAudio)
     }
     setConfirming(false)
     setSending(true)
     try {
       await mutate('/api/jobs', 'POST', form, sessionToken)
-      setPrompt(''); setReferenceImage(null); setReferenceAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false)
+      setPrompt(''); setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false)
     } catch (e) { setError(e instanceof Error ? e.message : 'השליחה נכשלה') }
     finally { setSending(false) }
   }
@@ -471,9 +486,11 @@ function App() {
       </div>}
       {mode === 'reference' && <>
         <div className="reference-grid">
-          <ImageDropzone label="הוסף תמונת רפרנס" hint="חובה · JPG, PNG או WebP עד 20MB" preview={referencePreview} onChange={setReferenceImage} />
+          <MultiImageDropzone files={referenceImages} onChange={setReferenceImages} />
+          <VideoDropzone files={referenceVideos} onChange={setReferenceVideos} />
           <AudioDropzone file={referenceAudio} onChange={setReferenceAudio} />
         </div>
+        <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>
         {referenceAudio && <div className="reference-audio-note"><AudioLines size={14} /><span>בפרומפט אפשר לכתוב <b dir="ltr">&lt;Picture 1&gt;</b> ו־<b dir="ltr">&lt;Audio 1&gt;</b>. H3 ישתמש בקול ובתזמון כרפרנס וייצר אודיו חדש יחד עם תנועת השפתיים.</span></div>}
       </>}
 
@@ -487,7 +504,7 @@ function App() {
           <div className="setting-block">
             <div className="setting-title"><span>מנוע</span><small>מהירות מול איכות</small></div>
             <div className="engine-toggle">
-              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'reference'} onClick={() => selectEngine('turbo')}>
+              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'reference' && !referenceTurboReady} onClick={() => selectEngine('turbo')}>
                 <Zap size={16} /><span><strong>Turbo</strong><small>מהיר</small></span>
               </button>
               <button type="button" className={effectiveEngine === 'standard' ? 'active' : ''} aria-pressed={effectiveEngine === 'standard'} onClick={() => selectEngine('standard')}>
@@ -497,9 +514,10 @@ function App() {
                 <Sparkles size={16} /><span><strong>Spectrum</strong><small>native + מהיר</small></span>
               </button>
             </div>
-            {mode === 'reference' && <p className="setting-note">רפרנס עובד עם רגיל או Spectrum; Turbo לא מתאים למסלול הזה</p>}
+            {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
+            {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
-            {effectiveEngine === 'turbo' && <>
+            {effectiveEngine === 'turbo' && mode !== 'reference' && <>
               <div className="setting-title turbo-profile-title"><span>Turbo LoRA</span><small>בחירת אופי התוצאה</small></div>
               <div className="turbo-profile-toggle">
                 <button type="button" className={preferences.turboProfile === 'v1' ? 'active' : ''} aria-pressed={preferences.turboProfile === 'v1'} onClick={() => selectTurboProfile('v1')}><strong>v1 · 850</strong><small>יציב יותר בתנועה מהירה</small></button>
@@ -535,16 +553,22 @@ function App() {
             <div className="range-labels"><span>{stepRange.min}</span><span>{stepRange.max}</span></div>
           </div>
 
+          <div className="setting-block audio-setting-block">
+            <div className="setting-title"><span>אודיו</span><small>ערוץ שמע בתוצאה</small></div>
+            <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>
+          </div>
+
           <div className="setting-block resolution-block">
             <div className="setting-title"><span>רזולוציה</span><small>כפולות 32 שמתאימות ל־H3</small></div>
             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
             <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
+            <button type="button" className="setting-note recommendation-action" onClick={() => setPreferences(current => ({ ...current, megapixels: recommendedMegapixels }))}>מומלץ לפי הבדיקות: {recommendedMegapixels.toFixed(1)} MP · {recommendedResolution.id}</button>
           </div>
         </div>
 
         <div className="generation-summary">
-          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
+          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && mode !== 'reference' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
           <small>{loadLevel === 'normal' ? 'מוכן ליצירה' : 'לפני השליחה יוצג אישור עומס'}</small>
         </div>
       </div>
@@ -588,7 +612,7 @@ function App() {
         <p>המחשב עשוי לעבוד זמן רב ולהשתמש בהרבה זיכרון. אפשר להמשיך, או לחזור ולהוריד סטפים, משך או רזולוציה.</p>
         <div className="dialog-specs">
           <span>{engineLabel(effectiveEngine)}</span>
-          {effectiveEngine === 'turbo' && <span>{preferences.turboProfile.toUpperCase()}</span>}
+          {effectiveEngine === 'turbo' && mode !== 'reference' && <span>{preferences.turboProfile.toUpperCase()}</span>}
           <span>{encoderLabel(effectiveEncoder)}</span>
           <span>{generationSteps} סטפים</span>
           <span>{calculatedResolution.id}</span><span>{h3Frames} frames</span>
@@ -614,6 +638,8 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
   const width = job.width || 736
   const height = job.height || 416
   const [now, setNow] = useState(() => Date.now())
+  const [promptExpanded, setPromptExpanded] = useState(false)
+  const [promptCopied, setPromptCopied] = useState(false)
   useEffect(() => {
     if (!active) return
     setNow(Date.now())
@@ -633,12 +659,18 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
     if (navigator.share) await navigator.share({ title: 'H3 Video', url })
     else await navigator.clipboard.writeText(url)
   }
+  const copyPrompt = async () => {
+    await navigator.clipboard.writeText(job.prompt)
+    setPromptCopied(true)
+    window.setTimeout(() => setPromptCopied(false), 1600)
+  }
   return <article className={`job-card ${job.status} ${selectedOrder ? 'result-selected' : ''}`}>
     {selectedOrder && <span className="selection-order">{selectedOrder}</span>}
     {job.video_url && <video src={job.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
-      <p>{job.prompt}</p>
+      <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
+      <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
       <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span></div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"

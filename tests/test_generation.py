@@ -29,7 +29,7 @@ class GenerationSettingsTests(unittest.TestCase):
             ("text", "turbo", 13, "736x416"),
             ("text", "standard", 7, "736x416"),
             ("text", "standard", 31, "736x416"),
-            ("reference", "turbo", 4, "736x416"),
+            ("reference", "turbo", 5, "736x416"),
             ("text", "spectrum", 7, "736x416"),
             ("text", "spectrum", 31, "736x416"),
             ("text", "standard", 20, "1025x576"),
@@ -56,7 +56,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["9"]["inputs"]["steps"], 6)
         self.assertEqual(workflow["7"]["class_type"], "ResolutionSelector")
         self.assertEqual(workflow["7"]["inputs"]["aspect_ratio"], "16:9 (Widescreen)")
-        self.assertAlmostEqual(workflow["7"]["inputs"]["megapixels"], 512 * 288 / 1_000_000)
+        self.assertAlmostEqual(workflow["7"]["inputs"]["megapixels"], 512 * 288 / (1024 * 1024))
         self.assertEqual(workflow["104"]["inputs"]["width"], ["7", 0])
         self.assertEqual(workflow["104"]["inputs"]["height"], ["7", 1])
         self.assertEqual(workflow["104"]["inputs"]["length"], ["106", 1])
@@ -106,6 +106,19 @@ class WorkflowTests(unittest.TestCase):
             workflow["136"]["inputs"]["ref_audios"],
             {"ref_audio_0": ["138", 0]},
         )
+
+    def test_reference_turbo_uses_dedicated_chain_and_multiple_media(self):
+        workflow = reference_workflow(
+            "test", 5, 13, "reference-turbo", None, turbo=True,
+            image_names=["one.png", "two.png"], video_names=["ref.mp4"],
+            include_audio=False,
+        )
+        self.assertEqual(workflow["128"]["inputs"]["lora_name"], "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
+        self.assertEqual(workflow["129"]["class_type"], "MiniMaxH3SigmaShift")
+        self.assertEqual(workflow["130"]["class_type"], "MiniMaxH3TurboSampler")
+        self.assertEqual(workflow["136"]["inputs"]["ref_images"], {"ref_image_0": ["137", 0], "ref_image_1": ["138", 0]})
+        self.assertEqual(workflow["136"]["inputs"]["ref_videos"], {"ref_video_0": ["151", 0]})
+        self.assertNotIn("23", workflow)
 
     def test_spectrum_is_separate_from_turbo_and_keeps_frames(self):
         workflow = spectrum_workflow(

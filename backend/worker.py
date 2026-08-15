@@ -7,6 +7,7 @@ from pathlib import Path
 from .comfy import ComfyClient, find_video, gpu_sample, media_probe
 from .config import (CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, INPUT, MODELS, REF2VA_MODEL,
+                     REF2VA_TURBO_LORA,
                      SEQUENCES)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
@@ -344,9 +345,20 @@ class QueueWorker:
             required.add("CLIPLoader")
 
         if job["mode"] == "reference":
-            required |= {"MiniMaxH3ReferenceToVideo", "KSamplerSelect"}
+            required.add("MiniMaxH3ReferenceToVideo")
+            if job["engine"] == "turbo":
+                required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
+                if not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
+                    raise RuntimeError(f"Ref2VA Turbo LoRA is not installed: {REF2VA_TURBO_LORA}")
+            elif job["engine"] == "spectrum":
+                required |= {"KSamplerSelect", "MiniMaxH3SigmaShift", "SpectrumApplyMiniMaxH3"}
+            else:
+                required.add("KSamplerSelect")
             if job.get("reference_audio_name"):
                 required.add("LoadAudio")
+            reference_videos = json.loads(job.get("reference_videos_json") or "[]")
+            if reference_videos:
+                required |= {"LoadVideo", "GetVideoComponents"}
             ref_path = MODELS / "diffusion_models" / REF2VA_MODEL
             if not ref_path.exists():
                 raise RuntimeError(f"Reference model is not installed: {REF2VA_MODEL}")
@@ -364,11 +376,16 @@ class QueueWorker:
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
         if job["mode"] == "reference":
+            reference_images = json.loads(job.get("reference_images_json") or "[]")
+            if not reference_images and image_name:
+                reference_images = [image_name]
             workflow = reference_workflow(
-                job["prompt"], job["duration"], seed, prefix, image_name,
+                job["prompt"], job["duration"], seed, prefix, reference_images[0] if reference_images else None,
                 audio_name=job.get("reference_audio_name"),
                 steps=job["steps"], width=job["width"], height=job["height"],
-                spectrum=job["engine"] == "spectrum", encoder=encoder,
+                spectrum=job["engine"] == "spectrum", turbo=job["engine"] == "turbo", encoder=encoder,
+                image_names=reference_images, video_names=json.loads(job.get("reference_videos_json") or "[]"),
+                include_audio=not bool(job.get("no_audio")),
             )
         else:
             first_frame_name = job.get("first_frame_name")
@@ -387,6 +404,7 @@ class QueueWorker:
                 "last_frame_name": last_frame_name,
                 "steps": job["steps"], "width": job["width"], "height": job["height"],
                 "encoder": encoder,
+                "include_audio": not bool(job.get("no_audio")),
             }
             if job["engine"] == "turbo":
                 workflow_options["turbo_profile"] = job.get("turbo_profile") or "v1"

@@ -45,8 +45,11 @@ def _create_jobs_table(db):
         position INTEGER NOT NULL,
         input_path TEXT,
         input_name TEXT,
+        reference_images_json TEXT,
+        reference_videos_json TEXT,
         reference_audio_path TEXT,
         reference_audio_name TEXT,
+        no_audio INTEGER NOT NULL DEFAULT 0,
         first_frame_path TEXT,
         first_frame_name TEXT,
         last_frame_path TEXT,
@@ -68,7 +71,7 @@ def _create_jobs_table(db):
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
         CHECK(width BETWEEN 256 AND 2048 AND height BETWEEN 256 AND 2048 AND
               width % 32 = 0 AND height % 32 = 0 AND width * height <= 2000000),
-        CHECK(mode <> 'reference' OR engine IN ('standard','spectrum')),
+        CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum')),
         CHECK((sequence_id IS NULL AND sequence_index IS NULL AND sequence_total IS NULL) OR
               (sequence_id IS NOT NULL AND sequence_index BETWEEN 1 AND sequence_total AND sequence_total BETWEEN 2 AND 20))
     );
@@ -137,7 +140,8 @@ def _rebuild_jobs_table(db):
     columns = [
         "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
-        "input_path", "input_name", "reference_audio_path", "reference_audio_name",
+        "input_path", "input_name", "reference_images_json", "reference_videos_json",
+        "reference_audio_path", "reference_audio_name", "no_audio",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "output_path", "prompt_id",
         "progress", "phase", "step", "total_steps", "eta_seconds", "error",
@@ -156,6 +160,9 @@ def _rebuild_jobs_table(db):
         "step": "0",
         "total_steps": "0",
         "eta_seconds": "NULL",
+        "reference_images_json": "NULL",
+        "reference_videos_json": "NULL",
+        "no_audio": "0",
     }
     select_values = ",".join(
         column if column in old_columns else defaults.get(column, "NULL")
@@ -178,8 +185,9 @@ def init_db():
                 "engine", "turbo_profile", "encoder", "steps", "width", "height",
                 "sequence_id", "sequence_index", "sequence_total",
                 "reference_audio_path", "reference_audio_name",
+                "reference_images_json", "reference_videos_json", "no_audio",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
@@ -214,7 +222,8 @@ def row_dict(row):
     item["metrics"] = {key: raw_metrics[key] for key in ("generation_seconds", "peak_gpu", "ffprobe") if key in raw_metrics}
     output_path = item.pop("output_path", None)
     for private_key in (
-        "seed", "input_path", "input_name", "reference_audio_path", "reference_audio_name",
+        "seed", "input_path", "input_name", "reference_images_json", "reference_videos_json",
+        "reference_audio_path", "reference_audio_name", "no_audio",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "prompt_id",
     ):

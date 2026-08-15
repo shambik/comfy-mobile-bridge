@@ -12,7 +12,7 @@ foreach ($item in $dependencies.repositories) {
     if ([string]$item.target -match '(^|/|\\)\.\.(?=/|\\|$)') { throw "Unsafe repository target: $($item.target)" }
 }
 if ($dependencies.repositories.Count -ne 5) { throw 'Expected five pinned repositories.' }
-if ($models.models.Count -ne 12) { throw 'Expected twelve pinned model files.' }
+if ($models.models.Count -ne 13) { throw 'Expected thirteen pinned model files.' }
 foreach ($model in $models.models) {
     if ([int64]$model.bytes -le 0) { throw "Invalid byte count for $($model.name)" }
     if ([string]$model.sha256 -notmatch $hashPattern) { throw "Invalid SHA-256 for $($model.name)" }
