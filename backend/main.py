@@ -159,7 +159,7 @@ def read_comfy_log(limit: int = 300) -> list[str]:
 async def comfy_status():
     return {
         "running": await worker.comfy.ready(),
-        "pid": worker.comfy.process.pid if worker.comfy.process and worker.comfy.process.poll() is None else None,
+        "pid": worker.comfy.discovered_pid(),
         "host": COMFY_HOST,
         "port": COMFY_PORT,
     }
@@ -335,6 +335,7 @@ async def create_jobs(
     prompt: str = Form(...), mode: str = Form("text"), duration: float = Form(5),
     engine: str | None = Form(None), steps: int | None = Form(None),
     resolution: str | None = Form(None),
+    megapixels: float | None = Form(None), aspect_ratio: str | None = Form(None),
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
@@ -350,6 +351,7 @@ async def create_jobs(
     try:
         generation = normalize_generation_settings(
             mode, engine, steps, resolution, encoder, turbo_profile,
+            megapixels=megapixels, aspect_ratio=aspect_ratio,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -359,8 +361,8 @@ async def create_jobs(
         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
         raise HTTPException(400, "Text mode does not accept reference media")
-    if mode == "frames" and (image or not first_frame or not last_frame):
-        raise HTTPException(400, "Combined frame mode requires an opening and a closing image")
+    if mode == "frames" and (image or not first_frame):
+        raise HTTPException(400, "I2V mode requires an opening image; the closing image is optional")
     if mode in ("opening", "closing") and not image:
         raise HTTPException(400, "This mode requires one image")
     if mode == "reference" and not (image or reference_images or reference_videos):
@@ -434,7 +436,12 @@ async def create_jobs(
             title = f"רצף מחובר · {len(prompts)} שוטים"
             db.execute(
                 """INSERT INTO sequences
-                   (id,kind,title,status,position,engine,encoder,steps,width,height,duration,
+                       (id,kind,title,status,position,engine,encoder,steps,width,height,duration,
+                    progress,phase,current_item,total_items,created_at,updated_at)
+                   VALUES(?,'connected',?,'queued',?,?,?,?,?,?,?,0,'queued',0,?,?,?)""",
+                (sequence_id, title, position, generation.engine, generation.encoder,
+                 generation.steps, generation.width, generation.height, duration,
+                 len(prompts), now, now),
                     progress,phase,current_item,total_items,created_at,updated_at)
                    VALUES(?,'connected',?,'queued',?,?,?,?,?,?,?,0,'queued',0,?,?,?)""",
                 (sequence_id, title, position, generation.engine, generation.encoder,
@@ -447,30 +454,23 @@ async def create_jobs(
             if connected:
                 db.execute(
                     """INSERT INTO jobs
-                       (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,seed,
+                       (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,
                         sequence_id,sequence_index,sequence_total,status,position,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
-                    (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
-                     generation.steps, generation.width, generation.height,
-                     str(secrets.randbits(64)), sequence_id, index + 1, len(prompts),
-                     position, now, now),
-                )
-                db.execute(
-                    """INSERT INTO sequence_items
-                       (sequence_id,item_index,prompt,job_id,status)
-                       VALUES(?,?,?,?, 'queued')""",
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+                  (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
+                     generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                     (sequence_id, index + 1, text, job_id),
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (job_id, text, mode, duration, generation.engine, generation.turbo_profile, generation.encoder,
-                   generation.steps, generation.width, generation.height,
+                   generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    str(secrets.randbits(64)), position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
                    reference_audio_path, reference_audio_name,

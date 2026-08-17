@@ -383,6 +383,7 @@ class QueueWorker:
                 job["prompt"], job["duration"], seed, prefix, reference_images[0] if reference_images else None,
                 audio_name=job.get("reference_audio_name"),
                 steps=job["steps"], width=job["width"], height=job["height"],
+                megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 spectrum=job["engine"] == "spectrum", turbo=job["engine"] == "turbo", encoder=encoder,
                 image_names=reference_images, video_names=json.loads(job.get("reference_videos_json") or "[]"),
                 include_audio=not bool(job.get("no_audio")),
@@ -403,6 +404,7 @@ class QueueWorker:
                 "first_frame_name": first_frame_name,
                 "last_frame_name": last_frame_name,
                 "steps": job["steps"], "width": job["width"], "height": job["height"],
+                "megapixels": job.get("megapixels"), "aspect_ratio": job.get("aspect_ratio"),
                 "encoder": encoder,
                 "include_audio": not bool(job.get("no_audio")),
             }

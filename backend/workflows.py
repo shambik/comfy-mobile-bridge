@@ -21,15 +21,28 @@ def h3_frame_count(duration: float) -> int:
     return frames + (5 - frames % 17) % 17
 
 
-def _resolution_selector(width: int, height: int) -> dict:
+def _resolution_selector(
+    width: int,
+    height: int,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
+) -> dict:
+    # New jobs pass the user/skill megapixel value directly. The node owns the
+    # final width/height calculation. Width/height fallback is for legacy
+    # callers and old saved jobs only.
     ratio = width / height
-    aspect = min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
+    aspect = aspect_ratio or min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
+    aspect = {
+        "1:1": "1:1 (Square)",
+        "16:9": "16:9 (Widescreen)",
+        "9:16": "9:16 (Portrait Widescreen)",
+        "4:3": "4:3 (Standard)",
+        "3:4": "3:4 (Portrait Standard)",
+    }.get(aspect, aspect)
+    node_megapixels = megapixels if megapixels is not None else width * height / (1024 * 1024)
     return {
         "7": {"class_type": "ResolutionSelector", "inputs": {
-            # ResolutionSelector defines 1.0 MP as 1024*1024 pixels.
-            # Keep the app's generated API workflow in the same unit as the
-            # saved ComfyUI workflow instead of converting through decimal MP.
-            "aspect_ratio": aspect, "megapixels": width * height / (1024 * 1024), "multiple": 32,
+            "aspect_ratio": aspect, "megapixels": node_megapixels, "multiple": 32,
         }},
     }
 
@@ -103,6 +116,8 @@ def turbo_workflow(
     steps: int = 4,
     width: int = 736,
     height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
     encoder: str = "native",
     turbo_profile: str = "v1",
     include_audio: bool = True,
@@ -110,7 +125,7 @@ def turbo_workflow(
     length = h3_frame_count(duration)
     nodes = _common_decode("104", "17", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
-        **_resolution_selector(width, height),
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "18": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {"model": ["6", 0], "lora_name": TURBO_LORAS[turbo_profile], "strength": 1.0, "low_vram": True}},
@@ -138,13 +153,15 @@ def standard_workflow(
     steps: int = 20,
     width: int = 736,
     height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
     encoder: str = "native",
     include_audio: bool = True,
 ):
     length = h3_frame_count(duration)
     nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
-        **_resolution_selector(width, height),
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
@@ -170,6 +187,8 @@ def spectrum_workflow(
     steps: int = 16,
     width: int = 736,
     height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
     encoder: str = "native",
     include_audio: bool = True,
 ):
@@ -182,7 +201,7 @@ def spectrum_workflow(
     length = h3_frame_count(duration)
     nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
     nodes.update({
-        **_resolution_selector(width, height),
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
         "17": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
@@ -224,6 +243,8 @@ def reference_workflow(
     steps: int = 20,
     width: int = 736,
     height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
     spectrum: bool = False,
     encoder: str = "native",
     turbo: bool = False,
@@ -242,7 +263,7 @@ def reference_workflow(
         seed, prefix, encoder, reference=True, include_audio=include_audio,
     )
     nodes.update({
-        **_resolution_selector(width, height),
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "127": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
         "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "beta" if turbo else "simple", "steps": steps, "denoise": 1.0}},
@@ -264,8 +285,11 @@ def reference_workflow(
         if include_audio:
             nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
     if audio_name:
-        nodes["138"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
-        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["138", 0]}
+        # Keep the standalone audio loader away from the image reference
+        # range (137-145).  Reusing node 138 silently replaced image 2 and
+        # wired both ref_image_1 and ref_audio_0 to LoadAudio.
+        nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["180", 0]}
     if turbo:
         nodes.update({
             "128": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {

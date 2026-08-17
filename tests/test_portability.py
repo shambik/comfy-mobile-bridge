@@ -72,7 +72,7 @@ class PortabilityTests(unittest.TestCase):
                 {
                     "runtime_root": ".runtime",
                     "profile": "full",
-                    "app": {"host": "0.0.0.0", "port": 8787},
+                    "app": {"host": "192.168.1.1", "port": 8787},
                     "comfy": {"host": "127.0.0.1", "port": 8190},
                     "tailscale": {"enabled": True, "scope": "tailnet"},
                 },
@@ -128,7 +128,7 @@ class PortabilityTests(unittest.TestCase):
         dependencies = json.loads((ROOT / "manifests" / "dependencies.json").read_text(encoding="utf-8"))
         models = json.loads((ROOT / "manifests" / "models.json").read_text(encoding="utf-8"))
         self.assertEqual(len(dependencies["repositories"]), 5)
-        self.assertEqual(len(models["models"]), 12)
+        self.assertEqual(len(models["models"]), 13)
         for item in dependencies["repositories"]:
             self.assertRegex(item["revision"], r"^[0-9a-f]{40}$")
         for item in models["models"]:

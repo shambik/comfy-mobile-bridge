@@ -13,7 +13,7 @@ type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | '
 type Page = 'studio' | 'comfy'
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; status: Status; progress: number;
-  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; position?: number;
+  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number };
@@ -33,7 +33,7 @@ type Sequence = {
 
 const modes: { id: Mode; label: string; hint: string }[] = [
   { id: 'text', label: 'טקסט בלבד', hint: 'רעיון הופך לסרטון' },
-  { id: 'frames', label: 'פריים פותח + סוגר', hint: 'שתי תמונות באותו סרטון' },
+  { id: 'frames', label: 'I2V', hint: 'פריים פותח · פריים סוגר אופציונלי' },
   { id: 'reference', label: 'רפרנס', hint: 'זהות וסגנון מהתמונה' },
 ]
 
@@ -46,8 +46,8 @@ const resolutions: ResolutionOption[] = [
   { id: '768x768', label: 'ריבוע טבעי', hint: '768×768 · 0.56MP', width: 768, height: 768, aspect: '1:1', megapixels: 0.56 },
   { id: '1024x768', label: '4:3 טבעי', hint: '1024×768 · 0.75MP', width: 1024, height: 768, aspect: '4:3', megapixels: 0.75 },
   { id: '768x1024', label: '3:4 טבעי', hint: '768×1024 · 0.75MP', width: 768, height: 1024, aspect: '3:4', megapixels: 0.75 },
-  { id: '1344x768', label: '16:9 טבעי', hint: '1344×768 · 0.98MP', width: 1344, height: 768, aspect: '16:9', megapixels: 0.98 },
-  { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 0.98MP', width: 768, height: 1344, aspect: '9:16', megapixels: 0.98 },
+  { id: '1344x768', label: '16:9 טבעי', hint: '1344×768 · 1.03MP', width: 1344, height: 768, aspect: '16:9', megapixels: 1.03 },
+  { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 1.03MP', width: 768, height: 1344, aspect: '9:16', megapixels: 1.03 },
 ]
 const aspectOptions: Aspect[] = ['1:1', '4:3', '3:4', '16:9', '9:16']
 
@@ -135,9 +135,9 @@ function VideoDropzone({ files, onChange }: { files: File[]; onChange: (files: F
 
 type ComfyPageProps = { running: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
 
-function ComfyPage({ running, busy, lines, error, onRefresh }: ComfyPageProps) {
+function ComfyPage({ running, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
   return <section className="comfy-page">
-    <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><button className="icon-button" onClick={onRefresh} aria-label="Refresh log"><RefreshCw size={18} /></button></div>
+    <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><div className="log-actions"><button className="icon-button" onClick={onClear} aria-label="Clear visible log" title="Clear visible log"><Trash2 size={17} /></button><button className="icon-button" onClick={onRefresh} aria-label="Refresh log" title="Refresh log"><RefreshCw size={18} /></button></div></div>
     <div className={`comfy-state ${running ? 'running' : 'stopped'}`}><i /> {running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
     {error && <div className="error-banner">{error}</div>}
     <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
@@ -179,6 +179,7 @@ function App() {
   const [comfyRunning, setComfyRunning] = useState(false)
   const [comfyBusy, setComfyBusy] = useState(false)
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
+  const [comfyLogCleared, setComfyLogCleared] = useState(false)
   const [comfyError, setComfyError] = useState('')
 
   const loadSession = async (): Promise<string | null> => {
@@ -227,7 +228,7 @@ function App() {
     return () => window.clearInterval(timer)
   }, [csrf])
 
-  const loadComfy = async () => {
+  const loadComfy = async (forceLogs = false) => {
     try {
       const [statusResponse, logsResponse] = await Promise.all([
         fetch('/api/comfy/status', { cache: 'no-store' }),
@@ -237,7 +238,7 @@ function App() {
       const status = await statusResponse.json()
       const logs = await logsResponse.json()
       setComfyRunning(Boolean(status.running))
-      setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
+      if (forceLogs || !comfyLogCleared) setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
       setComfyError('')
     } catch {
       setComfyError('Unable to read ComfyUI status')
@@ -248,7 +249,7 @@ function App() {
     void loadComfy()
     const timer = window.setInterval(() => { void loadComfy() }, 2000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [comfyLogCleared])
 
   useEffect(() => {
     if (!openingFrame) { setOpeningPreview(''); return }
@@ -281,8 +282,6 @@ function App() {
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
   const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
-  const recommendedMegapixels = duration <= 5 ? 1.5 : duration <= 10 ? 0.7 : 0.5
-  const recommendedResolution = dimensionsFor(preferences.aspect, recommendedMegapixels)
   const requestedFrames = Math.max(5, Math.round(duration * 24))
   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
   const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : 1
@@ -361,6 +360,10 @@ function App() {
     setError('')
     if (next !== 'text') setConnected(false)
     if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null) }
+    else if (next === 'opening') {
+      setClosingFrame(null)
+      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null)
+    }
     else if (next === 'reference') {
       setOpeningFrame(null)
       setClosingFrame(null)
@@ -405,7 +408,7 @@ function App() {
   const submit = async (confirmed = false) => {
     setError('')
     if (!prompt.trim()) return setError('צריך לכתוב פרומפט')
-    if (mode === 'frames' && (!openingFrame || !closingFrame)) return setError('צריך לצרף גם פריים פותח וגם פריים סוגר')
+    if (mode === 'frames' && !openingFrame) return setError('צריך לצרף פריים פותח')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -415,11 +418,11 @@ function App() {
     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
     form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', calculatedResolution.id); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
+    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
     if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
       form.set('first_frame', openingFrame!)
-      form.set('last_frame', closingFrame!)
+      if (closingFrame) form.set('last_frame', closingFrame)
     } else if (mode === 'reference') {
       referenceImages.forEach(file => form.append('reference_images', file))
       referenceVideos.forEach(file => form.append('reference_videos', file))
@@ -486,12 +489,12 @@ function App() {
         <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
-        <button className="icon-button" onClick={() => { if (page === 'comfy') void loadComfy(); else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
+        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onRefresh={() => { void loadComfy() }} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); void loadComfy(true) }} /> : <>
 
     <section className="composer">
       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
@@ -513,8 +516,8 @@ function App() {
       </div>
 
       {mode === 'frames' && <div className="frame-grid">
-        <ImageDropzone label="הוסף פריים פותח" hint="התמונה הראשונה · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
-        <ImageDropzone label="הוסף פריים סוגר" hint="התמונה האחרונה · JPG, PNG או WebP עד 20MB" preview={closingPreview} onChange={setClosingFrame} />
+        <ImageDropzone label="הוסף פריים פותח · חובה" hint="התמונה הראשונה · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
+        <ImageDropzone label="הוסף פריים סוגר · אופציונלי" hint="אם מצורף, H3 יכוון את הסרטון גם לתמונה הזו" preview={closingPreview} onChange={setClosingFrame} />
       </div>}
       {mode === 'reference' && <>
         <div className="reference-grid">
@@ -595,7 +598,6 @@ function App() {
             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
             <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
-            <button type="button" className="setting-note recommendation-action" onClick={() => setPreferences(current => ({ ...current, megapixels: recommendedMegapixels }))}>מומלץ לפי הבדיקות: {recommendedMegapixels.toFixed(1)} MP · {recommendedResolution.id}</button>
           </div>
         </div>
 
@@ -669,6 +671,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
   const steps = job.steps || (engine === 'turbo' ? 4 : engine === 'spectrum' ? 16 : 20)
   const width = job.width || 736
   const height = job.height || 416
+  const megapixels = job.megapixels
   const [now, setNow] = useState(() => Date.now())
   const [promptExpanded, setPromptExpanded] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
@@ -703,7 +706,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span></div>
+      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -774,7 +777,7 @@ function formatDuration(totalSeconds: number) {
 
 function modeLabel(mode: Mode) {
   if (mode === 'text') return 'טקסט'
-  if (mode === 'frames') return 'פריים פותח + סוגר'
+  if (mode === 'frames') return 'I2V'
   if (mode === 'opening') return 'פריים פותח'
   if (mode === 'closing') return 'פריים סוגר'
   return 'רפרנס'

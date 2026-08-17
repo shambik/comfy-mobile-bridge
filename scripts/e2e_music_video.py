@@ -10,24 +10,25 @@ import requests
 
 
 BASE = "http://127.0.0.1:8787"
-STATE = Path(r"D:\repository\state\e2e_belly_of_the_beast")
+STATE = Path(r"D:\repository\state\e2e_music_video_belly_fresh_05")
 SONG = Path(r"C:\Users\David Shambik\Downloads\Belly of the Beast.wav")
-INITIAL = Path(r"C:\Users\David Shambik\.gemini\antigravity-cli\brain\6d1f99b8-97eb-43dc-9f14-75721d52b4d5\shot_rover_standoff_1786802504223.jpg")
+INITIAL = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\review_opening\opening_frame_fresh_04b.png")
+ROVER = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\references\rover_anchor_fresh_01.png")
 
 SHOTS = [
-    (10, "wide Kingston night establishing shot, dark tinted Rover entering a wet concrete street, two distinct Rastafari men in deep shadow, amber streetlights and teal shadows, slow lateral camera move"),
-    (15, "Kofi alone walking beside shuttered shops and concrete walls, long dreadlocks and subtle sunglasses, low-angle side tracking shot, reveal the neighborhood and his controlled swagger"),
-    (10, "tight lyrical tension insert: Kofi notices the dark Rover, eyes shift toward it, hand moves beneath his shirt and grips a concealed handgun without drawing it, restrained close-up, no firing"),
-    (15, "Zion alone scanning the street from a different corner, navy windbreaker and long dreadlocks, over-the-shoulder view into traffic, handheld documentary movement, blue police reflections beginning"),
-    (10, "the dark Rover passes close to camera, chrome and tinted glass catching red and amber light, Kofi reflected in the window, dynamic low tracking shot, aggressive chorus energy"),
-    (15, "Kofi and Zion move in opposite directions through the block, wide composition with depth and silhouettes, pedestrians and Caribbean storefront details, rhythmic camera drift, never a static portrait"),
-    (10, "Gaza Jay enters from a separate alley, distinct Jamaican man with shorter dreads, bright red-and-gold jacket and round sunglasses, confident solo introduction, whip-pan into a medium shot"),
-    (15, "blue police lights flood the street, the Rover accelerates away and leaves wet tire marks, Kofi turns but does not chase, fast lateral camera movement followed by a wide aftermath"),
-    (10, "bridge scene at the same block after the commotion: Kofi kneels and pours white rum onto the pavement for the lost, candlelight and smoke, intimate slow push-in, solemn expression"),
-    (15, "final chorus dawn movement: Kofi leads the group through the neighborhood, distinct silhouettes, vibrant red, gold and green wardrobe accents, crane-like rise from street level to a wider view"),
-    (10, "performance-style close-ups cut within one continuous shot: Kofi faces camera with calm authority, Zion crosses behind him, sun breaks over rooftops, strong lens flare and saturated dancehall color"),
-    (15, "the characters separate into the waking neighborhood, Rover gone, empty street and long shadows, slow pullback revealing Kingston rooftops, resilient victorious mood"),
-    (4.64, "instrumental tail: empty wet street at sunrise, fading red tail lights in the distance, reggae guitar atmosphere, slow locked-off hold and gentle light change"),
+    (5, "INTRO: restrained opening at a hot concrete corner at night. Kairo and Mally stand low in deep shade, alert and silent, subtle heat haze and distant street atmosphere. No car yet, no weapon, no police action."),
+    (10, "VERSE 1: Kairo and Mally observe the block while an ordinary dark tinted civilian Rover rolls slowly into the far background. Keep the car unmarked, blank plate, no logos, no police lights. Slow side-track, controlled tension."),
+    (15, "VERSE 1: the civilian Rover passes the corner and Kairo follows it with his eyes while Mally scans the opposite direction. Long dreads and sunglasses remain consistent. Slow tracking movement, no confrontation."),
+    (10, "VERSE 1 around 0:30: restrained close-up of Kairo's torso and hand moving beneath his shirt to grip concealed steel, never drawing or firing. Mally remains a blurred lookout in the background. No blood, no performance, deliberate realistic motion."),
+    (15, "PRE-CHORUS: distant siren atmosphere makes both men look toward the end of the street. The civilian Rover continues away through wet amber light. No visible police vehicle and no blue lights yet; camera slowly arcs around the men."),
+    (15, "CHORUS: wider west-side block montage inside one continuous I2V shot: Kairo and Mally move through separate layers of the concrete street, checking corners and keeping low, the neighborhood feels crowded and difficult. No dancing or singing, purposeful movement throughout."),
+    (15, "VERSE 2: the ordinary civilian Rover pulls up and stops at the intersection; its tinted side window rolls down slightly, interior remains in deep shadow. Kairo and Mally hold position. Slow push toward the window, no police identity."),
+    (15, "VERSE 2: sudden blue police lights flash from off-screen, reflecting on the civilian Rover and wet asphalt; the Rover accelerates away and leaves a short tire mark. The lights are environmental only; no police car enters frame. Fast but controlled pan."),
+    (12, "VERSE 2 aftermath: the men remain alive and unhurt as the Rover disappears, Kairo releases the concealed grip and Mally watches the empty street. Handheld breathing space, blue reflections fade, no extra action."),
+    (12, "BRIDGE: solemn close-up of Kairo's hands pouring white rum onto the street for the lost. Same wet concrete location, low light, realistic liquid and reflections, no bottle label or text, no singing or dancing."),
+    (10, "FINAL CHORUS: Kairo and Mally walk the block with controlled resolve, checking the street and helping a frightened neighbor move behind a doorway. Story action only, no performance, vibrant teal and amber night cinematography."),
+    (10, "FINAL CHORUS: the men hold the corner until the first gray morning light, long dreads moving in the breeze, empty civilian street after the Rover has gone. Slow pullback, resilient but restrained."),
+    (10.67, "OUTRO: empty wet street and concrete corner at first light, distant tail lights vanish, the neighborhood settles after the night. Very slow locked-off hold, no text, no logos, no gibberish."),
 ]
 
 
@@ -50,16 +51,20 @@ def main() -> None:
 
     for index in range(completed_count + 1, len(SHOTS) + 1):
         duration, direction = SHOTS[index - 1]
-        mp = "0.7 MP" if duration == 10 else "0.5 MP"
-        resolution = "1120x640" if duration == 10 else "960x544"
+        mp = 1.5 if duration == 5 else 1.0 if duration <= 8 else 0.7 if duration <= 10 else 0.5
+        source = ROVER if index in {2, 3, 7, 8} else previous
+        if not source.exists():
+            raise FileNotFoundError(f"Missing I2V source for shot {index}: {source}")
         prompt = (
             "Professional cinematic Jamaican hip-hop/dancehall music video. "
             f"This is shot {index} of a continuous lyric-timed sequence. "
-            f"{direction}. Duration target {duration:g} seconds at approximately {mp}. "
+            f"{direction}. Duration target {duration:g} seconds at approximately {mp:.2f} MP. "
             "Use the input image as the exact starting frame and preserve continuity of faces, wardrobe, geography, "
             "and lighting only where appropriate; deliberately change framing, subject focus, camera movement, and "
             "composition so this shot does not look like a repeated portrait. Realistic motion, vibrant but gritty "
-            "cinematic grade, 35mm lens language, no text, no logos, no audio."
+            "cinematic grade, 35mm lens language. I2V only, silent output. No singing, dancing, lip-sync, performance, "
+            "readable text, logos, signs, labels, plates, or gibberish. The Rover is an ordinary unmarked civilian car, "
+            "never a police car; use a blank featureless plate and preserve its geometry."
         )
         data = {
             "prompt": prompt,
@@ -67,22 +72,23 @@ def main() -> None:
             "duration": str(duration),
             "engine": "turbo",
             "steps": "6",
-            "resolution": resolution,
+            "megapixels": str(mp),
+            "aspect_ratio": "16:9",
             "encoder": "native",
             "turbo_profile": "v4",
             "no_audio": "true",
         }
-        with previous.open("rb") as image:
+        with source.open("rb") as image:
             response = session.post(
                 f"{BASE}/api/jobs",
                 headers=headers,
                 data=data,
-                files={"image": (previous.name, image, "image/jpeg")},
+                files={"image": (source.name, image, "image/png" if source.suffix.lower() == ".png" else "image/jpeg")},
                 timeout=60,
             )
         response.raise_for_status()
         job_id = response.json()["created"][0]
-        print(json.dumps({"shot": index, "job": job_id, "duration": duration, "resolution": resolution}), flush=True)
+        print(json.dumps({"shot": index, "job": job_id, "duration": duration, "megapixels": mp, "source": str(source)}), flush=True)
 
         while True:
             jobs = session.get(f"{BASE}/api/jobs", timeout=30).json()["jobs"]
@@ -106,7 +112,7 @@ def main() -> None:
     silent = STATE / "belly_of_the_beast_silent.mp4"
     final = STATE / "belly_of_the_beast_final.mp4"
     run_ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(silent))
-    run_ffmpeg("-i", str(silent), "-i", str(SONG), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "256k", "-t", "154.64", "-movflags", "+faststart", str(final))
+    run_ffmpeg("-i", str(silent), "-i", str(SONG), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "256k", "-t", "154.67", "-movflags", "+faststart", str(final))
     print(json.dumps({"complete": True, "silent": str(silent), "final": str(final)}), flush=True)
 
 

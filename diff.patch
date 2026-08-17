@@ -1,0 +1,821 @@
+diff --git a/backend/comfy.py b/backend/comfy.py
+index aac1944..db4d1fc 100644
+--- a/backend/comfy.py
++++ b/backend/comfy.py
+@@ -32,11 +32,54 @@ class ComfyClient:
+         except Exception:
+             return False
+ 
++    def _windows_process_ids(self) -> list[int]:
++        """Find ComfyUI processes even when this app lost its Popen handle."""
++        if os.name != "nt":
++            return []
++        code = str(COMFY_CODE).replace("'", "''")
++        script = (
++            "$needle = '" + code + "\\main.py'; "
++            "$port = '--port " + str(COMFY_PORT) + "'; "
++            "Get-CimInstance Win32_Process | "
++            "Where-Object { $_.CommandLine -and "
++            "$_.Name -match '^python(\.exe)?$' -and "
++            "$_.CommandLine -like ('*' + $needle + '*') -and "
++            "$_.CommandLine -like ('*' + $port + '*') } | "
++            "Select-Object -ExpandProperty ProcessId"
++        )
++        try:
++            result = subprocess.run(
++                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
++                capture_output=True, text=True, timeout=5, check=False,
++            )
++            return [int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()]
++        except (OSError, subprocess.TimeoutExpired, ValueError):
++            return []
++
++    def discovered_pid(self) -> int | None:
++        if self.process and self.process.poll() is None:
++            return self.process.pid
++        pids = self._windows_process_ids()
++        return pids[0] if pids else None
++
+     async def ensure_started(self):
+         if await self.ready():
+             return
+         if not COMFY_PYTHON.exists() or not (COMFY_CODE / "main.py").exists():
+             raise RuntimeError("ComfyUI installation is missing")
++
++        # The bridge can lose its Popen handle while a previous ComfyUI
++        # process tree remains alive. Starting another instance then causes
++        # port 8190 and ComfyUI's SQLite database to be locked. Remove only
++        # stale processes matching this exact installation and port.
++        if self._windows_process_ids():
++            await self.shutdown()
++            deadline = time.monotonic() + 10
++            while time.monotonic() < deadline:
++                if not self._windows_process_ids():
++                    break
++                await asyncio.sleep(0.5)
++
+         self.log_handle = open(LOGS / "comfy-8190.log", "a", encoding="utf-8", buffering=1)
+         command = [
+             str(COMFY_PYTHON), "-u", str(COMFY_CODE / "main.py"),
+@@ -163,6 +206,7 @@ class ComfyClient:
+     async def shutdown(self):
+         process = self.process
+         self.process = None
++        discovered = [] if process and process.poll() is None else self._windows_process_ids()
+         try:
+             if process and process.poll() is None:
+                 if os.name == "nt":
+@@ -184,6 +228,18 @@ class ComfyClient:
+                         await asyncio.to_thread(process.wait, 15)
+                     except subprocess.TimeoutExpired:
+                         process.kill()
++            elif discovered:
++                # The app may have restarted while ComfyUI remained alive,
++                # leaving no Popen handle. Kill only matching ComfyUI trees.
++                for pid in discovered:
++                    await asyncio.to_thread(
++                        subprocess.run,
++                        ["taskkill", "/PID", str(pid), "/T", "/F"],
++                        capture_output=True,
++                        text=True,
++                        timeout=20,
++                        check=False,
++                    )
+             if process and process.poll() is None:
+                 await asyncio.to_thread(process.wait, 5)
+         finally:
+diff --git a/backend/db.py b/backend/db.py
+index d717464..1ee834e 100644
+--- a/backend/db.py
++++ b/backend/db.py
+@@ -37,6 +37,8 @@ def _create_jobs_table(db):
+         steps INTEGER NOT NULL,
+         width INTEGER NOT NULL,
+         height INTEGER NOT NULL,
++        megapixels REAL NOT NULL DEFAULT 0.31,
++        aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+         seed TEXT NOT NULL,
+         sequence_id TEXT,
+         sequence_index INTEGER,
+@@ -138,7 +140,7 @@ def _rebuild_jobs_table(db):
+     _create_jobs_table(db)
+ 
+     columns = [
+-        "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height",
++        "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
+         "input_path", "input_name", "reference_images_json", "reference_videos_json",
+         "reference_audio_path", "reference_audio_name", "no_audio",
+@@ -155,6 +157,8 @@ def _rebuild_jobs_table(db):
+         "steps": "CASE WHEN mode='reference' THEN 20 ELSE 4 END",
+         "width": "736",
+         "height": "416",
++        "megapixels": "0.31",
++        "aspect_ratio": "'16:9'",
+         "progress": "0",
+         "phase": "'queued'",
+         "step": "0",
+@@ -182,7 +186,7 @@ def init_db():
+             required_columns = {
+                 "first_frame_path", "first_frame_name", "last_frame_path", "last_frame_name",
+                 "phase", "step", "total_steps", "eta_seconds",
+-                "engine", "turbo_profile", "encoder", "steps", "width", "height",
++                "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+                 "sequence_id", "sequence_index", "sequence_total",
+                 "reference_audio_path", "reference_audio_name",
+                 "reference_images_json", "reference_videos_json", "no_audio",
+diff --git a/backend/generation.py b/backend/generation.py
+index ac005df..ec40f41 100644
+--- a/backend/generation.py
++++ b/backend/generation.py
+@@ -31,6 +31,8 @@ class GenerationSettings:
+     height: int
+     encoder: str = "native"
+     turbo_profile: str = "v1"
++    megapixels: float = 0.31
++    aspect_ratio: str = "16:9"
+ 
+ 
+ def normalize_generation_settings(
+@@ -40,6 +42,8 @@ def normalize_generation_settings(
+     resolution: str | None = None,
+     encoder: str | None = None,
+     turbo_profile: str | None = None,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
+ ) -> GenerationSettings:
+     resolved_engine = engine or ("standard" if mode == "reference" else "turbo")
+     if resolved_engine not in ("turbo", "standard", "spectrum"):
+@@ -56,8 +60,28 @@ def normalize_generation_settings(
+     if not step_min <= resolved_steps <= step_max:
+         raise ValueError(f"{resolved_engine.capitalize()} steps must be between {step_min} and {step_max}")
+ 
+-    resolved_resolution = resolution or "736x416"
+-    width, height = parse_resolution(resolved_resolution)
++    resolved_aspect = aspect_ratio or "16:9"
++    if resolved_aspect not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
++        raise ValueError("Aspect ratio must be one of 1:1, 16:9, 9:16, 4:3 or 3:4")
++    if megapixels is None:
++        resolved_resolution = resolution or "736x416"
++        width, height = parse_resolution(resolved_resolution)
++        resolved_megapixels = 0.31
++    else:
++        try:
++            resolved_megapixels = float(megapixels)
++        except (TypeError, ValueError):
++            raise ValueError("Megapixels must be a number") from None
++        if not 0.1 <= resolved_megapixels <= 2.0:
++            raise ValueError("Megapixels must be between 0.1 and 2.0")
++        # Compatibility metadata only. The workflow passes megapixels and
++        # aspect_ratio to ResolutionSelector, which owns final dimensions.
++        ratios = {"1:1": 1.0, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4}
++        ratio = ratios[resolved_aspect]
++        width = max(256, round((resolved_megapixels * 1_000_000 * ratio) ** 0.5 / 32) * 32)
++        height = max(256, round((resolved_megapixels * 1_000_000 / ratio) ** 0.5 / 32) * 32)
++        if width * height > MAX_PIXELS:
++            raise ValueError("Megapixels produce a resolution above the 2.0 megapixel safety limit")
+     resolved_encoder = encoder or "native"
+     if resolved_encoder not in ("native", "clipproj"):
+         raise ValueError("Text encoder must be native or clipproj")
+@@ -74,5 +98,5 @@ def normalize_generation_settings(
+         resolved_turbo_profile = "v1"
+     return GenerationSettings(
+         resolved_engine, resolved_steps, width, height,
+-        resolved_encoder, resolved_turbo_profile,
++        resolved_encoder, resolved_turbo_profile, resolved_megapixels, resolved_aspect,
+     )
+diff --git a/backend/main.py b/backend/main.py
+index 61a0d83..9e47a27 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -159,7 +159,7 @@ def read_comfy_log(limit: int = 300) -> list[str]:
+ async def comfy_status():
+     return {
+         "running": await worker.comfy.ready(),
+-        "pid": worker.comfy.process.pid if worker.comfy.process and worker.comfy.process.poll() is None else None,
++        "pid": worker.comfy.discovered_pid(),
+         "host": COMFY_HOST,
+         "port": COMFY_PORT,
+     }
+@@ -335,6 +335,7 @@ async def create_jobs(
+     prompt: str = Form(...), mode: str = Form("text"), duration: float = Form(5),
+     engine: str | None = Form(None), steps: int | None = Form(None),
+     resolution: str | None = Form(None),
++    megapixels: float | None = Form(None), aspect_ratio: str | None = Form(None),
+     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
+     batch: bool = Form(False),
+     connected: bool = Form(False), image: UploadFile | None = File(None),
+@@ -350,6 +351,7 @@ async def create_jobs(
+     try:
+         generation = normalize_generation_settings(
+             mode, engine, steps, resolution, encoder, turbo_profile,
++            megapixels=megapixels, aspect_ratio=aspect_ratio,
+         )
+     except ValueError as exc:
+         raise HTTPException(400, str(exc)) from exc
+@@ -359,8 +361,8 @@ async def create_jobs(
+         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
+     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
+         raise HTTPException(400, "Text mode does not accept reference media")
+-    if mode == "frames" and (image or not first_frame or not last_frame):
+-        raise HTTPException(400, "Combined frame mode requires an opening and a closing image")
++    if mode == "frames" and (image or not first_frame):
++        raise HTTPException(400, "I2V mode requires an opening image; the closing image is optional")
+     if mode in ("opening", "closing") and not image:
+         raise HTTPException(400, "This mode requires one image")
+     if mode == "reference" and not (image or reference_images or reference_videos):
+@@ -434,7 +436,7 @@ async def create_jobs(
+             title = f"רצף מחובר · {len(prompts)} שוטים"
+             db.execute(
+                 """INSERT INTO sequences
+-                   (id,kind,title,status,position,engine,encoder,steps,width,height,duration,
++                       (id,kind,title,status,position,engine,encoder,steps,width,height,duration,
+                     progress,phase,current_item,total_items,created_at,updated_at)
+                    VALUES(?,'connected',?,'queued',?,?,?,?,?,?,?,0,'queued',0,?,?,?)""",
+                 (sequence_id, title, position, generation.engine, generation.encoder,
+@@ -447,11 +449,11 @@ async def create_jobs(
+             if connected:
+                 db.execute(
+                     """INSERT INTO jobs
+-                       (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,seed,
++                       (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,
+                         sequence_id,sequence_index,sequence_total,status,position,created_at,updated_at)
+-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
+-                    (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
+-                     generation.steps, generation.width, generation.height,
++                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
++                  (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
++                     generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
+                      str(secrets.randbits(64)), sequence_id, index + 1, len(prompts),
+                      position, now, now),
+                 )
+@@ -463,14 +465,14 @@ async def create_jobs(
+                 )
+             else:
+                 db.execute("""INSERT INTO jobs
+-                  (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,seed,status,position,input_path,input_name,
++                  (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                    reference_images_json,reference_videos_json,no_audio,
+                    reference_audio_path,reference_audio_name,
+                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
+                    created_at,updated_at)
+-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
++                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (job_id, text, mode, duration, generation.engine, generation.turbo_profile, generation.encoder,
+-                   generation.steps, generation.width, generation.height,
++                   generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
+                    str(secrets.randbits(64)), position + index,
+                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
+                    reference_audio_path, reference_audio_name,
+diff --git a/backend/worker.py b/backend/worker.py
+index de3c9c3..070afc6 100644
+--- a/backend/worker.py
++++ b/backend/worker.py
+@@ -383,6 +383,7 @@ class QueueWorker:
+                 job["prompt"], job["duration"], seed, prefix, reference_images[0] if reference_images else None,
+                 audio_name=job.get("reference_audio_name"),
+                 steps=job["steps"], width=job["width"], height=job["height"],
++                megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
+                 spectrum=job["engine"] == "spectrum", turbo=job["engine"] == "turbo", encoder=encoder,
+                 image_names=reference_images, video_names=json.loads(job.get("reference_videos_json") or "[]"),
+                 include_audio=not bool(job.get("no_audio")),
+@@ -403,6 +404,7 @@ class QueueWorker:
+                 "first_frame_name": first_frame_name,
+                 "last_frame_name": last_frame_name,
+                 "steps": job["steps"], "width": job["width"], "height": job["height"],
++                "megapixels": job.get("megapixels"), "aspect_ratio": job.get("aspect_ratio"),
+                 "encoder": encoder,
+                 "include_audio": not bool(job.get("no_audio")),
+             }
+diff --git a/backend/workflows.py b/backend/workflows.py
+index b78c2c9..a9034e9 100644
+--- a/backend/workflows.py
++++ b/backend/workflows.py
+@@ -21,15 +21,28 @@ def h3_frame_count(duration: float) -> int:
+     return frames + (5 - frames % 17) % 17
+ 
+ 
+-def _resolution_selector(width: int, height: int) -> dict:
++def _resolution_selector(
++    width: int,
++    height: int,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
++) -> dict:
++    # New jobs pass the user/skill megapixel value directly. The node owns the
++    # final width/height calculation. Width/height fallback is for legacy
++    # callers and old saved jobs only.
+     ratio = width / height
+-    aspect = min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
++    aspect = aspect_ratio or min(H3_ASPECT_RATIOS, key=lambda item: abs(H3_ASPECT_RATIOS[item] - ratio))
++    aspect = {
++        "1:1": "1:1 (Square)",
++        "16:9": "16:9 (Widescreen)",
++        "9:16": "9:16 (Portrait Widescreen)",
++        "4:3": "4:3 (Standard)",
++        "3:4": "3:4 (Portrait Standard)",
++    }.get(aspect, aspect)
++    node_megapixels = megapixels if megapixels is not None else width * height / (1024 * 1024)
+     return {
+         "7": {"class_type": "ResolutionSelector", "inputs": {
+-            # ResolutionSelector defines 1.0 MP as 1024*1024 pixels.
+-            # Keep the app's generated API workflow in the same unit as the
+-            # saved ComfyUI workflow instead of converting through decimal MP.
+-            "aspect_ratio": aspect, "megapixels": width * height / (1024 * 1024), "multiple": 32,
++            "aspect_ratio": aspect, "megapixels": node_megapixels, "multiple": 32,
+         }},
+     }
+ 
+@@ -103,6 +116,8 @@ def turbo_workflow(
+     steps: int = 4,
+     width: int = 736,
+     height: int = 416,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
+     encoder: str = "native",
+     turbo_profile: str = "v1",
+     include_audio: bool = True,
+@@ -110,7 +125,7 @@ def turbo_workflow(
+     length = h3_frame_count(duration)
+     nodes = _common_decode("104", "17", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
+     nodes.update({
+-        **_resolution_selector(width, height),
++        **_resolution_selector(width, height, megapixels, aspect_ratio),
+         **_duration_selector(duration),
+         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
+         "18": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {"model": ["6", 0], "lora_name": TURBO_LORAS[turbo_profile], "strength": 1.0, "low_vram": True}},
+@@ -138,13 +153,15 @@ def standard_workflow(
+     steps: int = 20,
+     width: int = 736,
+     height: int = 416,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
+     encoder: str = "native",
+     include_audio: bool = True,
+ ):
+     length = h3_frame_count(duration)
+     nodes = _common_decode("104", "6", {"id": "17", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
+     nodes.update({
+-        **_resolution_selector(width, height),
++        **_resolution_selector(width, height, megapixels, aspect_ratio),
+         **_duration_selector(duration),
+         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
+         "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+@@ -170,6 +187,8 @@ def spectrum_workflow(
+     steps: int = 16,
+     width: int = 736,
+     height: int = 416,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
+     encoder: str = "native",
+     include_audio: bool = True,
+ ):
+@@ -182,7 +201,7 @@ def spectrum_workflow(
+     length = h3_frame_count(duration)
+     nodes = _common_decode("104", "18", {"id": "19", "scheduler": "9"}, seed, prefix, encoder, include_audio=include_audio)
+     nodes.update({
+-        **_resolution_selector(width, height),
++        **_resolution_selector(width, height, megapixels, aspect_ratio),
+         **_duration_selector(duration),
+         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
+         "17": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
+@@ -224,6 +243,8 @@ def reference_workflow(
+     steps: int = 20,
+     width: int = 736,
+     height: int = 416,
++    megapixels: float | None = None,
++    aspect_ratio: str | None = None,
+     spectrum: bool = False,
+     encoder: str = "native",
+     turbo: bool = False,
+@@ -242,7 +263,7 @@ def reference_workflow(
+         seed, prefix, encoder, reference=True, include_audio=include_audio,
+     )
+     nodes.update({
+-        **_resolution_selector(width, height),
++        **_resolution_selector(width, height, megapixels, aspect_ratio),
+         **_duration_selector(duration),
+         "127": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
+         "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "beta" if turbo else "simple", "steps": steps, "denoise": 1.0}},
+@@ -264,8 +285,11 @@ def reference_workflow(
+         if include_audio:
+             nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
+     if audio_name:
+-        nodes["138"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+-        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["138", 0]}
++        # Keep the standalone audio loader away from the image reference
++        # range (137-145).  Reusing node 138 silently replaced image 2 and
++        # wired both ref_image_1 and ref_audio_0 to LoadAudio.
++        nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
++        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["180", 0]}
+     if turbo:
+         nodes.update({
+             "128": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
+diff --git a/scripts/e2e_music_video.py b/scripts/e2e_music_video.py
+index 2d5e1e3..fb697ab 100644
+--- a/scripts/e2e_music_video.py
++++ b/scripts/e2e_music_video.py
+@@ -10,24 +10,25 @@ import requests
+ 
+ 
+ BASE = "http://127.0.0.1:8787"
+-STATE = Path(r"D:\repository\state\e2e_belly_of_the_beast")
++STATE = Path(r"D:\repository\state\e2e_music_video_belly_fresh_05")
+ SONG = Path(r"C:\Users\David Shambik\Downloads\Belly of the Beast.wav")
+-INITIAL = Path(r"C:\Users\David Shambik\.gemini\antigravity-cli\brain\6d1f99b8-97eb-43dc-9f14-75721d52b4d5\shot_rover_standoff_1786802504223.jpg")
++INITIAL = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\review_opening\opening_frame_fresh_04b.png")
++ROVER = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\references\rover_anchor_fresh_01.png")
+ 
+ SHOTS = [
+-    (10, "wide Kingston night establishing shot, dark tinted Rover entering a wet concrete street, two distinct Rastafari men in deep shadow, amber streetlights and teal shadows, slow lateral camera move"),
+-    (15, "Kofi alone walking beside shuttered shops and concrete walls, long dreadlocks and subtle sunglasses, low-angle side tracking shot, reveal the neighborhood and his controlled swagger"),
+-    (10, "tight lyrical tension insert: Kofi notices the dark Rover, eyes shift toward it, hand moves beneath his shirt and grips a concealed handgun without drawing it, restrained close-up, no firing"),
+-    (15, "Zion alone scanning the street from a different corner, navy windbreaker and long dreadlocks, over-the-shoulder view into traffic, handheld documentary movement, blue police reflections beginning"),
+-    (10, "the dark Rover passes close to camera, chrome and tinted glass catching red and amber light, Kofi reflected in the window, dynamic low tracking shot, aggressive chorus energy"),
+-    (15, "Kofi and Zion move in opposite directions through the block, wide composition with depth and silhouettes, pedestrians and Caribbean storefront details, rhythmic camera drift, never a static portrait"),
+-    (10, "Gaza Jay enters from a separate alley, distinct Jamaican man with shorter dreads, bright red-and-gold jacket and round sunglasses, confident solo introduction, whip-pan into a medium shot"),
+-    (15, "blue police lights flood the street, the Rover accelerates away and leaves wet tire marks, Kofi turns but does not chase, fast lateral camera movement followed by a wide aftermath"),
+-    (10, "bridge scene at the same block after the commotion: Kofi kneels and pours white rum onto the pavement for the lost, candlelight and smoke, intimate slow push-in, solemn expression"),
+-    (15, "final chorus dawn movement: Kofi leads the group through the neighborhood, distinct silhouettes, vibrant red, gold and green wardrobe accents, crane-like rise from street level to a wider view"),
+-    (10, "performance-style close-ups cut within one continuous shot: Kofi faces camera with calm authority, Zion crosses behind him, sun breaks over rooftops, strong lens flare and saturated dancehall color"),
+-    (15, "the characters separate into the waking neighborhood, Rover gone, empty street and long shadows, slow pullback revealing Kingston rooftops, resilient victorious mood"),
+-    (4.64, "instrumental tail: empty wet street at sunrise, fading red tail lights in the distance, reggae guitar atmosphere, slow locked-off hold and gentle light change"),
++    (5, "INTRO: restrained opening at a hot concrete corner at night. Kairo and Mally stand low in deep shade, alert and silent, subtle heat haze and distant street atmosphere. No car yet, no weapon, no police action."),
++    (10, "VERSE 1: Kairo and Mally observe the block while an ordinary dark tinted civilian Rover rolls slowly into the far background. Keep the car unmarked, blank plate, no logos, no police lights. Slow side-track, controlled tension."),
++    (15, "VERSE 1: the civilian Rover passes the corner and Kairo follows it with his eyes while Mally scans the opposite direction. Long dreads and sunglasses remain consistent. Slow tracking movement, no confrontation."),
++    (10, "VERSE 1 around 0:30: restrained close-up of Kairo's torso and hand moving beneath his shirt to grip concealed steel, never drawing or firing. Mally remains a blurred lookout in the background. No blood, no performance, deliberate realistic motion."),
++    (15, "PRE-CHORUS: distant siren atmosphere makes both men look toward the end of the street. The civilian Rover continues away through wet amber light. No visible police vehicle and no blue lights yet; camera slowly arcs around the men."),
++    (15, "CHORUS: wider west-side block montage inside one continuous I2V shot: Kairo and Mally move through separate layers of the concrete street, checking corners and keeping low, the neighborhood feels crowded and difficult. No dancing or singing, purposeful movement throughout."),
++    (15, "VERSE 2: the ordinary civilian Rover pulls up and stops at the intersection; its tinted side window rolls down slightly, interior remains in deep shadow. Kairo and Mally hold position. Slow push toward the window, no police identity."),
++    (15, "VERSE 2: sudden blue police lights flash from off-screen, reflecting on the civilian Rover and wet asphalt; the Rover accelerates away and leaves a short tire mark. The lights are environmental only; no police car enters frame. Fast but controlled pan."),
++    (12, "VERSE 2 aftermath: the men remain alive and unhurt as the Rover disappears, Kairo releases the concealed grip and Mally watches the empty street. Handheld breathing space, blue reflections fade, no extra action."),
++    (12, "BRIDGE: solemn close-up of Kairo's hands pouring white rum onto the street for the lost. Same wet concrete location, low light, realistic liquid and reflections, no bottle label or text, no singing or dancing."),
++    (10, "FINAL CHORUS: Kairo and Mally walk the block with controlled resolve, checking the street and helping a frightened neighbor move behind a doorway. Story action only, no performance, vibrant teal and amber night cinematography."),
++    (10, "FINAL CHORUS: the men hold the corner until the first gray morning light, long dreads moving in the breeze, empty civilian street after the Rover has gone. Slow pullback, resilient but restrained."),
++    (10.67, "OUTRO: empty wet street and concrete corner at first light, distant tail lights vanish, the neighborhood settles after the night. Very slow locked-off hold, no text, no logos, no gibberish."),
+ ]
+ 
+ 
+@@ -50,16 +51,20 @@ def main() -> None:
+ 
+     for index in range(completed_count + 1, len(SHOTS) + 1):
+         duration, direction = SHOTS[index - 1]
+-        mp = "0.7 MP" if duration == 10 else "0.5 MP"
+-        resolution = "1120x640" if duration == 10 else "960x544"
++        mp = 1.5 if duration == 5 else 1.0 if duration <= 8 else 0.7 if duration <= 10 else 0.5
++        source = ROVER if index in {2, 3, 7, 8} else previous
++        if not source.exists():
++            raise FileNotFoundError(f"Missing I2V source for shot {index}: {source}")
+         prompt = (
+             "Professional cinematic Jamaican hip-hop/dancehall music video. "
+             f"This is shot {index} of a continuous lyric-timed sequence. "
+-            f"{direction}. Duration target {duration:g} seconds at approximately {mp}. "
++            f"{direction}. Duration target {duration:g} seconds at approximately {mp:.2f} MP. "
+             "Use the input image as the exact starting frame and preserve continuity of faces, wardrobe, geography, "
+             "and lighting only where appropriate; deliberately change framing, subject focus, camera movement, and "
+             "composition so this shot does not look like a repeated portrait. Realistic motion, vibrant but gritty "
+-            "cinematic grade, 35mm lens language, no text, no logos, no audio."
++            "cinematic grade, 35mm lens language. I2V only, silent output. No singing, dancing, lip-sync, performance, "
++            "readable text, logos, signs, labels, plates, or gibberish. The Rover is an ordinary unmarked civilian car, "
++            "never a police car; use a blank featureless plate and preserve its geometry."
+         )
+         data = {
+             "prompt": prompt,
+@@ -67,22 +72,23 @@ def main() -> None:
+             "duration": str(duration),
+             "engine": "turbo",
+             "steps": "6",
+-            "resolution": resolution,
++            "megapixels": str(mp),
++            "aspect_ratio": "16:9",
+             "encoder": "native",
+             "turbo_profile": "v4",
+             "no_audio": "true",
+         }
+-        with previous.open("rb") as image:
++        with source.open("rb") as image:
+             response = session.post(
+                 f"{BASE}/api/jobs",
+                 headers=headers,
+                 data=data,
+-                files={"image": (previous.name, image, "image/jpeg")},
++                files={"image": (source.name, image, "image/png" if source.suffix.lower() == ".png" else "image/jpeg")},
+                 timeout=60,
+             )
+         response.raise_for_status()
+         job_id = response.json()["created"][0]
+-        print(json.dumps({"shot": index, "job": job_id, "duration": duration, "resolution": resolution}), flush=True)
++        print(json.dumps({"shot": index, "job": job_id, "duration": duration, "megapixels": mp, "source": str(source)}), flush=True)
+ 
+         while True:
+             jobs = session.get(f"{BASE}/api/jobs", timeout=30).json()["jobs"]
+@@ -106,7 +112,7 @@ def main() -> None:
+     silent = STATE / "belly_of_the_beast_silent.mp4"
+     final = STATE / "belly_of_the_beast_final.mp4"
+     run_ffmpeg("-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(silent))
+-    run_ffmpeg("-i", str(silent), "-i", str(SONG), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "256k", "-t", "154.64", "-movflags", "+faststart", str(final))
++    run_ffmpeg("-i", str(silent), "-i", str(SONG), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-c:a", "aac", "-b:a", "256k", "-t", "154.67", "-movflags", "+faststart", str(final))
+     print(json.dumps({"complete": True, "silent": str(silent), "final": str(final)}), flush=True)
+ 
+ 
+diff --git a/scripts/start.ps1 b/scripts/start.ps1
+index faa103a..35cef84 100644
+--- a/scripts/start.ps1
++++ b/scripts/start.ps1
+@@ -9,7 +9,7 @@ $logDir = Join-Path $repo 'state\logs'
+ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+ New-Item -ItemType Directory -Path $config.RuntimeRoot -Force | Out-Null
+ 
+-$existing = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $config.AppPort -State Listen -ErrorAction SilentlyContinue
++$existing = Get-NetTCPConnection -LocalPort $config.AppPort -State Listen -ErrorAction SilentlyContinue
+ if ($existing) { Write-Host "Bridge is already listening on $($config.AppPort)."; exit 0 }
+ if (-not (Test-Path -LiteralPath $config.BridgePython -PathType Leaf)) {
+     $fallback = Get-Command python -ErrorAction SilentlyContinue
+diff --git a/skills/e2e-music-video/SKILL.md b/skills/e2e-music-video/SKILL.md
+index 0fed126..b31c36e 100644
+--- a/skills/e2e-music-video/SKILL.md
++++ b/skills/e2e-music-video/SKILL.md
+@@ -31,18 +31,19 @@ Use this skill as a portable production pipeline. Keep creative decisions explic
+ 6. Select T2V for fresh visual resets and I2V for continuity, unless the approved manifest explicitly restricts the project to I2V. For each I2V shot, AGY chooses the prior last frame, a corrected extracted frame, or a fixed anchor.
+ 7. Generate shots with `scripts/e2e_runner.py`. The runner submits jobs, extracts frames, records state, and can be wrapped by an AGY QC adapter.
+ 8. After every completed shot, have AGY inspect identity, action, lyric alignment, composition, motion, artifacts, continuity, and text legibility. Do not continue dependent shots until approved.
+-9. Reject and regenerate failed shots with numbered attempts; never overwrite approved artifacts.
+-10. Concatenate approved silent clips with `scripts/assemble_video.py`, then add the original song and trim the final output to the song duration. Validate streams and duration.
+-11. Deliver the final video, silent master, shot clips, prompts, references, AGY transcript/reports, manifest, and technical report.
++9. For dependent I2V shots, never use the previous last frame blindly. If the prior shot ends on a rear view, cropped face, obscured face, profile that does not establish identity, malformed face, or an otherwise rejected transition, AGY must choose a face-visible corrected extracted frame or a fixed approved character anchor. Record that choice in the transcript and use the selected frame as the next input.
++10. Reject and regenerate failed shots with numbered attempts; never overwrite approved artifacts.
++11. Concatenate approved silent clips with `scripts/assemble_video.py`, then add the original song and trim the final output to the song duration. Validate streams and duration.
++12. Deliver the final video, silent master, shot clips, prompts, references, AGY transcript/reports, manifest, and technical report.
+ 
+ ## Default generation policy
+ 
+ - T2V/I2V selection is per shot.
+ - Turbo v4, 6 steps, 16:9, no generated audio unless overridden.
+-- 5 seconds: approximately 1.5 MP.
+-- 7–8 seconds: approximately 1 MP.
+-- 10 seconds: approximately 0.7 MP.
+-- 15 seconds: approximately 0.5 MP.
++- The skill/agent selects the megapixel value and passes it to the job API as `megapixels`; the ComfyUI `ResolutionSelector` node is the sole authority for final width and height.
++- Do not convert the selected MP value into a resolution in the app or runner.
++- Recommended MP policy for this machine: 5 seconds = 1.5 MP; 6–8 seconds = 1.0 MP; 9–10 seconds = 0.7 MP; 11 seconds = 0.6 MP; 12–15 seconds = 0.5 MP.
++- Always pass the shot's `aspect_ratio` separately (normally `16:9`).
+ 
+ ## Text legibility policy
+ 
+diff --git a/skills/e2e-music-video/scripts/e2e_runner.py b/skills/e2e-music-video/scripts/e2e_runner.py
+index 4935244..1c461cd 100644
+--- a/skills/e2e-music-video/scripts/e2e_runner.py
++++ b/skills/e2e-music-video/scripts/e2e_runner.py
+@@ -17,6 +17,8 @@ def get_session(base: str):
+ 
+ def submit(client, headers, base: str, shot: dict, image: Path | None) -> str:
+     data = {"prompt": shot["prompt"], "mode": "text" if shot["mode"] == "t2v" else "opening", "duration": str(shot["duration"]), "engine": shot.get("engine", "turbo"), "steps": str(shot.get("steps", 6)), "resolution": shot["resolution"], "encoder": shot.get("encoder", "native"), "turbo_profile": shot.get("turbo_profile", "v4"), "no_audio": "true"}
++    if "megapixels" in shot:
++        data["megapixels"] = str(shot["megapixels"])
+     handle = image.open("rb") if image else None
+     files = {"image": (image.name, handle, "image/jpeg")} if image and handle else None
+     try:
+diff --git a/src/main.tsx b/src/main.tsx
+index d2e5203..61808d7 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -13,7 +13,7 @@ type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | '
+ type Page = 'studio' | 'comfy'
+ type Job = {
+   id: string; prompt: string; mode: Mode; duration: number; status: Status; progress: number;
+-  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; position?: number;
++  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; position?: number;
+   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
+   error?: string; video_url?: string; created_at: string; started_at?: string; finished_at?: string;
+   metrics?: { generation_seconds?: number };
+@@ -33,7 +33,7 @@ type Sequence = {
+ 
+ const modes: { id: Mode; label: string; hint: string }[] = [
+   { id: 'text', label: 'טקסט בלבד', hint: 'רעיון הופך לסרטון' },
+-  { id: 'frames', label: 'פריים פותח + סוגר', hint: 'שתי תמונות באותו סרטון' },
++  { id: 'frames', label: 'I2V', hint: 'פריים פותח · פריים סוגר אופציונלי' },
+   { id: 'reference', label: 'רפרנס', hint: 'זהות וסגנון מהתמונה' },
+ ]
+ 
+@@ -46,8 +46,8 @@ const resolutions: ResolutionOption[] = [
+   { id: '768x768', label: 'ריבוע טבעי', hint: '768×768 · 0.56MP', width: 768, height: 768, aspect: '1:1', megapixels: 0.56 },
+   { id: '1024x768', label: '4:3 טבעי', hint: '1024×768 · 0.75MP', width: 1024, height: 768, aspect: '4:3', megapixels: 0.75 },
+   { id: '768x1024', label: '3:4 טבעי', hint: '768×1024 · 0.75MP', width: 768, height: 1024, aspect: '3:4', megapixels: 0.75 },
+-  { id: '1344x768', label: '16:9 טבעי', hint: '1344×768 · 0.98MP', width: 1344, height: 768, aspect: '16:9', megapixels: 0.98 },
+-  { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 0.98MP', width: 768, height: 1344, aspect: '9:16', megapixels: 0.98 },
++  { id: '1344x768', label: '16:9 טבעי', hint: '1344×768 · 1.03MP', width: 1344, height: 768, aspect: '16:9', megapixels: 1.03 },
++  { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 1.03MP', width: 768, height: 1344, aspect: '9:16', megapixels: 1.03 },
+ ]
+ const aspectOptions: Aspect[] = ['1:1', '4:3', '3:4', '16:9', '9:16']
+ 
+@@ -135,9 +135,9 @@ function VideoDropzone({ files, onChange }: { files: File[]; onChange: (files: F
+ 
+ type ComfyPageProps = { running: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
+ 
+-function ComfyPage({ running, busy, lines, error, onRefresh }: ComfyPageProps) {
++function ComfyPage({ running, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
+   return <section className="comfy-page">
+-    <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><button className="icon-button" onClick={onRefresh} aria-label="Refresh log"><RefreshCw size={18} /></button></div>
++    <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><div className="log-actions"><button className="icon-button" onClick={onClear} aria-label="Clear visible log" title="Clear visible log"><Trash2 size={17} /></button><button className="icon-button" onClick={onRefresh} aria-label="Refresh log" title="Refresh log"><RefreshCw size={18} /></button></div></div>
+     <div className={`comfy-state ${running ? 'running' : 'stopped'}`}><i /> {running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
+     {error && <div className="error-banner">{error}</div>}
+     <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
+@@ -179,6 +179,7 @@ function App() {
+   const [comfyRunning, setComfyRunning] = useState(false)
+   const [comfyBusy, setComfyBusy] = useState(false)
+   const [comfyLogs, setComfyLogs] = useState<string[]>([])
++  const [comfyLogCleared, setComfyLogCleared] = useState(false)
+   const [comfyError, setComfyError] = useState('')
+ 
+   const loadSession = async (): Promise<string | null> => {
+@@ -227,7 +228,7 @@ function App() {
+     return () => window.clearInterval(timer)
+   }, [csrf])
+ 
+-  const loadComfy = async () => {
++  const loadComfy = async (forceLogs = false) => {
+     try {
+       const [statusResponse, logsResponse] = await Promise.all([
+         fetch('/api/comfy/status', { cache: 'no-store' }),
+@@ -237,7 +238,7 @@ function App() {
+       const status = await statusResponse.json()
+       const logs = await logsResponse.json()
+       setComfyRunning(Boolean(status.running))
+-      setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
++      if (forceLogs || !comfyLogCleared) setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
+       setComfyError('')
+     } catch {
+       setComfyError('Unable to read ComfyUI status')
+@@ -248,7 +249,7 @@ function App() {
+     void loadComfy()
+     const timer = window.setInterval(() => { void loadComfy() }, 2000)
+     return () => window.clearInterval(timer)
+-  }, [])
++  }, [comfyLogCleared])
+ 
+   useEffect(() => {
+     if (!openingFrame) { setOpeningPreview(''); return }
+@@ -281,8 +282,6 @@ function App() {
+     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
+     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
+   const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
+-  const recommendedMegapixels = duration <= 5 ? 1.5 : duration <= 10 ? 0.7 : 0.5
+-  const recommendedResolution = dimensionsFor(preferences.aspect, recommendedMegapixels)
+   const requestedFrames = Math.max(5, Math.round(duration * 24))
+   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
+   const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : 1
+@@ -361,6 +360,10 @@ function App() {
+     setError('')
+     if (next !== 'text') setConnected(false)
+     if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null) }
++    else if (next === 'opening') {
++      setClosingFrame(null)
++      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null)
++    }
+     else if (next === 'reference') {
+       setOpeningFrame(null)
+       setClosingFrame(null)
+@@ -405,7 +408,7 @@ function App() {
+   const submit = async (confirmed = false) => {
+     setError('')
+     if (!prompt.trim()) return setError('צריך לכתוב פרומפט')
+-    if (mode === 'frames' && (!openingFrame || !closingFrame)) return setError('צריך לצרף גם פריים פותח וגם פריים סוגר')
++    if (mode === 'frames' && !openingFrame) return setError('צריך לצרף פריים פותח')
+     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
+     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
+     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
+@@ -415,11 +418,11 @@ function App() {
+     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
+     const form = new FormData()
+     form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
+-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('resolution', calculatedResolution.id); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
++    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
+     if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
+     if (mode === 'frames') {
+       form.set('first_frame', openingFrame!)
+-      form.set('last_frame', closingFrame!)
++      if (closingFrame) form.set('last_frame', closingFrame)
+     } else if (mode === 'reference') {
+       referenceImages.forEach(file => form.append('reference_images', file))
+       referenceVideos.forEach(file => form.append('reference_videos', file))
+@@ -486,12 +489,12 @@ function App() {
+         <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
+         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
+         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
+-        <button className="icon-button" onClick={() => { if (page === 'comfy') void loadComfy(); else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
++        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
+       </div>
+     </header>
+     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
+-    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onRefresh={() => { void loadComfy() }} /> : <>
++    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); void loadComfy(true) }} /> : <>
+ 
+     <section className="composer">
+       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
+@@ -513,8 +516,8 @@ function App() {
+       </div>
+ 
+       {mode === 'frames' && <div className="frame-grid">
+-        <ImageDropzone label="הוסף פריים פותח" hint="התמונה הראשונה · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
+-        <ImageDropzone label="הוסף פריים סוגר" hint="התמונה האחרונה · JPG, PNG או WebP עד 20MB" preview={closingPreview} onChange={setClosingFrame} />
++        <ImageDropzone label="הוסף פריים פותח · חובה" hint="התמונה הראשונה · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
++        <ImageDropzone label="הוסף פריים סוגר · אופציונלי" hint="אם מצורף, H3 יכוון את הסרטון גם לתמונה הזו" preview={closingPreview} onChange={setClosingFrame} />
+       </div>}
+       {mode === 'reference' && <>
+         <div className="reference-grid">
+@@ -595,7 +598,6 @@ function App() {
+             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
+             <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
+             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
+-            <button type="button" className="setting-note recommendation-action" onClick={() => setPreferences(current => ({ ...current, megapixels: recommendedMegapixels }))}>מומלץ לפי הבדיקות: {recommendedMegapixels.toFixed(1)} MP · {recommendedResolution.id}</button>
+           </div>
+         </div>
+ 
+@@ -669,6 +671,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
+   const steps = job.steps || (engine === 'turbo' ? 4 : engine === 'spectrum' ? 16 : 20)
+   const width = job.width || 736
+   const height = job.height || 416
++  const megapixels = job.megapixels
+   const [now, setNow] = useState(() => Date.now())
+   const [promptExpanded, setPromptExpanded] = useState(false)
+   const [promptCopied, setPromptCopied] = useState(false)
+@@ -703,7 +706,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
+       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
+       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
+       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
+-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span></div>
++      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}</div>
+       {active && <div className="progress-shell">
+         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
+           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
+@@ -774,7 +777,7 @@ function formatDuration(totalSeconds: number) {
+ 
+ function modeLabel(mode: Mode) {
+   if (mode === 'text') return 'טקסט'
+-  if (mode === 'frames') return 'פריים פותח + סוגר'
++  if (mode === 'frames') return 'I2V'
+   if (mode === 'opening') return 'פריים פותח'
+   if (mode === 'closing') return 'פריים סוגר'
+   return 'רפרנס'
+diff --git a/src/styles.css b/src/styles.css
+index 9008f83..7a6ea96 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -16,7 +16,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid
+ .lock-button { color: #d1b77f; }
+ .page-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; padding: 4px; border: 1px solid #29312c; border-radius: 13px; background: #101411; }.page-tabs button { min-height: 36px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #69766d; font-size: 11px; }.page-tabs button.active { border-color: #52665a; background: #1b251e; color: #c0dbc5; }
+ .gpu-conflict-note { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid #765b38; border-radius: 12px; background: #3a2a151f; color: #e1c18f; font-size: 11px; line-height: 1.45; }.gpu-conflict-note svg { flex: 0 0 auto; margin-top: 1px; }.gpu-close-button { display: block; margin-top: 8px; padding: 6px 10px; border: 1px solid #a87745; border-radius: 8px; background: #4b301b; color: #f1d2a0; font-size: 10px; cursor: pointer; }.gpu-close-button:disabled { opacity: .55; cursor: wait; }
+-.comfy-page { padding: 18px; border: 1px solid #353c37; border-radius: 22px; background: linear-gradient(145deg, rgba(31,37,33,.98), rgba(20,23,21,.98)); box-shadow: 0 20px 70px #0007; }.comfy-page-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.comfy-page-heading h2 { margin: 3px 0 14px; font-family: Georgia, serif; font-size: 23px; }.comfy-page-heading .eyebrow { margin: 0; }.comfy-state { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 1px solid #343d37; border-radius: 10px; color: #aebbb1; font-size: 11px; }.comfy-state span { margin-right: auto; color: #68756b; font-size: 9px; }.comfy-log { min-height: 430px; max-height: calc(100vh - 250px); overflow: auto; margin: 12px 0 0; padding: 13px; border: 1px solid #2c352e; border-radius: 12px; background: #080b09; color: #a9c2ad; direction: ltr; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.55 Consolas, monospace; }
++.comfy-page { padding: 18px; border: 1px solid #353c37; border-radius: 22px; background: linear-gradient(145deg, rgba(31,37,33,.98), rgba(20,23,21,.98)); box-shadow: 0 20px 70px #0007; }.comfy-page-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.comfy-page-heading h2 { margin: 3px 0 14px; font-family: Georgia, serif; font-size: 23px; }.comfy-page-heading .eyebrow { margin: 0; }.log-actions { display: flex; align-items: center; gap: 6px; }.comfy-state { display: flex; align-items: center; gap: 7px; padding: 9px 10px; border: 1px solid #343d37; border-radius: 10px; color: #aebbb1; font-size: 11px; }.comfy-state span { margin-right: auto; color: #68756b; font-size: 9px; }.comfy-log { min-height: 430px; max-height: calc(100vh - 250px); overflow: auto; margin: 12px 0 0; padding: 13px; border: 1px solid #2c352e; border-radius: 12px; background: #080b09; color: #a9c2ad; direction: ltr; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.55 Consolas, monospace; }
+ .composer { background: linear-gradient(145deg, rgba(31,37,33,.98), rgba(20,23,21,.98)); border: 1px solid #353c37; border-radius: 24px; padding: 19px; box-shadow: 0 20px 70px #0007; }
+ .eyebrow { display: flex; align-items: center; gap: 7px; color: #b6d7bd; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+ textarea { width: 100%; min-height: 132px; resize: vertical; border: 0; outline: 0; border-radius: 15px; padding: 15px; background: #0f1210; color: #f5f4ef; line-height: 1.55; font-size: 15px; box-shadow: inset 0 0 0 1px #2d332f; }
+diff --git a/tests/test_generation.py b/tests/test_generation.py
+index 4d200e1..a003b64 100644
+--- a/tests/test_generation.py
++++ b/tests/test_generation.py
+@@ -93,18 +93,19 @@ class WorkflowTests(unittest.TestCase):
+         self.assertEqual(workflow["136"]["inputs"]["width"], ["7", 0])
+         self.assertEqual(workflow["136"]["inputs"]["height"], ["7", 1])
+         self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
++        self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
+ 
+     def test_reference_audio_uses_official_ref_audio_input(self):
+         workflow = reference_workflow(
+             "<Picture 1> speaks in time with <Audio 1>", 5, 12,
+             "reference-audio", "face.png", audio_name="voice.wav",
+         )
+-        self.assertEqual(workflow["138"], {
++        self.assertEqual(workflow["180"], {
+             "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
+         })
+         self.assertEqual(
+             workflow["136"]["inputs"]["ref_audios"],
+-            {"ref_audio_0": ["138", 0]},
++            {"ref_audio_0": ["180", 0]},
+         )
+ 
+     def test_reference_turbo_uses_dedicated_chain_and_multiple_media(self):
+diff --git a/tests/test_portability.py b/tests/test_portability.py
+index fc49ec4..86c0e74 100644
+--- a/tests/test_portability.py
++++ b/tests/test_portability.py
+@@ -72,7 +72,7 @@ class PortabilityTests(unittest.TestCase):
+                 {
+                     "runtime_root": ".runtime",
+                     "profile": "full",
+-                    "app": {"host": "0.0.0.0", "port": 8787},
++                    "app": {"host": "192.168.1.1", "port": 8787},
+                     "comfy": {"host": "127.0.0.1", "port": 8190},
+                     "tailscale": {"enabled": True, "scope": "tailnet"},
+                 },
+@@ -128,7 +128,7 @@ class PortabilityTests(unittest.TestCase):
+         dependencies = json.loads((ROOT / "manifests" / "dependencies.json").read_text(encoding="utf-8"))
+         models = json.loads((ROOT / "manifests" / "models.json").read_text(encoding="utf-8"))
+         self.assertEqual(len(dependencies["repositories"]), 5)
+-        self.assertEqual(len(models["models"]), 12)
++        self.assertEqual(len(models["models"]), 13)
+         for item in dependencies["repositories"]:
+             self.assertRegex(item["revision"], r"^[0-9a-f]{40}$")
+         for item in models["models"]:

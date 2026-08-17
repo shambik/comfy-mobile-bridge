@@ -32,11 +32,54 @@ class ComfyClient:
         except Exception:
             return False
 
+    def _windows_process_ids(self) -> list[int]:
+        """Find ComfyUI processes even when this app lost its Popen handle."""
+        if os.name != "nt":
+            return []
+        code = str(COMFY_CODE).replace("'", "''")
+        script = (
+            "$needle = '" + code + "\\main.py'; "
+            "$port = '--port " + str(COMFY_PORT) + "'; "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -and "
+            "$_.Name -match '^python(\.exe)?$' -and "
+            "$_.CommandLine -like ('*' + $needle + '*') -and "
+            "$_.CommandLine -like ('*' + $port + '*') } | "
+            "Select-Object -ExpandProperty ProcessId"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            return [int(line.strip()) for line in result.stdout.splitlines() if line.strip().isdigit()]
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return []
+
+    def discovered_pid(self) -> int | None:
+        if self.process and self.process.poll() is None:
+            return self.process.pid
+        pids = self._windows_process_ids()
+        return pids[0] if pids else None
+
     async def ensure_started(self):
         if await self.ready():
             return
         if not COMFY_PYTHON.exists() or not (COMFY_CODE / "main.py").exists():
             raise RuntimeError("ComfyUI installation is missing")
+
+        # The bridge can lose its Popen handle while a previous ComfyUI
+        # process tree remains alive. Starting another instance then causes
+        # port 8190 and ComfyUI's SQLite database to be locked. Remove only
+        # stale processes matching this exact installation and port.
+        if self._windows_process_ids():
+            await self.shutdown()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if not self._windows_process_ids():
+                    break
+                await asyncio.sleep(0.5)
+
         self.log_handle = open(LOGS / "comfy-8190.log", "a", encoding="utf-8", buffering=1)
         command = [
             str(COMFY_PYTHON), "-u", str(COMFY_CODE / "main.py"),
@@ -163,6 +206,7 @@ class ComfyClient:
     async def shutdown(self):
         process = self.process
         self.process = None
+        discovered = [] if process and process.poll() is None else self._windows_process_ids()
         try:
             if process and process.poll() is None:
                 if os.name == "nt":
@@ -184,6 +228,18 @@ class ComfyClient:
                         await asyncio.to_thread(process.wait, 15)
                     except subprocess.TimeoutExpired:
                         process.kill()
+            elif discovered:
+                # The app may have restarted while ComfyUI remained alive,
+                # leaving no Popen handle. Kill only matching ComfyUI trees.
+                for pid in discovered:
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        check=False,
+                    )
             if process and process.poll() is None:
                 await asyncio.to_thread(process.wait, 5)
         finally:
