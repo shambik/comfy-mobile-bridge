@@ -93,18 +93,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["136"]["inputs"]["width"], ["7", 0])
         self.assertEqual(workflow["136"]["inputs"]["height"], ["7", 1])
         self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
+        self.assertEqual(workflow["123"]["inputs"]["sampler_name"], "res_multistep")
 
     def test_reference_audio_uses_official_ref_audio_input(self):
         workflow = reference_workflow(
             "<Picture 1> speaks in time with <Audio 1>", 5, 12,
             "reference-audio", "face.png", audio_name="voice.wav",
         )
-        self.assertEqual(workflow["138"], {
+        self.assertEqual(workflow["180"], {
             "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
         })
         self.assertEqual(
             workflow["136"]["inputs"]["ref_audios"],
-            {"ref_audio_0": ["138", 0]},
+            {"ref_audio_0": ["180", 0]},
         )
 
     def test_reference_turbo_uses_dedicated_chain_and_multiple_media(self):

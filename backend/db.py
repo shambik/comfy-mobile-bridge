@@ -37,6 +37,8 @@ def _create_jobs_table(db):
         steps INTEGER NOT NULL,
         width INTEGER NOT NULL,
         height INTEGER NOT NULL,
+        megapixels REAL NOT NULL DEFAULT 0.31,
+        aspect_ratio TEXT NOT NULL DEFAULT '16:9',
         seed TEXT NOT NULL,
         sequence_id TEXT,
         sequence_index INTEGER,
@@ -138,7 +140,7 @@ def _rebuild_jobs_table(db):
     _create_jobs_table(db)
 
     columns = [
-        "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height",
+        "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "no_audio",
@@ -155,6 +157,8 @@ def _rebuild_jobs_table(db):
         "steps": "CASE WHEN mode='reference' THEN 20 ELSE 4 END",
         "width": "736",
         "height": "416",
+        "megapixels": "0.31",
+        "aspect_ratio": "'16:9'",
         "progress": "0",
         "phase": "'queued'",
         "step": "0",
@@ -182,7 +186,7 @@ def init_db():
             required_columns = {
                 "first_frame_path", "first_frame_name", "last_frame_path", "last_frame_name",
                 "phase", "step", "total_steps", "eta_seconds",
-                "engine", "turbo_profile", "encoder", "steps", "width", "height",
+                "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
                 "sequence_id", "sequence_index", "sequence_total",
                 "reference_audio_path", "reference_audio_name",
                 "reference_images_json", "reference_videos_json", "no_audio",
