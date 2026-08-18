@@ -22,7 +22,7 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, INPUT, LOGS, MODELS,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
-                     MANAGED_SKILLS, PRODUCTIONS,
+                     AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, get_job, get_sequence, init_db, list_jobs,
@@ -254,6 +254,10 @@ def clipproj_ready() -> bool:
     ))
 
 
+def audio_lock_ready() -> bool:
+    return (AUDIOLOCK_NODE_DIR / "__init__.py").exists()
+
+
 def public_health():
     conflict = fortnite_running()
     return {
@@ -269,6 +273,7 @@ def public_health():
         "spectrum_version": SPECTRUM_NODE_VERSION,
         "clipproj_ready": clipproj_ready(),
         "clipproj_version": CLIPPROJ_NODE_COMMIT[:12],
+        "audio_lock_ready": audio_lock_ready(),
         "turbo_v4_ready": (MODELS / "loras" / TURBO_LORAS["v4"]).exists(),
         "reference_turbo_ready": (MODELS / "loras" / REF2VA_TURBO_LORA).exists(),
         "active_job": worker.current_job,
@@ -1189,20 +1194,22 @@ async def save_image(upload: UploadFile | None) -> tuple[str | None, str | None]
     return str(target), name
 
 
-async def save_audio(upload: UploadFile | None) -> tuple[str | None, str | None]:
+async def save_audio(upload: UploadFile | None, *, allow_longer: bool = False) -> tuple[str | None, str | None]:
     if not upload or not upload.filename:
         return None, None
     allowed = {
         "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
         "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
-        "audio/flac": ".flac", "audio/ogg": ".ogg", "application/ogg": ".ogg",
+        "audio/flac": ".flac", "audio/ogg": ".ogg", "audio/webm": ".webm",
+        "application/ogg": ".ogg",
     }
-    if upload.content_type not in allowed:
-        raise HTTPException(400, "Only WAV, MP3, M4A, AAC, FLAC or OGG audio is allowed")
+    content_type = (upload.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type not in allowed:
+        raise HTTPException(400, "Only WAV, MP3, M4A, AAC, FLAC, OGG or WebM audio is allowed")
     data = await upload.read(50 * 1024 * 1024 + 1)
     if len(data) > 50 * 1024 * 1024:
         raise HTTPException(400, "Audio is larger than 50 MB")
-    name = f"audio_{uuid.uuid4().hex}{allowed[upload.content_type]}"
+    name = f"audio_{uuid.uuid4().hex}{allowed[content_type]}"
     target = INPUT / name
     target.write_bytes(data)
     ffprobe = shutil.which("ffprobe")
@@ -1218,12 +1225,54 @@ async def save_audio(upload: UploadFile | None) -> tuple[str | None, str | None]
         payload = json.loads(result.stdout) if result.returncode == 0 else {}
         duration = float(payload.get("format", {}).get("duration") or 0)
         has_audio = any(stream.get("codec_type") == "audio" for stream in payload.get("streams", []))
-        if not has_audio or not 0.1 <= duration <= 60:
+        max_duration = 3600 if allow_longer else 60
+        if not has_audio or not 0.1 <= duration <= max_duration:
             raise ValueError
     except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
         target.unlink(missing_ok=True)
-        raise HTTPException(400, "The uploaded file is not valid audio between 0.1 and 60 seconds")
+        limit = "3600" if allow_longer else "60"
+        raise HTTPException(400, f"The uploaded file is not valid audio between 0.1 and {limit} seconds")
     return str(target), name
+
+
+def probe_audio_duration(path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise HTTPException(503, "ffprobe is required to validate uploaded audio")
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        duration = float(result.stdout.strip()) if result.returncode == 0 else 0.0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        duration = 0.0
+    if duration <= 0:
+        raise HTTPException(400, "Could not read the uploaded audio duration")
+    return duration
+
+
+def trim_audio(path: Path, start: float, duration: float) -> tuple[str, str]:
+    """Create a normalized WAV segment for Native AudioLock."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(503, "ffmpeg is required to trim uploaded audio")
+    target = INPUT / f"audio_{uuid.uuid4().hex}_trimmed.wav"
+    result = subprocess.run(
+        [ffmpeg, "-y", "-v", "error", "-ss", f"{start:.6f}", "-i", str(path),
+         "-t", f"{duration:.6f}", "-ar", "48000", "-ac", "2",
+         "-c:a", "pcm_s16le", str(target)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode or not target.exists():
+        target.unlink(missing_ok=True)
+        raise HTTPException(400, "Could not trim the uploaded audio")
+    trimmed_duration = probe_audio_duration(target)
+    if trimmed_duration < max(0.1, duration - 0.08):
+        target.unlink(missing_ok=True)
+        raise HTTPException(400, "The trimmed audio is shorter than the requested generation")
+    return str(target), target.name
 
 
 async def save_video(upload: UploadFile | None) -> tuple[str | None, str | None]:
@@ -1286,12 +1335,14 @@ async def create_jobs(
     reference_images: list[UploadFile] = File(default=[]),
     reference_videos: list[UploadFile] = File(default=[]),
     reference_audio: UploadFile | None = File(None),
+    audio: UploadFile | None = File(None),
+    audio_start: float = Form(0),
     no_audio: bool = Form(False),
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
     project_id: str = Form(""), folder_id: str = Form(""),
 ):
     require_csrf(request)
-    if mode not in ("text", "opening", "closing", "frames", "reference") or not 0.5 <= duration <= 60:
+    if mode not in ("text", "opening", "closing", "frames", "reference", "lip_sync") or not 0.5 <= duration <= 60:
         raise HTTPException(400, "Duration must be between 0.5 and 60 seconds")
     selected_project = project_id.strip() or None
     selected_folder = folder_id.strip() or None
@@ -1312,6 +1363,16 @@ async def create_jobs(
         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
         raise HTTPException(400, "Text mode does not accept reference media")
+    if mode == "lip_sync" and (image or reference_images or reference_videos or reference_audio or last_frame):
+        raise HTTPException(400, "Lip-sync accepts an optional opening frame and one uploaded audio track")
+    if mode == "lip_sync" and not audio:
+        raise HTTPException(400, "Lip-sync requires an uploaded audio track")
+    if mode == "lip_sync" and no_audio:
+        raise HTTPException(400, "Lip-sync always keeps the uploaded audio")
+    if mode != "lip_sync" and audio:
+        raise HTTPException(400, "Uploaded audio is available in lip-sync mode only")
+    if mode == "lip_sync" and (isinstance(audio_start, bool) or audio_start < 0):
+        raise HTTPException(400, "Audio start must be zero or a positive number")
     if mode == "frames" and (image or not first_frame):
         raise HTTPException(400, "I2V mode requires an opening image; the closing image is optional")
     if mode in ("opening", "closing") and not image:
@@ -1326,15 +1387,19 @@ async def create_jobs(
         raise HTTPException(400, "Reference mode supports up to 9 images")
     if len(reference_videos) > 3:
         raise HTTPException(400, "Reference mode supports up to 3 videos")
-    if mode != "reference" and reference_audio:
+    if mode not in ("reference",) and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
+    if mode == "lip_sync" and (generation.engine != "standard" or generation.encoder != "native"):
+        raise HTTPException(400, "Lip-sync uses the Standard engine and native 32B encoder")
+    if mode == "lip_sync" and batch:
+        raise HTTPException(400, "Lip-sync creates one video at a time")
     if mode != "reference" and generation.turbo_profile == "v4" and not (MODELS / "loras" / TURBO_LORAS["v4"]).exists():
         raise HTTPException(409, "Turbo v4 is not installed yet")
     if mode == "reference" and generation.engine == "turbo" and not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
         raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
     if mode == "reference" and duration > 5 and not REFERENCE_10S_MARKER.exists():
         raise HTTPException(409, "Reference mode above 5 seconds is not ready")
-    prompts = parse_prompts(prompt, batch)
+    prompts = parse_prompts(prompt or "Use the supplied audio with natural, precise lip-sync.", batch)
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
     input_path = input_name = None
@@ -1365,6 +1430,19 @@ async def create_jobs(
             reference_audio_path, reference_audio_name = await save_audio(reference_audio)
             if reference_audio_path:
                 saved_paths.append(reference_audio_path)
+        if audio:
+            reference_audio_path, reference_audio_name = await save_audio(audio, allow_longer=True)
+            if reference_audio_path:
+                saved_paths.append(reference_audio_path)
+                source_duration = probe_audio_duration(Path(reference_audio_path))
+                if audio_start + duration > source_duration + 0.08:
+                    raise HTTPException(400, "The uploaded audio is shorter than the requested generation")
+                if audio_start > 0.01 or source_duration > duration + 0.08:
+                    trimmed_path, trimmed_name = trim_audio(Path(reference_audio_path), audio_start, duration)
+                    Path(reference_audio_path).unlink(missing_ok=True)
+                    saved_paths.remove(reference_audio_path)
+                    saved_paths.append(trimmed_path)
+                    reference_audio_path, reference_audio_name = trimmed_path, trimmed_name
         if first_frame:
             first_frame_path, first_frame_name = await save_image(first_frame)
             if first_frame_path:

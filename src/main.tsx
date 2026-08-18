@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
 
-type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing'
+type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
 type Engine = 'turbo' | 'standard' | 'spectrum'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
@@ -36,6 +36,7 @@ const modes: { id: Mode; label: string; hint: string }[] = [
   { id: 'text', label: 'טקסט בלבד', hint: 'רעיון הופך לסרטון' },
   { id: 'frames', label: 'I2V', hint: 'פריים פותח · פריים סוגר אופציונלי' },
   { id: 'reference', label: 'רפרנס', hint: 'זהות וסגנון מהתמונה' },
+  { id: 'lip_sync', label: 'דיבוב', hint: 'אודיו מדויק · פריים פותח אופציונלי' },
 ]
 
 type Aspect = '1:1' | '4:3' | '3:4' | '16:9' | '9:16'
@@ -119,12 +120,15 @@ function ImageDropzone({ label, hint, preview, onChange }: ImageDropzoneProps) {
 type AudioDropzoneProps = {
   file: File | null
   onChange: (file: File | null) => void
+  label?: string
+  hint?: string
+  disabled?: boolean
 }
 
-function AudioDropzone({ file, onChange }: AudioDropzoneProps) {
+function AudioDropzone({ file, onChange, label = 'הוסף אודיו לרפרנס', hint = 'WAV, MP3, M4A, AAC, FLAC, OGG או WebM · עד 50MB', disabled = false }: AudioDropzoneProps) {
   return <label className={`dropzone audio-dropzone ${file ? 'has-audio' : ''}`}>
-    <input type="file" accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/aac,audio/flac,audio/ogg" onChange={e => onChange(e.target.files?.[0] || null)} />
-    {file ? <><AudioLines size={24} /><strong dir="auto">{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)}MB · רפרנס אופציונלי</span><button type="button" aria-label="הסרת אודיו" onClick={e => { e.preventDefault(); e.stopPropagation(); onChange(null) }}><X size={17} /></button></> : <><AudioLines size={24} /><strong>הוסף אודיו לרפרנס</strong><span>WAV, MP3, M4A, AAC, FLAC או OGG · עד 50MB</span></>}
+    <input type="file" disabled={disabled} accept="audio/wav,audio/x-wav,audio/mpeg,audio/mp4,audio/x-m4a,audio/aac,audio/flac,audio/ogg,audio/webm" onChange={e => onChange(e.target.files?.[0] || null)} />
+    {file ? <><AudioLines size={24} /><strong dir="auto">{file.name}</strong><span>{(file.size / 1024 / 1024).toFixed(1)}MB</span><button type="button" aria-label="הסרת אודיו" onClick={e => { e.preventDefault(); e.stopPropagation(); onChange(null) }}><X size={17} /></button></> : <><AudioLines size={24} /><strong>{label}</strong><span>{hint}</span></>}
   </label>
 }
 
@@ -168,6 +172,18 @@ function App() {
   const [referenceImages, setReferenceImages] = useState<File[]>([])
   const [referenceVideos, setReferenceVideos] = useState<File[]>([])
   const [referenceAudio, setReferenceAudio] = useState<File | null>(null)
+  const [lipSyncAudio, setLipSyncAudio] = useState<File | null>(null)
+  const [lipSyncAudioDuration, setLipSyncAudioDuration] = useState<number | null>(null)
+  const [lipSyncAudioPreview, setLipSyncAudioPreview] = useState('')
+  const [audioTrimStart, setAudioTrimStart] = useState(0)
+  const lipSyncAudioElementRef = useRef<HTMLAudioElement | null>(null)
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recordingStreamRef = useRef<MediaStream | null>(null)
+  const recordingChunksRef = useRef<Blob[]>([])
+  const recordingStartedAtRef = useRef(0)
+  const discardRecordingRef = useRef(false)
   const [openingFrame, setOpeningFrame] = useState<File | null>(null)
   const [closingFrame, setClosingFrame] = useState<File | null>(null)
   const [openingPreview, setOpeningPreview] = useState('')
@@ -180,6 +196,7 @@ function App() {
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
+  const [audioLockReady, setAudioLockReady] = useState(false)
   const [gpuConflict, setGpuConflict] = useState(false)
   const [gpuBusy, setGpuBusy] = useState(false)
   const [noAudio, setNoAudio] = useState(false)
@@ -214,6 +231,7 @@ function App() {
       setClipprojReady(data.clipproj_ready)
       setTurboV4Ready(data.turbo_v4_ready)
       setReferenceTurboReady(data.reference_turbo_ready)
+      setAudioLockReady(Boolean(data.audio_lock_ready))
       setGpuConflict(Boolean(data.gpu_conflict))
       return data.csrf_token
     } catch {
@@ -228,6 +246,7 @@ function App() {
       if (response.ok) {
         const data = await response.json()
         setJobs(data.jobs); setSequences(data.sequences || []); setLibrary(data.library || { root: '', projects: [], assignments: [] }); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready); setGpuConflict(Boolean(data.gpu_conflict))
+        setAudioLockReady(Boolean(data.audio_lock_ready))
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
@@ -264,6 +283,115 @@ function App() {
     }
   }
 
+  const releaseRecordingStream = () => {
+    recordingStreamRef.current?.getTracks().forEach(track => track.stop())
+    recordingStreamRef.current = null
+  }
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current
+    if (!recorder) return
+    if (recorder.state === 'inactive') {
+      releaseRecordingStream()
+      recorderRef.current = null
+      setIsRecording(false)
+      return
+    }
+    recorder.stop()
+  }
+
+  const cancelRecording = () => {
+    discardRecordingRef.current = true
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop()
+      return
+    }
+    releaseRecordingStream()
+    recorderRef.current = null
+    setIsRecording(false)
+    setRecordingSeconds(0)
+  }
+
+  const startRecording = async () => {
+    if (isRecording) return
+    setError('')
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setError('הדפדפן הזה לא תומך בהקלטה מהמיקרופון')
+      return
+    }
+    let stream: MediaStream | null = null
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg']
+      const mimeType = mimeCandidates.find(candidate => MediaRecorder.isTypeSupported(candidate)) || ''
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      const recordedMimeType = mimeType || 'audio/webm'
+      recordingChunksRef.current = []
+      recordingStartedAtRef.current = Date.now()
+      discardRecordingRef.current = false
+      recordingStreamRef.current = stream
+      recorderRef.current = recorder
+      recorder.ondataavailable = event => {
+        if (event.data.size > 0) recordingChunksRef.current.push(event.data)
+      }
+      recorder.onstop = () => {
+        const shouldDiscard = discardRecordingRef.current
+        discardRecordingRef.current = false
+        const chunks = recordingChunksRef.current
+        recordingChunksRef.current = []
+        const seconds = Math.min(60, Math.max(0, (Date.now() - recordingStartedAtRef.current) / 1000))
+        const baseMimeType = (recorder.mimeType || recordedMimeType).split(';')[0] || 'audio/webm'
+        recorderRef.current = null
+        releaseRecordingStream()
+        setIsRecording(false)
+        setRecordingSeconds(seconds)
+        if (shouldDiscard) return
+        if (seconds < 0.5 || !chunks.length) {
+          setError('ההקלטה קצרה מדי. הקליטי לפחות חצי שנייה')
+          return
+        }
+        const blob = new Blob(chunks, { type: baseMimeType })
+        const extension = baseMimeType.includes('ogg') ? 'ogg' : 'webm'
+        const file = new File([blob], `lip-sync-recording-${Date.now()}.${extension}`, { type: baseMimeType })
+        setLipSyncAudio(file)
+        setAudioTrimStart(0)
+        setError('')
+      }
+      recorder.onerror = () => {
+        discardRecordingRef.current = true
+        setError('ההקלטה נכשלה. בדקי שהמיקרופון זמין ונסי שוב')
+        if (recorder.state !== 'inactive') recorder.stop()
+      }
+      recorder.start(250)
+      setRecordingSeconds(0)
+      setIsRecording(true)
+    } catch {
+      stream?.getTracks().forEach(track => track.stop())
+      setError('אין גישה למיקרופון. אפשרי הרשאת מיקרופון בדפדפן ונסי שוב')
+    }
+  }
+
+  useEffect(() => {
+    if (!isRecording) return
+    const timer = window.setInterval(() => {
+      const elapsed = (Date.now() - recordingStartedAtRef.current) / 1000
+      if (elapsed >= 59.8) {
+        setRecordingSeconds(60)
+        stopRecording()
+        return
+      }
+      setRecordingSeconds(elapsed)
+    }, 200)
+    return () => window.clearInterval(timer)
+  }, [isRecording])
+
+  useEffect(() => () => {
+    discardRecordingRef.current = true
+    if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop()
+    releaseRecordingStream()
+  }, [])
+
   useEffect(() => {
     void loadComfy()
     const timer = window.setInterval(() => { void loadComfy() }, 2000)
@@ -283,6 +411,63 @@ function App() {
   }, [closingFrame])
 
   useEffect(() => {
+    if (!lipSyncAudio) {
+      setLipSyncAudioPreview('')
+      setLipSyncAudioDuration(null)
+      setAudioTrimStart(0)
+      return
+    }
+    const url = URL.createObjectURL(lipSyncAudio)
+    setLipSyncAudioPreview(url)
+    const probe = new Audio()
+    probe.preload = 'metadata'
+    probe.onloadedmetadata = () => {
+      if (Number.isFinite(probe.duration) && probe.duration > 0) {
+        const nextDuration = Math.max(0.5, Math.min(60, probe.duration))
+        setLipSyncAudioDuration(probe.duration)
+        setDuration(current => Math.min(current, Math.round(nextDuration * 10) / 10))
+      }
+    }
+    probe.src = url
+    return () => {
+      probe.removeAttribute('src')
+      probe.load()
+      URL.revokeObjectURL(url)
+    }
+  }, [lipSyncAudio])
+
+  useEffect(() => {
+    if (mode !== 'lip_sync' || !lipSyncAudioDuration) return
+    const maxStart = Math.max(0, lipSyncAudioDuration - duration)
+    setAudioTrimStart(current => Math.min(Math.max(0, current), maxStart))
+  }, [mode, lipSyncAudioDuration, duration])
+
+  const audioPreviewIsTrimmed = mode === 'lip_sync' && !!lipSyncAudioDuration && lipSyncAudioDuration > duration + 0.08
+  const audioPreviewEnd = audioPreviewIsTrimmed && lipSyncAudioDuration
+    ? Math.min(lipSyncAudioDuration, audioTrimStart + duration)
+    : null
+  const syncLipSyncAudioPreview = () => {
+    const audio = lipSyncAudioElementRef.current
+    if (!audio || !audioPreviewIsTrimmed || audioPreviewEnd === null) return
+    if (audio.currentTime < audioTrimStart || audio.currentTime >= audioPreviewEnd) audio.currentTime = audioTrimStart
+  }
+  const stopAtLipSyncAudioPreviewEnd = () => {
+    const audio = lipSyncAudioElementRef.current
+    if (!audio || !audioPreviewIsTrimmed || audioPreviewEnd === null) return
+    if (audio.currentTime >= audioPreviewEnd - 0.02) {
+      audio.pause()
+      audio.currentTime = audioTrimStart
+    }
+  }
+
+  useEffect(() => {
+    const audio = lipSyncAudioElementRef.current
+    if (!audio || mode !== 'lip_sync') return
+    audio.pause()
+    if (audioPreviewIsTrimmed) audio.currentTime = audioTrimStart
+  }, [mode, lipSyncAudioPreview, audioPreviewIsTrimmed, audioTrimStart, duration])
+
+  useEffect(() => {
     localStorage.setItem(preferenceKey, JSON.stringify(preferences))
   }, [preferences])
 
@@ -294,8 +479,8 @@ function App() {
   }, [confirming])
 
   const paragraphCount = useMemo(() => batch ? prompt.trim().split(/\n\s*\n/).filter(Boolean).length : 1, [prompt, batch])
-  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
-  const effectiveEncoder: Encoder = preferences.encoder
+  const effectiveEngine: Engine = mode === 'lip_sync' ? 'standard' : mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
+  const effectiveEncoder: Encoder = mode === 'lip_sync' ? 'native' : preferences.encoder
   const generationSteps = mode === 'reference' && effectiveEngine === 'turbo' ? 4 : effectiveEngine === 'turbo' ? preferences.turboSteps : effectiveEngine === 'spectrum' ? preferences.spectrumSteps : preferences.standardSteps
   const stepRange = effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
@@ -460,33 +645,49 @@ function App() {
   }
 
   const selectMode = (next: Mode) => {
+    if (next === 'lip_sync' && !audioLockReady) {
+      setError('מצב דיבוב עדיין לא מוכן. הפעילי מחדש את ComfyUI אחרי התקנת Native AudioLock')
+      return
+    }
+    if (next !== 'lip_sync' && isRecording) cancelRecording()
     setMode(next)
     setError('')
     if (next !== 'text') setConnected(false)
-    if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null) }
+    if (next !== 'lip_sync') setLipSyncAudio(null)
+    if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null) }
     else if (next === 'opening') {
       setClosingFrame(null)
-      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null)
+      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null)
+    }
+    else if (next === 'lip_sync') {
+      setClosingFrame(null)
+      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setNoAudio(false)
+      setPreferences(current => ({ ...current, engine: 'standard', encoder: 'native', aspect: '16:9', megapixels: Math.max(current.megapixels, 0.41) }))
+      setBatch(false)
     }
     else if (next === 'reference') {
       setOpeningFrame(null)
       setClosingFrame(null)
+      setLipSyncAudio(null)
     } else if (next === 'text') {
       setReferenceImages([])
       setReferenceVideos([])
       setReferenceAudio(null)
       setOpeningFrame(null)
       setClosingFrame(null)
+      setLipSyncAudio(null)
     }
   }
 
   const selectEngine = (engine: Engine) => {
+    if (mode === 'lip_sync') return
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
     setPreferences(current => ({ ...current, engine }))
   }
 
   const selectEncoder = (encoder: Encoder) => {
+    if (mode === 'lip_sync') return
     if (encoder === 'clipproj' && !clipprojReady) return
     setPreferences(current => ({ ...current, encoder }))
   }
@@ -511,8 +712,11 @@ function App() {
 
   const submit = async (confirmed = false) => {
     setError('')
-    if (!prompt.trim()) return setError('צריך לכתוב פרומפט')
+    if (!prompt.trim() && mode !== 'lip_sync') return setError('צריך לכתוב פרומפט')
     if (mode === 'frames' && !openingFrame) return setError('צריך לצרף פריים פותח')
+    if (mode === 'lip_sync' && !audioLockReady) return setError('Native AudioLock עדיין לא נטען ב־ComfyUI')
+    if (mode === 'lip_sync' && !lipSyncAudio) return setError('צריך לצרף אודיו לדיבוב')
+    if (mode === 'lip_sync' && lipSyncAudioDuration && audioTrimStart + duration > lipSyncAudioDuration + 0.08) return setError('הקטע שנבחר קצר מדי למשך הג׳נרוט')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -521,13 +725,18 @@ function App() {
     const sessionToken = csrf || await loadSession()
     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
-    form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
+    const requestPrompt = prompt.trim() || 'Use the supplied audio with natural, precise lip-sync. Keep the face and camera stable.'
+    form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
     form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
     if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
     if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
       form.set('first_frame', openingFrame!)
       if (closingFrame) form.set('last_frame', closingFrame)
+    } else if (mode === 'lip_sync') {
+      if (openingFrame) form.set('first_frame', openingFrame)
+      form.set('audio', lipSyncAudio!)
+      form.set('audio_start', String(audioTrimStart))
     } else if (mode === 'reference') {
       referenceImages.forEach(file => form.append('reference_images', file))
       referenceVideos.forEach(file => form.append('reference_videos', file))
@@ -537,7 +746,7 @@ function App() {
     setSending(true)
     try {
       await mutate('/api/jobs', 'POST', form, sessionToken)
-      setPrompt(''); setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false)
+      setPrompt(''); setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false); setAudioTrimStart(0)
     } catch (e) { setError(e instanceof Error ? e.message : 'השליחה נכשלה') }
     finally { setSending(false) }
   }
@@ -649,8 +858,8 @@ function App() {
       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
       <div className="generation-destination"><Folder size={16}/><label><span>Save new results in project</span><select value={destinationProject} onChange={event => { setDestinationProject(event.target.value); setDestinationFolder('') }}><option value="">Unassigned · ComfyUI output</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>Folder</span><select value={destinationFolder} disabled={!destinationProject} onChange={event => setDestinationFolder(event.target.value)}><option value="">Project root</option>{library.projects.find(project => project.id === destinationProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>{destinationProject && <button type="button" onClick={() => { void createStudioFolder(destinationProject) }}><FolderPlus size={15}/> New folder</button>}</div>
       <textarea value={prompt} onChange={e => setPrompt(e.target.value)} maxLength={batch ? 80000 : 4000}
-        placeholder={batch ? 'הדבק כמה פרומפטים. השאר שורה ריקה בין כל אחד…' : 'תאר את הסרטון שאתה רוצה ליצור…'} />
-      <div className="composer-meta"><span>{prompt.length.toLocaleString()} תווים</span><label className="batch-toggle"><input type="checkbox" checked={batch} onChange={e => { setBatch(e.target.checked); if (!e.target.checked) setConnected(false) }} /><span>כמה פרומפטים</span></label></div>
+        placeholder={batch ? 'הדבק כמה פרומפטים. השאר שורה ריקה בין כל אחד…' : mode === 'lip_sync' ? 'אופציונלי: תאר את ההופעה, המצלמה וההבעה…' : 'תאר את הסרטון שאתה רוצה ליצור…'} />
+      <div className="composer-meta"><span>{prompt.length.toLocaleString()} תווים</span><label className="batch-toggle"><input type="checkbox" checked={batch} disabled={mode === 'lip_sync'} onChange={e => { setBatch(e.target.checked); if (!e.target.checked) setConnected(false) }} /><span>כמה פרומפטים</span></label></div>
       {batch && <div className="batch-note">כל פסקה היא שוט אחד · {paragraphCount} שוטים</div>}
       {batch && mode === 'text' && <div className="sequence-choice" aria-label="אופן עיבוד הפרומפטים">
         <button type="button" className={!connected ? 'active' : ''} onClick={() => setConnected(false)}><Clapperboard size={17} /><span><strong>נפרדים</strong><small>כל פרומפט הוא תוצאה</small></span></button>
@@ -659,15 +868,37 @@ function App() {
       {connected && <div className="connected-note"><Route size={14} /><span>האפליקציה תייצר לפי הסדר, תבדוק כל שוט, תחלץ את הפריים האחרון ותחבר MP4 סופי אחד.</span></div>}
 
       <div className="mode-grid">
-        {modes.map(item => <button key={item.id} className={`mode-card ${mode === item.id ? 'selected' : ''}`} onClick={() => selectMode(item.id)}>
+        {modes.map(item => <button key={item.id} type="button" disabled={item.id === 'lip_sync' && !audioLockReady} className={`mode-card ${mode === item.id ? 'selected' : ''}`} onClick={() => selectMode(item.id)}>
           <span className="mode-check">{mode === item.id && <Check size={13} />}</span>
-          <strong>{item.label}</strong><small>{item.hint}</small>
+          <strong>{item.label}</strong><small>{item.id === 'lip_sync' && !audioLockReady ? 'ממתין ל־Native AudioLock' : item.hint}</small>
         </button>)}
       </div>
 
       {mode === 'frames' && <div className="frame-grid">
         <ImageDropzone label="הוסף פריים פותח · חובה" hint="התמונה הראשונה · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
         <ImageDropzone label="הוסף פריים סוגר · אופציונלי" hint="אם מצורף, H3 יכוון את הסרטון גם לתמונה הזו" preview={closingPreview} onChange={setClosingFrame} />
+      </div>}
+      {mode === 'lip_sync' && <div className="lip-sync-inputs">
+        <ImageDropzone label="פריים פותח · אופציונלי" hint="הדמות שאותה תרצה לדובב · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
+        <div className="lip-sync-audio-box">
+          <AudioDropzone file={lipSyncAudio} onChange={setLipSyncAudio} disabled={isRecording} label="הוסף אודיו לדיבוב · חובה" hint="WAV, MP3, M4A, AAC, FLAC, OGG או WebM · עד 50MB" />
+          <div className="recording-controls">
+            {!isRecording ? <button type="button" className="record-button" onClick={() => { void startRecording() }} disabled={sending}>
+              <Mic size={17} /><span>התחל הקלטה</span><small>מיקרופון · עד 60 שניות</small>
+            </button> : <button type="button" className="record-button recording" onClick={stopRecording}>
+              <Square size={15} /><span>עצור הקלטה</span><b dir="ltr">{formatClipTime(recordingSeconds)}</b>
+            </button>}
+            {!isRecording && <span className="recording-alternative"><Mic size={13} /> או הקלט מהמיקרופון במקום להעלות קובץ</span>}
+          </div>
+          {lipSyncAudioPreview && <audio ref={lipSyncAudioElementRef} className="lip-sync-audio-player" controls preload="metadata" src={lipSyncAudioPreview} onLoadedMetadata={syncLipSyncAudioPreview} onPlay={syncLipSyncAudioPreview} onSeeking={syncLipSyncAudioPreview} onTimeUpdate={stopAtLipSyncAudioPreviewEnd} />}
+          {lipSyncAudio && lipSyncAudioDuration && lipSyncAudioDuration > duration + 0.08 && <div className="audio-trim-box">
+            <div className="audio-trim-heading"><span>חיתוך אודיו</span><small>נבחר קטע של {duration.toFixed(1)} שנ׳ מתוך {lipSyncAudioDuration.toFixed(1)} שנ׳</small></div>
+            <input className="audio-trim-range" dir="ltr" type="range" min="0" max={Math.max(0, lipSyncAudioDuration - duration)} step="0.1" value={audioTrimStart} onChange={event => setAudioTrimStart(Number(event.target.value))} aria-label="נקודת התחלה באודיו" />
+            <div className="audio-trim-times" dir="ltr"><span>{formatClipTime(audioTrimStart)}</span><span>{formatClipTime(audioTrimStart + duration)}</span></div>
+            <small className="audio-trim-note">הנגן יעצור בסוף הקטע, ולרינדור יישלח הקטע החתוך בלבד.</small>
+          </div>}
+          {lipSyncAudio && lipSyncAudioDuration && lipSyncAudioDuration <= duration + 0.08 && <div className="reference-audio-note"><AudioLines size={14} /><span>האודיו קצר או שווה למשך הג׳נרוט, ולכן לא צריך חיתוך.</span></div>}
+        </div>
       </div>}
       {mode === 'reference' && <>
         <div className="reference-grid">
@@ -689,18 +920,19 @@ function App() {
           <div className="setting-block">
             <div className="setting-title"><span>מנוע</span><small>מהירות מול איכות</small></div>
             <div className="engine-toggle">
-              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'reference' && !referenceTurboReady} onClick={() => selectEngine('turbo')}>
+              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'lip_sync' || mode === 'reference' && !referenceTurboReady} onClick={() => selectEngine('turbo')}>
                 <Zap size={16} /><span><strong>Turbo</strong><small>מהיר</small></span>
               </button>
               <button type="button" className={effectiveEngine === 'standard' ? 'active' : ''} aria-pressed={effectiveEngine === 'standard'} onClick={() => selectEngine('standard')}>
                 <Gauge size={16} /><span><strong>רגיל</strong><small>מדויק</small></span>
               </button>
-              <button type="button" className={effectiveEngine === 'spectrum' ? 'active' : ''} aria-pressed={effectiveEngine === 'spectrum'} disabled={!spectrumReady} onClick={() => selectEngine('spectrum')}>
+              <button type="button" className={effectiveEngine === 'spectrum' ? 'active' : ''} aria-pressed={effectiveEngine === 'spectrum'} disabled={mode === 'lip_sync' || !spectrumReady} onClick={() => selectEngine('spectrum')}>
                 <Sparkles size={16} /><span><strong>Spectrum</strong><small>native + מהיר</small></span>
               </button>
             </div>
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
             {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
+            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · Standard · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
             {effectiveEngine === 'turbo' && mode !== 'reference' && <>
               <div className="setting-title turbo-profile-title"><span>Turbo LoRA</span><small>בחירת אופי התוצאה</small></div>
@@ -719,7 +951,7 @@ function App() {
               <button type="button" className={effectiveEncoder === 'native' ? 'active' : ''} aria-pressed={effectiveEncoder === 'native'} onClick={() => selectEncoder('native')}>
                 <BrainCircuit size={17} /><span><strong>32B מקורי</strong><small>דיוק מלא</small></span>
               </button>
-              <button type="button" className={effectiveEncoder === 'clipproj' ? 'active' : ''} aria-pressed={effectiveEncoder === 'clipproj'} disabled={!clipprojReady} onClick={() => selectEncoder('clipproj')}>
+              <button type="button" className={effectiveEncoder === 'clipproj' ? 'active' : ''} aria-pressed={effectiveEncoder === 'clipproj'} disabled={mode === 'lip_sync' || !clipprojReady} onClick={() => selectEncoder('clipproj')}>
                 <Sparkles size={17} /><span><strong>ClipProj 4B</strong><small>חסכוני · ניסיוני</small></span>
               </button>
             </div>
@@ -740,7 +972,7 @@ function App() {
 
           <div className="setting-block audio-setting-block">
             <div className="setting-title"><span>אודיו</span><small>ערוץ שמע בתוצאה</small></div>
-            <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>
+            {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר מדויק בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>}
           </div>
 
           <div className="setting-block resolution-block">
@@ -758,8 +990,8 @@ function App() {
       </div>
 
       <div className="final-row">
-        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => setDuration(Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)))} /><small>H3 מעגל אוטומטית לפריים הקרוב</small></label>
-        <button className="create-button" onClick={() => { void submit() }} disabled={sending} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
+        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(mode === 'lip_sync' && lipSyncAudioDuration ? Math.min(value, lipSyncAudioDuration) : value) }} /><small>{mode === 'lip_sync' ? 'האודיו ייחתך לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
+        <button className="create-button" onClick={() => { void submit() }} disabled={sending || isRecording} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
       {mode === 'reference' && referenceReady && !reference10Ready && <p className="quiet-warning">רפרנס מעל 5 שניות ייפתח רק אחרי בדיקת עומס מוצלחת.</p>}
@@ -942,11 +1174,20 @@ function formatDuration(totalSeconds: number) {
   return `${minutes}:${String(remainder).padStart(2, '0')}`
 }
 
+function formatClipTime(totalSeconds: number) {
+  const value = Math.max(0, totalSeconds)
+  const minutes = Math.floor(value / 60)
+  const seconds = Math.floor(value % 60)
+  const tenths = Math.floor((value - Math.floor(value)) * 10)
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${tenths}`
+}
+
 function modeLabel(mode: Mode) {
   if (mode === 'text') return 'טקסט'
   if (mode === 'frames') return 'I2V'
   if (mode === 'opening') return 'פריים פותח'
   if (mode === 'closing') return 'פריים סוגר'
+  if (mode === 'lip_sync') return 'דיבוב'
   return 'רפרנס'
 }
 

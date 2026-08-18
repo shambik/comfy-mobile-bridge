@@ -45,7 +45,7 @@ def normalize_generation_settings(
     megapixels: float | None = None,
     aspect_ratio: str | None = None,
 ) -> GenerationSettings:
-    resolved_engine = engine or ("standard" if mode == "reference" else "turbo")
+    resolved_engine = engine or ("standard" if mode in ("reference", "lip_sync") else "turbo")
     if resolved_engine not in ("turbo", "standard", "spectrum"):
         raise ValueError("Engine must be turbo, standard or spectrum")
     if resolved_engine == "turbo":
@@ -85,6 +85,10 @@ def normalize_generation_settings(
     resolved_encoder = encoder or "native"
     if resolved_encoder not in ("native", "clipproj"):
         raise ValueError("Text encoder must be native or clipproj")
+    if mode == "lip_sync" and resolved_engine != "standard":
+        raise ValueError("Lip-sync uses the Standard engine")
+    if mode == "lip_sync" and resolved_encoder != "native":
+        raise ValueError("Lip-sync uses the native 32B encoder")
     resolved_turbo_profile = turbo_profile or "v1"
     if resolved_turbo_profile not in ("v1", "v4"):
         raise ValueError("Turbo profile must be v1 or v4")

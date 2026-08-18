@@ -19,3 +19,6 @@ terms before downloading them.
 The bridge does not enable paid API nodes, SageAttention, or Funnel. Model
 licenses may have extra usage limits; a successful SHA-256 check does not mean
 that a user has accepted those terms.
+
+The Native AudioLock node under `custom_nodes/` is bridge code covered by the
+MIT license above. It is not copied from the optional upstream experiment.

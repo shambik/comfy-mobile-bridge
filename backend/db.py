@@ -29,7 +29,7 @@ def _create_jobs_table(db):
     CREATE TABLE jobs (
         id TEXT PRIMARY KEY,
         prompt TEXT NOT NULL,
-        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference')),
+        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync')),
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
@@ -133,6 +133,22 @@ def _table_columns(db):
 
 
 def _rebuild_jobs_table(db):
+    # A previous interrupted rebuild can leave the old source table beside a
+    # newly created jobs table. Preserve that source as a numbered archive so
+    # the current table can be rebuilt safely without losing user history.
+    stale_legacy = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs_legacy'"
+    ).fetchone()
+    if stale_legacy:
+        suffix = 1
+        while db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (f"jobs_legacy_archive_{suffix}",),
+        ).fetchone():
+            suffix += 1
+        db.execute(
+            f'ALTER TABLE jobs_legacy RENAME TO jobs_legacy_archive_{suffix}'
+        )
     old_columns = _table_columns(db)
     db.execute("DROP INDEX IF EXISTS idx_jobs_queue")
     db.execute("DROP INDEX IF EXISTS idx_jobs_sequence")
@@ -191,7 +207,7 @@ def init_db():
                 "reference_audio_path", "reference_audio_name",
                 "reference_images_json", "reference_videos_json", "no_audio",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
