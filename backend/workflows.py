@@ -177,6 +177,50 @@ def standard_workflow(
     return deepcopy(nodes)
 
 
+def native_audio_lock_workflow(
+    prompt: str,
+    duration: int,
+    seed: int,
+    prefix: str,
+    audio_name: str,
+    first_frame_name: str | None = None,
+    steps: int = 20,
+    width: int = 736,
+    height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
+    encoder: str = "native",
+):
+    """Native H3 video with an uploaded audio track locked into the AV latent."""
+    nodes = _common_decode(
+        "104", "18", {"id": "17", "scheduler": "9"},
+        seed, prefix, encoder, include_audio=False,
+    )
+    nodes.update({
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
+        **_duration_selector(duration),
+        "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["18", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+        "18": {"class_type": "MiniMaxH3NativeAudioLock", "inputs": {
+            "model": ["6", 0], "av_latent": ["104", 1],
+            "audio_vae": ["24", 0], "audio": ["23", 0],
+        }},
+        "23": {"class_type": "LoadAudio", "inputs": {"audio": audio_name}},
+        "24": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["13", 0], "vae": ["11", 0], "prompt": prompt,
+            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1],
+        }},
+    })
+    nodes["14"]["inputs"]["latent_image"] = ["18", 1]
+    nodes["91"]["inputs"]["audio"] = ["18", 2]
+    if first_frame_name:
+        nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
+        nodes["104"]["inputs"]["first_frame"] = ["200", 0]
+    return deepcopy(nodes)
+
+
 def spectrum_workflow(
     prompt: str,
     duration: int,

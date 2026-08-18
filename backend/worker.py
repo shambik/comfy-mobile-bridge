@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 
 from .comfy import ComfyClient, find_video, gpu_sample, media_probe
-from .config import (CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
+from .config import (AUDIOLOCK_NODE_DIR, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, INPUT, MODELS, REF2VA_MODEL,
                      REF2VA_TURBO_LORA,
                      SEQUENCES)
@@ -13,7 +13,7 @@ from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
 from .library import finalize_completed_asset
-from .workflows import (reference_workflow, spectrum_workflow,
+from .workflows import (native_audio_lock_workflow, reference_workflow, spectrum_workflow,
                         standard_workflow, turbo_workflow)
 
 
@@ -345,7 +345,15 @@ class QueueWorker:
         else:
             required.add("CLIPLoader")
 
-        if job["mode"] == "reference":
+        if job["mode"] == "lip_sync":
+            required |= {"KSamplerSelect", "LoadAudio", "MiniMaxH3NativeAudioLock"}
+            if job["engine"] != "standard" or (job.get("encoder") or "native") != "native":
+                raise RuntimeError("Lip-sync requires the Standard engine and native 32B encoder")
+            if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
+                raise RuntimeError("Native AudioLock node is not installed")
+            if not job.get("reference_audio_name"):
+                raise RuntimeError("Lip-sync job has no uploaded audio")
+        elif job["mode"] == "reference":
             required.add("MiniMaxH3ReferenceToVideo")
             if job["engine"] == "turbo":
                 required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
@@ -376,7 +384,16 @@ class QueueWorker:
         seed = int(job["seed"])
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
-        if job["mode"] == "reference":
+        if job["mode"] == "lip_sync":
+            workflow = native_audio_lock_workflow(
+                job["prompt"], job["duration"], seed, prefix,
+                audio_name=job["reference_audio_name"],
+                first_frame_name=job.get("first_frame_name"),
+                steps=job["steps"], width=job["width"], height=job["height"],
+                megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
+                encoder=encoder,
+            )
+        elif job["mode"] == "reference":
             reference_images = json.loads(job.get("reference_images_json") or "[]")
             if not reference_images and image_name:
                 reference_images = [image_name]

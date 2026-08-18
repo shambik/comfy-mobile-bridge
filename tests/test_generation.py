@@ -1,7 +1,8 @@
 import unittest
 
 from backend.generation import GenerationSettings, normalize_generation_settings
-from backend.workflows import reference_workflow, spectrum_workflow, standard_workflow, turbo_workflow
+from backend.workflows import (native_audio_lock_workflow, reference_workflow,
+                               spectrum_workflow, standard_workflow, turbo_workflow)
 
 
 class GenerationSettingsTests(unittest.TestCase):
@@ -12,6 +13,10 @@ class GenerationSettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             normalize_generation_settings("reference"),
+            GenerationSettings("standard", 20, 736, 416),
+        )
+        self.assertEqual(
+            normalize_generation_settings("lip_sync"),
             GenerationSettings("standard", 20, 736, 416),
         )
         self.assertEqual(
@@ -43,6 +48,10 @@ class GenerationSettingsTests(unittest.TestCase):
             normalize_generation_settings("text", "turbo", 9, turbo_profile="v4")
         with self.assertRaises(ValueError):
             normalize_generation_settings("text", turbo_profile="unknown")
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("lip_sync", "turbo", 4)
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("lip_sync", "standard", 20, encoder="clipproj")
 
     def test_turbo_v4_profile_is_explicit_and_keeps_v1_default(self):
         self.assertEqual(normalize_generation_settings("text").turbo_profile, "v1")
@@ -84,6 +93,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
         self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
         self.assertEqual(workflow["104"]["inputs"]["length"], ["106", 1])
+
+    def test_native_audio_lock_uses_exact_audio_and_optional_first_frame(self):
+        workflow = native_audio_lock_workflow(
+            "natural lip sync", 5, 42, "lip-sync", "voice.wav",
+            first_frame_name="face.png", steps=20, width=864, height=480,
+        )
+        self.assertEqual(workflow["18"]["class_type"], "MiniMaxH3NativeAudioLock")
+        self.assertEqual(workflow["23"], {
+            "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
+        })
+        self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
+        self.assertEqual(workflow["14"]["inputs"]["latent_image"], ["18", 1])
+        self.assertEqual(workflow["91"]["inputs"]["audio"], ["18", 2])
+        self.assertNotIn("VAEDecodeAudio", {node["class_type"] for node in workflow.values()})
 
     def test_reference_uses_selected_standard_profile(self):
         workflow = reference_workflow(

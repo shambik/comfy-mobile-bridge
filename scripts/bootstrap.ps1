@@ -79,6 +79,15 @@ try {
         }
     }
 
+    $audioLockSource = Join-Path $repo 'custom_nodes\ComfyUI-H3-NativeAudioLock'
+    $audioLockTarget = Join-Path $config.ComfyRoot 'custom_nodes\ComfyUI-H3-NativeAudioLock'
+    if (-not (Test-Path -LiteralPath (Join-Path $audioLockSource '__init__.py') -PathType Leaf)) {
+        throw 'The local Native AudioLock node source is missing.'
+    }
+    New-Item -ItemType Directory -Path $audioLockTarget -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $audioLockSource '__init__.py') -Destination (Join-Path $audioLockTarget '__init__.py') -Force
+    Write-Host 'Installed local Native AudioLock node.'
+
     $patchPath = Join-Path $repo 'patches\comfyui-first-frame-center-crop.patch'
     & git -C $config.ComfyRoot apply --check --whitespace=nowarn $patchPath 2>$null
     if ($LASTEXITCODE -eq 0) {

@@ -2,7 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -83,6 +83,40 @@ class JobApiTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(row, ("face.png", "voice.wav"))
+
+    def test_lip_sync_accepts_optional_opening_frame_and_uploaded_audio(self):
+        data = {
+            "prompt": "",
+            "mode": "lip_sync", "duration": "5", "engine": "standard",
+            "encoder": "native", "audio_start": "2.5",
+        }
+        files = {
+            "first_frame": ("face.png", b"image-placeholder", "image/png"),
+            "audio": ("voice.wav", b"audio-placeholder", "audio/wav"),
+        }
+        with patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/face.png", "face.png"))), \
+             patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/voice.wav", "voice.wav"))) as save_audio_mock, \
+             patch("backend.main.probe_audio_duration", return_value=208.5), \
+             patch("backend.main.trim_audio", return_value=("C:/safe/trimmed.wav", "trimmed.wav")):
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        save_audio_mock.assert_awaited_once_with(ANY, allow_longer=True)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute(
+                "SELECT mode,engine,encoder,first_frame_name,reference_audio_name,no_audio FROM jobs"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("lip_sync", "standard", "native", "face.png", "trimmed.wav", 0))
+
+    def test_lip_sync_requires_audio(self):
+        response = self.post(mode="lip_sync", engine="standard", encoder="native")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("uploaded audio", response.text)
 
     def test_spectrum_profile_is_persisted(self):
         response = self.post(engine="spectrum", steps="16", resolution="736x416")
