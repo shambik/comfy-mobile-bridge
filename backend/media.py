@@ -39,6 +39,42 @@ def extract_last_frame(video: Path, target: Path, width: int, height: int) -> Pa
     return target
 
 
+def extract_review_frames(video: Path, target_dir: Path, fps: float = 1.0, limit: int = 48) -> list[Path]:
+    """Extract a dense, bounded visual sample for agent quality review."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to extract review frames")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pattern = target_dir / "frame_%04d.jpg"
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(video),
+        "-vf", f"fps={max(0.25, min(fps, 4.0))}", "-frames:v", str(limit),
+        "-q:v", "2", "-y", str(pattern),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+    frames = sorted(target_dir.glob("frame_*.jpg"))
+    if result.returncode or not frames:
+        raise RuntimeError("Could not extract review frames: " + result.stderr[-1200:])
+    return frames
+
+
+def attach_song(video: Path, song: Path, output: Path) -> dict:
+    """Mux the original song over a silent assembled master."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to attach the song")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(video), "-i", str(song),
+        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
+        "-shortest", "-movflags", "+faststart", "-y", str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+    if result.returncode or not output.exists():
+        raise RuntimeError("Could not attach the original song: " + result.stderr[-3000:])
+    return {"output": str(output), "ffprobe": media_probe(output, require_audio=True)}
+
+
 def assemble_clips(clips: list[Path], output: Path) -> dict:
     """Normalize and join validated H3 clips with deterministic hard cuts.
 

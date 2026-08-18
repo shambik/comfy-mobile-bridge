@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, Clapperboard, Combine, Copy, Download, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Minus, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
+import { ProductionStudio } from './production'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing'
 type Engine = 'turbo' | 'standard' | 'spectrum'
@@ -10,7 +11,7 @@ type TurboProfile = 'v1' | 'v4'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
-type Page = 'studio' | 'comfy'
+type Page = 'studio' | 'production' | 'comfy'
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; status: Status; progress: number;
   engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; position?: number;
@@ -58,6 +59,14 @@ function dimensionsFor(aspect: Aspect, megapixels: number) {
   const height = Math.max(256, Math.round(Math.sqrt(megapixels * 1_000_000 / ratio) / 32) * 32)
   return { width, height, id: `${width}x${height}` as Resolution }
 }
+
+type LibraryFolder = { id: string; project_id: string; name: string }
+type LibraryProject = { id: string; name: string; asset_count: number; folders: LibraryFolder[] }
+type AssetAssignment = { source_type: 'job'|'sequence'; source_id: string; project_id: string; project_name: string; folder_id?: string|null; folder_name?: string|null; filename?: string|null }
+type AssetLibrary = { root: string; projects: LibraryProject[]; assignments: AssetAssignment[] }
+type ResultAsset =
+  | { kind: 'job'; id: string; created_at: string; job: Job }
+  | { kind: 'sequence'; id: string; created_at: string; sequence: Sequence }
 
 type Preferences = {
   engine: Engine
@@ -181,6 +190,16 @@ function App() {
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
   const [comfyLogCleared, setComfyLogCleared] = useState(false)
   const [comfyError, setComfyError] = useState('')
+  const [library, setLibrary] = useState<AssetLibrary>({ root: '', projects: [], assignments: [] })
+  const [destinationProject, setDestinationProject] = useState('')
+  const [destinationFolder, setDestinationFolder] = useState('')
+  const [libraryProject, setLibraryProject] = useState('all')
+  const [libraryFolder, setLibraryFolder] = useState('all')
+  const [editingAsset, setEditingAsset] = useState<{ type: 'job'|'sequence'; id: string; label: string } | null>(null)
+  const [editProject, setEditProject] = useState('')
+  const [editFolder, setEditFolder] = useState('')
+  const [editFilename, setEditFilename] = useState('')
+  const [collapsedAssetGroups, setCollapsedAssetGroups] = useState<Record<string, boolean>>({})
 
   const loadSession = async (): Promise<string | null> => {
     try {
@@ -208,7 +227,7 @@ function App() {
       const response = await fetch('/api/jobs', { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
-        setJobs(data.jobs); setSequences(data.sequences || []); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready); setGpuConflict(Boolean(data.gpu_conflict))
+        setJobs(data.jobs); setSequences(data.sequences || []); setLibrary(data.library || { root: '', projects: [], assignments: [] }); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready); setGpuConflict(Boolean(data.gpu_conflict))
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
@@ -296,6 +315,20 @@ function App() {
   const activeSequences = sequences.filter(item => ['starting', 'running', 'verifying'].includes(item.status))
   const queuedSequences = sequences.filter(item => item.status === 'queued')
   const sequenceHistory = sequences.filter(item => !['queued', 'starting', 'running', 'verifying'].includes(item.status))
+  const assignmentFor = (type: 'job'|'sequence', id: string) => library.assignments.find(item => item.source_type === type && item.source_id === id)
+  const assetVisible = (type: 'job'|'sequence', id: string) => {
+    const assignment = assignmentFor(type, id)
+    if (libraryProject === 'all') return true
+    if (libraryProject === 'unassigned') return !assignment
+    if (assignment?.project_id !== libraryProject) return false
+    return libraryFolder === 'all' || (libraryFolder === 'root' ? !assignment.folder_id : assignment.folder_id === libraryFolder)
+  }
+  const visibleHistory = history.filter(job => assetVisible('job', job.id))
+  const visibleSequenceHistory = sequenceHistory.filter(sequence => assetVisible('sequence', sequence.id))
+  const visibleResultAssets: ResultAsset[] = [
+    ...visibleHistory.map(job => ({ kind: 'job' as const, id: job.id, created_at: job.created_at, job })),
+    ...visibleSequenceHistory.map(sequence => ({ kind: 'sequence' as const, id: sequence.id, created_at: sequence.created_at, sequence })),
+  ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
   const queuedTasks = [
     ...queued.map(job => ({ kind: 'job' as const, position: job.position || Number.MAX_SAFE_INTEGER, job })),
     ...queuedSequences.map(sequence => ({ kind: 'sequence' as const, position: sequence.position, sequence })),
@@ -307,6 +340,77 @@ function App() {
     if (!response.ok) throw new Error(data.detail || 'הפעולה נכשלה')
     await load()
     return data
+  }
+
+  const jsonBody = (value: unknown) => new Blob([JSON.stringify(value)], { type: 'application/json' })
+
+  const createStudioProject = async () => {
+    const name = window.prompt('Project name — this exact name will be used for its Windows folder:')?.trim()
+    if (!name) return
+    try {
+      const created = await mutate('/api/library/projects', 'POST', jsonBody({ name }))
+      setLibraryProject(created.id); setLibraryFolder('all'); setDestinationProject(created.id); setDestinationFolder('')
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not create project') }
+  }
+
+  const createStudioFolder = async (projectId: string) => {
+    const name = window.prompt('Folder name — this exact name will be used on disk:')?.trim()
+    if (!name) return
+    try { await mutate(`/api/library/projects/${projectId}/folders`, 'POST', jsonBody({ name })) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not create folder') }
+  }
+
+  const renameStudioProject = async (project: LibraryProject) => {
+    const name = window.prompt('Rename project and its filesystem folder:', project.name)?.trim()
+    if (!name || name === project.name) return
+    try { await mutate(`/api/library/projects/${project.id}`, 'PATCH', jsonBody({ name })) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not rename project') }
+  }
+
+  const renameStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
+    const name = window.prompt('Rename folder on disk:', folder.name)?.trim()
+    if (!name || name === folder.name) return
+    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'PATCH', jsonBody({ name })) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not rename folder') }
+  }
+
+  const deleteStudioProject = async (project: LibraryProject) => {
+    if (!window.confirm(`Delete the empty project “${project.name}” and its filesystem folder?`)) return
+    try { await mutate(`/api/library/projects/${project.id}`, 'DELETE'); setLibraryProject('all'); setLibraryFolder('all') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete project') }
+  }
+
+  const deleteStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
+    if (!window.confirm(`Delete the empty folder “${folder.name}” from project “${project.name}”?`)) return
+    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'DELETE'); setLibraryFolder('all') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete folder') }
+  }
+
+  const openAssetEditor = (type: 'job'|'sequence', id: string, label: string) => {
+    const assignment = assignmentFor(type, id)
+    setEditingAsset({ type, id, label })
+    setEditProject(assignment?.project_id || '')
+    setEditFolder(assignment?.folder_id || '')
+    setEditFilename(assignment?.filename?.replace(/\.mp4$/i, '') || '')
+  }
+
+  const saveAssetLocation = async () => {
+    if (!editingAsset) return
+    try {
+      const original = assignmentFor(editingAsset.type, editingAsset.id)
+      const currentBase = original?.filename?.replace(/\.mp4$/i, '') || ''
+      await mutate(`/api/library/assets/${editingAsset.type}/${editingAsset.id}/location`, 'PATCH', jsonBody({ project_id: editProject || null, folder_id: editProject ? editFolder || null : null }))
+      if (editProject && editFilename.trim() && editFilename.trim() !== currentBase) {
+        await mutate(`/api/library/assets/${editingAsset.type}/${editingAsset.id}/name`, 'PATCH', jsonBody({ name: editFilename.trim() }))
+      }
+      setEditingAsset(null)
+    } catch (e) { setError(e instanceof Error ? e.message : 'Could not organize asset') }
+  }
+
+  const deleteGeneratedAsset = async (type: 'job'|'sequence', id: string, label: string) => {
+    if (!window.confirm(`Delete “${label}”? This permanently deletes the actual video file from disk.`)) return
+    try { await mutate(type === 'job' ? `/api/jobs/${id}` : `/api/sequences/${id}`, 'DELETE') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete asset') }
   }
 
   const controlComfy = async (action: 'start' | 'stop') => {
@@ -419,6 +523,7 @@ function App() {
     const form = new FormData()
     form.set('prompt', prompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch))
     form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
+    if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
     if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
       form.set('first_frame', openingFrame!)
@@ -481,7 +586,45 @@ function App() {
     return job?.prompt || 'וידאו מההיסטוריה'
   }
 
-  return <main className="shell">
+  const toggleAssetGroup = (key: string) => setCollapsedAssetGroups(current => ({ ...current, [key]: !current[key] }))
+
+  const renderResultAsset = (asset: ResultAsset) => {
+    if (asset.kind === 'sequence') {
+      const { sequence } = asset
+      const reference = `sequence:${sequence.id}`
+      const order = selectedResults.indexOf(reference) + 1
+      return <SequenceCard key={reference} sequence={sequence} assignment={assignmentFor('sequence', sequence.id)} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={sequence.status === 'completed' ? () => openAssetEditor('sequence', sequence.id, sequence.title) : undefined} onDelete={() => { void deleteGeneratedAsset('sequence', sequence.id, sequence.title) }} />
+    }
+    const { job } = asset
+    const reference = `job:${job.id}`
+    const order = selectedResults.indexOf(reference) + 1
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
+  }
+
+  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode) => {
+    const collapsed = !!collapsedAssetGroups[key]
+    return <section className={`asset-result-container ${level}`} key={key}>
+      <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
+        {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
+        <Folder size={17}/><strong>{title}</strong><span>{assets.length} נכסים</span>
+      </button>
+      {!collapsed && <div className="asset-container-content">{children || assets.map(renderResultAsset)}</div>}
+    </section>
+  }
+
+  const renderProjectResults = (project: LibraryProject, assets: ResultAsset[]) => {
+    const rootAssets = assets.filter(asset => { const assignment = assignmentFor(asset.kind, asset.id); return assignment?.project_id === project.id && !assignment.folder_id })
+    const folderGroups = project.folders.map(folder => ({ folder, assets: assets.filter(asset => assignmentFor(asset.kind, asset.id)?.folder_id === folder.id) }))
+      .filter(group => group.assets.length || libraryProject === project.id)
+    const content = <>
+      {!!rootAssets.length && renderAssetContainer(`root:${project.id}`, 'שורש הפרויקט', rootAssets, 'folder')}
+      {folderGroups.map(group => renderAssetContainer(`folder:${group.folder.id}`, group.folder.name, group.assets, 'folder'))}
+      {!rootAssets.length && !folderGroups.length && <div className="asset-container-empty">אין נכסים בפרויקט הזה.</div>}
+    </>
+    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content)
+  }
+
+  return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>
     <header className="topbar">
       <div className="brand-mark"><Clapperboard size={22} /></div>
       <div><h1>H3 Studio</h1><p>יוצרים וידאו מהמחשב שלך</p></div>
@@ -492,12 +635,19 @@ function App() {
         <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
-    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); void loadComfy(true) }} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
+
+    <section className="asset-library-panel">
+      <div className="asset-library-head"><div><span className="eyebrow"><Folder size={15}/> Asset library</span><h2>Projects and folders</h2><small dir="ltr">{library.root || 'state/projects'}</small></div><button type="button" onClick={() => { void createStudioProject() }}><FolderPlus size={16}/> New project</button></div>
+      <div className="asset-library-toolbar"><label><span>Show assets</span><select value={libraryProject} onChange={event => { setLibraryProject(event.target.value); setLibraryFolder('all') }}><option value="all">All assets</option><option value="unassigned">Unassigned</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name} ({project.asset_count})</option>)}</select></label>{!['all','unassigned'].includes(libraryProject) && <label><span>Folder</span><select value={libraryFolder} onChange={event => setLibraryFolder(event.target.value)}><option value="all">All folders</option><option value="root">Project root</option>{library.projects.find(project => project.id === libraryProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}</div>
+      {!['all','unassigned'].includes(libraryProject) && (() => { const project=library.projects.find(item=>item.id===libraryProject); return project ? <div className="asset-project-detail"><div className="asset-project-title"><div className="asset-project-label"><b>{project.name}</b><span>{project.asset_count} assets</span></div><div className="asset-project-actions"><button onClick={() => { void createStudioFolder(project.id) }}><FolderPlus size={14}/> Folder</button><button onClick={() => { void renameStudioProject(project) }}><Pencil size={13}/> Rename</button><button className="danger" onClick={() => { void deleteStudioProject(project) }}><Trash2 size={13}/></button></div></div><div className="asset-folder-list">{project.folders.map(folder => <div key={folder.id}><div className="asset-folder-name"><Folder size={14}/><span>{folder.name}</span></div><div className="asset-folder-actions"><button onClick={() => { void renameStudioFolder(project,folder) }}><Pencil size={12}/></button><button onClick={() => { void deleteStudioFolder(project,folder) }}><Trash2 size={12}/></button></div></div>)}{!project.folders.length && <small>No folders yet. Assets can still be stored in the project root.</small>}</div></div> : null })()}
+    </section>
 
     <section className="composer">
       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
+      <div className="generation-destination"><Folder size={16}/><label><span>Save new results in project</span><select value={destinationProject} onChange={event => { setDestinationProject(event.target.value); setDestinationFolder('') }}><option value="">Unassigned · ComfyUI output</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>Folder</span><select value={destinationFolder} disabled={!destinationProject} onChange={event => setDestinationFolder(event.target.value)}><option value="">Project root</option>{library.projects.find(project => project.id === destinationProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>{destinationProject && <button type="button" onClick={() => { void createStudioFolder(destinationProject) }}><FolderPlus size={15}/> New folder</button>}</div>
       <textarea value={prompt} onChange={e => setPrompt(e.target.value)} maxLength={batch ? 80000 : 4000}
         placeholder={batch ? 'הדבק כמה פרומפטים. השאר שורה ריקה בין כל אחד…' : 'תאר את הסרטון שאתה רוצה ליצור…'} />
       <div className="composer-meta"><span>{prompt.length.toLocaleString()} תווים</span><label className="batch-toggle"><input type="checkbox" checked={batch} onChange={e => { setBatch(e.target.checked); if (!e.target.checked) setConnected(false) }} /><span>כמה פרומפטים</span></label></div>
@@ -619,11 +769,11 @@ function App() {
     <section className="queue-section">
       <div className="section-heading"><div><span>התור שלך</span><h2>{active.length || activeSequences.length ? 'היצירה בתנועה' : queued.length || queuedSequences.length ? 'ממתין ליצירה' : 'הכול שקט כרגע'}</h2></div><span className="queue-count">{active.length + queued.length + activeSequences.length + queuedSequences.length}</span></div>
       {!active.length && !queued.length && !activeSequences.length && !queuedSequences.length && <div className="empty"><div><Play size={22} /></div><p>הסרטון הבא שלך מתחיל בפרומפט למעלה</p></div>}
-      {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
-      {active.map(j => <JobCard key={j.id} job={j} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
+      {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
+      {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
       {queuedTasks.map(task => task.kind === 'sequence'
-        ? <SequenceCard key={task.sequence.id} sequence={task.sequence} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
-        : <JobCard key={task.job.id} job={task.job} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => mutate(`/api/jobs/${task.job.id}`, 'DELETE')} />)}
+        ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
+        : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
     </section>
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
@@ -633,8 +783,20 @@ function App() {
         <div className="join-order">{selectedResults.map((reference, index) => <div className="join-chip" key={reference}><b>{index + 1}</b><span>{selectedResultLabel(reference)}</span><button type="button" onClick={() => moveSelectedResult(index, -1)} disabled={index === 0}><ArrowUp size={14} /></button><button type="button" onClick={() => moveSelectedResult(index, 1)} disabled={index === selectedResults.length - 1}><ArrowDown size={14} /></button><button type="button" onClick={() => toggleResult(reference)}><X size={14} /></button></div>)}</div>
         <button type="button" className="join-button" disabled={selectedResults.length < 2 || joining} onClick={() => { void joinSelected() }}>{joining ? <LoaderCircle className="spin" size={17} /> : <Combine size={17} />} {joining ? 'מוסיף לתור…' : 'חבר לסרטון אחד'}</button>
       </div>}
-      {sequenceHistory.map(sequence => { const reference = `sequence:${sequence.id}`; const order = selectedResults.indexOf(reference) + 1; return <SequenceCard key={sequence.id} sequence={sequence} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onDelete={() => mutate(`/api/sequences/${sequence.id}`, 'DELETE')} /> })}
-      {history.map(j => { const reference = `job:${j.id}`; const order = selectedResults.indexOf(reference) + 1; return <JobCard key={j.id} job={j} selectedOrder={order || undefined} onSelect={j.status === 'completed' ? () => toggleResult(reference) : undefined} onDelete={() => mutate(`/api/jobs/${j.id}`, 'DELETE')} /> })}
+      <div className="asset-results-tree">
+        {(() => {
+          const unassigned = visibleResultAssets.filter(asset => !assignmentFor(asset.kind, asset.id))
+          const selectedProjects = libraryProject === 'all' ? library.projects : library.projects.filter(project => project.id === libraryProject)
+          return <>
+            {(libraryProject === 'all' || libraryProject === 'unassigned') && !!unassigned.length && renderAssetContainer('unassigned', 'ללא פרויקט', unassigned, 'unassigned')}
+            {libraryProject !== 'unassigned' && selectedProjects.map(project => {
+              const assets = visibleResultAssets.filter(asset => assignmentFor(asset.kind, asset.id)?.project_id === project.id)
+              return assets.length || libraryProject === project.id ? renderProjectResults(project, assets) : null
+            })}
+          </>
+        })()}
+      </div>
+      {!visibleSequenceHistory.length && !visibleHistory.length && <div className="empty"><div><Folder size={22}/></div><p>No generated videos are stored in this location.</p></div>}
     </section>}
     <footer>H3 עובד מקומית · החיבור זמין רק ברשת הפרטית שלך</footer>
 
@@ -659,11 +821,12 @@ function App() {
         </div>
       </section>
     </div>}
+    {editingAsset && <div className="dialog-backdrop asset-dialog-backdrop" onMouseDown={() => setEditingAsset(null)}><section className="asset-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-dialog-title" onMouseDown={event => event.stopPropagation()}><div className="asset-dialog-head"><div><span>ORGANIZE ASSET</span><h2 id="asset-dialog-title">Move or rename video</h2></div><button onClick={() => setEditingAsset(null)} aria-label="Close"><X size={17}/></button></div><p>{editingAsset.label}</p><label><span>Project</span><select value={editProject} onChange={event => { setEditProject(event.target.value); setEditFolder('') }}><option value="">Unassigned · return to ComfyUI output</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>Folder</span><select value={editFolder} disabled={!editProject} onChange={event => setEditFolder(event.target.value)}><option value="">Project root</option>{library.projects.find(project => project.id === editProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><label><span>Filename</span><div className="asset-filename"><input value={editFilename} disabled={!editProject} onChange={event => setEditFilename(event.target.value)} placeholder="Keep current filename"/><b>.mp4</b></div></label><small>Moving or renaming here changes the actual file on disk and keeps the Studio link working.</small><div className="asset-dialog-actions"><button onClick={() => setEditingAsset(null)}>Cancel</button><button className="confirm" onClick={() => { void saveAssetLocation() }}><Move size={15}/> Save changes</button></div></section></div>}
     </>}
   </main>
 }
 
-function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onDelete, onCancel }: { job: Job; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void }) {
+function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
@@ -704,6 +867,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
     {job.video_url && <video src={job.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
+      {assignment && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment.project_name}{assignment.folder_name ? ` / ${assignment.folder_name}` : ''}</span><b>{assignment.filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
       <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}</div>
@@ -723,6 +887,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
         {job.status === 'queued' && <><button onClick={onUp} disabled={index === 0}><ArrowUp size={17} /></button><button onClick={onDown} disabled={index === (total || 0) - 1}><ArrowDown size={17} /></button></>}
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
+        {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
         {onCancel && <button className="danger" onClick={onCancel}>ביטול</button>}
         {onDelete && <button className="trash" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>}
         {job.metrics?.generation_seconds && <span className="elapsed">נוצר תוך {formatDuration(job.metrics.generation_seconds)}</span>}
@@ -731,7 +896,7 @@ function JobCard({ job, index, total, selectedOrder, onSelect, onUp, onDown, onD
   </article>
 }
 
-function SequenceCard({ sequence, selectedOrder, onSelect, onDelete, onCancel }: { sequence: Sequence; selectedOrder?: number; onSelect?: () => void; onDelete?: () => void; onCancel?: () => void }) {
+function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage, onDelete, onCancel }: { sequence: Sequence; assignment?: AssetAssignment; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onDelete?: () => void; onCancel?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מתחיל', running: 'יוצר רצף', verifying: 'מחבר וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(sequence.status)
   const percent = Math.round(Math.max(0, Math.min(1, sequence.progress || 0)) * 100)
@@ -748,6 +913,7 @@ function SequenceCard({ sequence, selectedOrder, onSelect, onDelete, onCancel }:
     {sequence.video_url && <video src={sequence.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[sequence.status]}</span><span>{sequence.kind === 'connected' ? 'רצף פרומפטים' : 'חיבור מההיסטוריה'}</span></div>
+      {assignment && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment.project_name}{assignment.folder_name ? ` / ${assignment.folder_name}` : ''}</span><b>{assignment.filename}</b></div>}
       <div className="sequence-title"><Route size={17} /><p>{sequence.title}</p></div>
       <div className="job-config"><span>{sequence.total_items} קטעים</span>{sequence.engine && <span>{engineLabel(sequence.engine)}</span>}{sequence.encoder && <span>{encoderLabel(sequence.encoder)}</span>}{sequence.duration && <span>{sequence.duration} שנ׳ לשוט</span>}</div>
       {(active || sequence.status === 'queued') && <div className="progress-shell">
@@ -758,6 +924,7 @@ function SequenceCard({ sequence, selectedOrder, onSelect, onDelete, onCancel }:
       <div className="job-actions">
         {sequence.video_url && <><a href={sequence.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
+        {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
         {onCancel && <button className="danger" onClick={onCancel}>ביטול</button>}
         {onDelete && <button className="trash" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>}
         {sequence.metrics?.assembly_seconds && <span className="elapsed">חובר תוך {formatDuration(sequence.metrics.assembly_seconds)}</span>}

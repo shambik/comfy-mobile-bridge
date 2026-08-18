@@ -188,7 +188,7 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(self.post(engine="standard", steps="7").status_code, 400)
         response = self.post(mode="reference", engine="turbo", steps="4")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("standard or spectrum", response.json()["detail"])
+        self.assertIn("requires at least one image or video", response.json()["detail"])
 
 if __name__ == "__main__":
     unittest.main()
