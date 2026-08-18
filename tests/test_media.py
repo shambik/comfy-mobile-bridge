@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from backend.comfy import media_probe
-from backend.media import assemble_clips
+from backend.media import assemble_clips, attach_song, extract_review_frames
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
@@ -51,6 +51,23 @@ class MediaAssemblyTests(unittest.TestCase):
             assemble_clips([first, second], output)
             probe = media_probe(output, require_audio=False)
             self.assertFalse(any(stream["codec_type"] == "audio" for stream in probe["streams"]))
+
+    def test_review_frames_and_original_song_mux(self):
+        with tempfile.TemporaryDirectory(prefix="h3-final-test-") as temp:
+            root = Path(temp)
+            video = root / "silent.mp4"
+            song = root / "song.wav"
+            output = root / "final.mp4"
+            self.make_clip(video, "purple", "512x288", None)
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                "sine=frequency=330:sample_rate=48000:duration=0.5", str(song),
+            ], check=True, timeout=60)
+            frames = extract_review_frames(video, root / "frames", fps=2, limit=4)
+            self.assertGreaterEqual(len(frames), 1)
+            result = attach_song(video, song, output)
+            self.assertTrue(output.exists())
+            self.assertTrue(any(stream["codec_type"] == "audio" for stream in result["ffprobe"]["streams"]))
 
 
 if __name__ == "__main__":

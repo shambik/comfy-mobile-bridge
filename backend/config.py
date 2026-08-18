@@ -88,6 +88,9 @@ COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
 STATE = ROOT / "state"
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
+PRODUCTIONS = STATE / "productions"
+PROJECTS = _as_path(LOCAL_CONFIG.get("projects_dir"), STATE / "projects")
+MANAGED_SKILLS = STATE / "skills"
 DB_PATH = STATE / "jobs.sqlite3"
 REFERENCE_10S_MARKER = STATE / "reference-10s-verified"
 
@@ -137,5 +140,19 @@ if TAILSCALE_HOSTNAME and TAILSCALE_HOSTNAME not in ALLOWED_HOSTS:
 
 WORKSPACE = ROOT
 
-for path in (STATE, INPUT, OUTPUT, TEMP, USER, LOGS, SEQUENCES):
+agents_config = LOCAL_CONFIG.get("agents", {})
+if not isinstance(agents_config, dict):
+    raise RuntimeError("agents configuration must be an object")
+CODEX_COMMAND = str(agents_config.get("codex_command") or "codex").strip()
+AGY_COMMAND = str(agents_config.get("agy_command") or "agy").strip()
+AGENT_TIMEOUT_SECONDS = max(30, _as_int(agents_config.get("timeout_seconds"), 600))
+PRODUCTION_CONCURRENCY = max(1, min(8, _as_int(agents_config.get("production_concurrency"), 3)))
+CODEX_DEFAULT_RUNTIME = str(agents_config.get("codex_runtime") or "codex").strip()
+CODEX_DEFAULT_MODEL = str(agents_config.get("codex_model") or "gpt-5.6-sol").strip()
+CODEX_DEFAULT_EFFORT = str(agents_config.get("codex_effort") or "high").strip()
+AGY_DEFAULT_RUNTIME = str(agents_config.get("agy_runtime") or "agy").strip()
+AGY_DEFAULT_MODEL = str(agents_config.get("agy_model") or "gemini-3.1-pro-high").strip()
+AGY_DEFAULT_EFFORT = str(agents_config.get("agy_effort") or "high").strip()
+
+for path in (STATE, INPUT, OUTPUT, TEMP, USER, LOGS, SEQUENCES, PRODUCTIONS, PROJECTS, MANAGED_SKILLS):
     path.mkdir(parents=True, exist_ok=True)

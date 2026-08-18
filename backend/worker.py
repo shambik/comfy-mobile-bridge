@@ -12,6 +12,7 @@ from .config import (CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
+from .library import finalize_completed_asset
 from .workflows import (reference_workflow, spectrum_workflow,
                         standard_workflow, turbo_workflow)
 
@@ -564,6 +565,9 @@ class QueueWorker:
                 eta_seconds=0, output_path=str(video), metrics=metrics,
                 finished_at=now_iso(), error=None,
             )
+            organized = await asyncio.to_thread(finalize_completed_asset, "job", job["id"])
+            if organized:
+                video = organized
 
             if job.get("sequence_id"):
                 with connect() as db:
@@ -638,3 +642,4 @@ class QueueWorker:
             eta_seconds=0, output_path=str(output), metrics=metrics,
             error=None, finished_at=now_iso(),
         )
+        await asyncio.to_thread(finalize_completed_asset, "sequence", sequence_id)
