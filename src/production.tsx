@@ -74,6 +74,8 @@ function ParticipantIcon({ participant }: { participant: Message['participant'] 
 export function ProductionStudio({ csrf }: { csrf: string }) {
   const [view, setView] = useState<'room' | 'settings'>('room')
   const [models, setModels] = useState<Record<Runtime, ModelOption[]>>({ codex: [], agy: [] })
+  const [modelsFetchedAt, setModelsFetchedAt] = useState('')
+  const [modelsRefreshing, setModelsRefreshing] = useState(false)
   const [settings, setSettings] = useState<AgentSettings>({ codex_runtime: 'codex', codex_model: 'gpt-5.6-sol', codex_effort: 'high', agy_runtime: 'agy', agy_model: 'gemini-3.1-pro-high', agy_effort: 'high' })
   const [skills, setSkills] = useState<Skill[]>([])
   const [productions, setProductions] = useState<Production[]>([])
@@ -110,10 +112,10 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
 
   const headers = useMemo(() => ({ 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' }), [csrf])
 
-  const loadCatalog = async () => {
+  const loadCatalog = async (refreshModels = false) => {
     try {
       const [modelResponse, settingsResponse, skillResponse, productionResponse, jobsResponse] = await Promise.all([
-        fetch('/api/agents/models', { cache: 'no-store' }),
+        fetch(`/api/agents/models${refreshModels ? '?refresh=true' : ''}`, { cache: 'no-store' }),
         fetch('/api/settings/agents', { cache: 'no-store' }),
         fetch('/api/skills', { cache: 'no-store' }),
         fetch('/api/productions', { cache: 'no-store' }),
@@ -123,6 +125,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
         jsonResponse(modelResponse), jsonResponse(settingsResponse), jsonResponse(skillResponse), jsonResponse(productionResponse), jsonResponse(jobsResponse),
       ])
       setModels({ codex: modelData.codex || [], agy: modelData.agy || [] })
+      setModelsFetchedAt(modelData.fetched_at ? new Date(modelData.fetched_at * 1000).toLocaleTimeString() : '')
       setSettings(settingsData)
       setSkills(skillData.skills || [])
       setProductions(productionData.productions || [])
@@ -131,7 +134,14 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       if (!selectedId && productionData.productions?.length) setSelectedId(productionData.productions[0].id)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to load Production Studio')
+    } finally {
+      setModelsRefreshing(false)
     }
+  }
+
+  const refreshModels = async () => {
+    setModelsRefreshing(true)
+    await loadCatalog(true)
   }
 
   const loadProduction = async (id = selectedId) => {
@@ -146,6 +156,9 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   }
 
   useEffect(() => { void loadCatalog() }, [])
+  useEffect(() => {
+    if (view === 'settings') void loadCatalog()
+  }, [view])
   useEffect(() => {
     if (!selectedId) return
     void loadProduction(selectedId)
@@ -363,14 +376,14 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const finalVideo = production?.artifacts?.find(item => item.kind === 'final_video')
 
   if (view === 'settings') return <section className="ps-root">
-    <header className="ps-page-head"><button className="ps-icon" onClick={() => setView('room')}><ChevronLeft size={19} /></button><div><span>Production Studio</span><h2>Agent & skill settings</h2></div><button className="ps-icon" onClick={() => void loadCatalog()}><RefreshCw size={18} /></button></header>
+    <header className="ps-page-head"><button className="ps-icon" onClick={() => setView('room')}><ChevronLeft size={19} /></button><div><span>Production Studio</span><h2>Agent & skill settings</h2></div><button className="ps-icon" onClick={() => void refreshModels()} disabled={modelsRefreshing}><RefreshCw className={modelsRefreshing ? 'spin' : ''} size={18} /></button></header>
     {error && <div className="ps-error">{error}<button onClick={() => setError('')}><X size={14} /></button></div>}
     <div className="ps-settings-grid">
       <section className="ps-panel"><div className="ps-panel-title"><Bot size={18} /><div><h3>Agent defaults</h3><p>Used by new productions. Active projects keep their frozen configuration.</p></div></div>
         <div className="ps-agent-grid">
           <AgentSelect label="CODEX" catalogs={models} runtime={settings.codex_runtime} model={settings.codex_model} effort={settings.codex_effort} onRuntime={value => setSettings(current => ({ ...current, codex_runtime: value }))} onModel={value => setSettings(current => ({ ...current, codex_model: value }))} onEffort={value => setSettings(current => ({ ...current, codex_effort: value }))} />
           <AgentSelect label="AGY" catalogs={models} runtime="agy" model={settings.agy_model} effort={settings.agy_effort} runtimeLocked onRuntime={() => {}} onModel={value => setSettings(current => ({ ...current, agy_model: value }))} onEffort={value => setSettings(current => ({ ...current, agy_effort: value }))} />
-        </div><button className="ps-primary" onClick={() => void saveSettings()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save defaults</button>
+        </div><div className="ps-model-status"><span>Models queried from the installed CLIs{modelsFetchedAt ? ` · ${modelsFetchedAt}` : ''}</span><button className="ps-secondary" onClick={() => void refreshModels()} disabled={modelsRefreshing}>{modelsRefreshing ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh models</button></div><button className="ps-primary" onClick={() => void saveSettings()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save defaults</button>
       </section>
       <section className="ps-panel ps-skills-panel"><div className="ps-panel-title"><Sparkles size={18} /><div><h3>Production skills</h3><p>Enabled skills become available to new productions.</p></div></div>
         <div className="ps-add-skill"><input value={registerPath} onChange={event => setRegisterPath(event.target.value)} placeholder="Existing skill folder path" /><button onClick={() => void registerSkillFolder()}><FolderPlus size={16} /> Register</button><label><FileArchive size={16} /> Upload ZIP<input type="file" accept=".zip,application/zip" onChange={event => { void uploadSkill(event.target.files?.[0] || null); event.currentTarget.value = '' }} /></label></div>

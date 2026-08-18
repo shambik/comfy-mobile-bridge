@@ -461,16 +461,15 @@ class AgentParsingTests(unittest.TestCase):
         self.assertEqual(result["decision"], "approve")
         self.assertEqual(session, "session-123")
 
-    def test_codex_catalog_is_discovered_from_authenticated_cache(self):
-        with tempfile.TemporaryDirectory(prefix="codex-model-cache-") as temp:
-            cache = Path(temp) / "models_cache.json"
-            cache.write_text(json.dumps({"models": [{
-                "slug": "gpt-test", "display_name": "GPT Test", "visibility": "list",
-                "default_reasoning_level": "high",
-                "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
-            }]}), encoding="utf-8")
-            with patch.dict(os.environ, {"CODEX_HOME": temp}):
-                models = discover_codex_models()
+    def test_codex_catalog_is_discovered_from_cli(self):
+        payload = {"models": [{
+            "slug": "gpt-test", "display_name": "GPT Test", "visibility": "list",
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+        }]}
+        with patch("backend.agents._command_path", return_value="codex"), \
+             patch("backend.agents._run_model_command", return_value=json.dumps(payload)):
+            models = discover_codex_models()
         self.assertEqual(models[0]["id"], "gpt-test")
         self.assertEqual(models[0]["efforts"], ["low", "high"])
 
