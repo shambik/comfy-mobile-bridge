@@ -24,7 +24,7 @@ orchestrator.
                            |
                 Production Orchestrator
                /           |           \
-    Runtime adapter A  AGY media seat  User gateway
+    Codex seat  AGY seat  User gateway
                \           |           /
                    Joint decisions
                            |
@@ -37,10 +37,12 @@ orchestrator.
   model/effort selectors, skill settings, controls, and reviews.
 - The production orchestrator is a background worker independent of browser
   connections. It checkpoints before advancing stages.
-- Producer A can use either authenticated Codex CLI or AGY CLI. The media
-  producer is pinned to AGY because song and video inspection are mandatory.
-  Codex runs non-interactively with JSONL and a required response schema. AGY
-  runs in stream-JSON plan mode against the production directory.
+- The two agent seats are explicitly named Codex and AGY. Both are equal
+  co-producers with text, image, audio, and video responsibilities. Codex runs
+  non-interactively with JSONL and a required response schema. AGY runs in
+  stream-JSON plan mode against the production directory. The current native
+  full-media inspection path uses AGY when audio/video inspection is required;
+  this is an implementation detail, not a limitation on either agent's role.
 - Agents receive read-only production context. They cannot submit jobs or
   mutate application state directly.
 - The existing `QueueWorker` remains the sole owner of ComfyUI generation.
@@ -126,7 +128,7 @@ and the production remains at `user_review` until the user approves it.
 AGY models are discovered from `agy models`. Codex models and supported
 reasoning levels are read from the authenticated CLI's server-populated
 `models_cache.json`, with a small current fallback for first-run availability.
-The UI switches catalogs when Producer A changes runtime and filters reasoning
+The UI switches catalogs when Codex or AGY changes runtime and filters reasoning
 levels by model. Global defaults apply to new projects; each production keeps
 its own runtime, model, reasoning, and skill configuration.
 
