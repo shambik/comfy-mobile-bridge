@@ -455,8 +455,9 @@ async def agents_status():
 
 
 @app.get("/api/agents/models")
-async def agent_models():
-    return await asyncio.to_thread(model_catalog)
+async def agent_models(request: Request):
+    refresh = request.query_params.get("refresh", "").lower() in {"1", "true", "yes"}
+    return await asyncio.to_thread(model_catalog, refresh)
 
 
 @app.get("/api/settings/agents")

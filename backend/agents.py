@@ -6,6 +6,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,37 +62,66 @@ def agent_health() -> dict[str, Any]:
     }
 
 
-def discover_codex_models() -> list[dict[str, Any]]:
-    """Read the authenticated Codex client's model catalog.
+MODEL_CATALOG_TTL_SECONDS = 300
+_catalog_lock = threading.Lock()
+_catalog_snapshot: dict[str, Any] | None = None
+_catalog_fetched_at = 0.0
 
-    Codex CLI has no stable non-interactive `models` command. Its UI persists
-    the server-provided catalog in CODEX_HOME/models_cache.json, including
-    visibility and supported reasoning levels. A validated fallback keeps the
-    app usable before the first Codex login/cache refresh.
-    """
-    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    cache = codex_home / "models_cache.json"
+
+def _json_payload(text: str) -> dict[str, Any] | None:
+    """Extract the first JSON object from CLI output that contains models."""
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("models"), list):
+            return payload
+    return None
+
+
+def _run_model_command(command: list[str], timeout: int = 30) -> str:
     try:
-        payload = json.loads(cache.read_text(encoding="utf-8"))
-        models = []
-        for item in payload.get("models", []):
-            if item.get("visibility") not in (None, "list") or not item.get("slug"):
-                continue
-            efforts = [
-                str(level["effort"]) for level in item.get("supported_reasoning_levels", [])
-                if isinstance(level, dict) and level.get("effort")
-            ]
-            models.append({
-                "id": str(item["slug"]),
-                "name": str(item.get("display_name") or item["slug"]),
-                "efforts": efforts or ["low", "medium", "high"],
-                "default_effort": str(item.get("default_reasoning_level") or (efforts[0] if efforts else "medium")),
-                "source": "codex-cache",
-            })
-        if models:
-            return models
-    except (OSError, ValueError, TypeError, KeyError):
-        pass
+        result = subprocess.run(
+            command, capture_output=True, timeout=timeout,
+            encoding="utf-8", errors="replace", shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def discover_codex_models(timeout: int = 30) -> list[dict[str, Any]]:
+    """Query the authenticated Codex CLI's live model catalog.
+
+    `codex debug models` is the CLI's machine-readable catalog command. The
+    persistent models cache is intentionally not read; the caller gets the
+    current catalog returned by the installed CLI.
+    """
+    executable = _command_path(CODEX_COMMAND)
+    if executable:
+        payload = _json_payload(_run_model_command([executable, "debug", "models"], timeout))
+        if payload:
+            models = []
+            for item in payload["models"]:
+                if item.get("visibility") not in (None, "list") or not item.get("slug"):
+                    continue
+                efforts = [
+                    str(level["effort"]) for level in item.get("supported_reasoning_levels", [])
+                    if isinstance(level, dict) and level.get("effort")
+                ]
+                models.append({
+                    "id": str(item["slug"]),
+                    "name": str(item.get("display_name") or item["slug"]),
+                    "efforts": efforts or ["low", "medium", "high"],
+                    "default_effort": str(item.get("default_reasoning_level") or (efforts[0] if efforts else "medium")),
+                    "source": "codex-cli",
+                })
+            if models:
+                return models
     return [{**item, "source": "fallback"} for item in CODEX_FALLBACK_MODELS]
 
 
@@ -114,18 +145,32 @@ def discover_agy_models(timeout: int = 20) -> list[dict[str, Any]]:
         display = display.strip()
         efforts = ["low", "medium", "high"]
         encoded = next((value for value in ("low", "medium", "high") if model_id.endswith("-" + value)), None)
-        models.append({"id": model_id, "name": display or model_id, "efforts": [encoded] if encoded else efforts})
+        models.append({"id": model_id, "name": display or model_id, "efforts": [encoded] if encoded else efforts, "source": "agy-cli"})
     return models
 
 
-def model_catalog() -> dict[str, Any]:
-    return {
+def model_catalog(force_refresh: bool = False) -> dict[str, Any]:
+    """Return a live CLI catalog, reusing only a short-lived in-memory snapshot."""
+    global _catalog_snapshot, _catalog_fetched_at
+    now = time.monotonic()
+    if not force_refresh and _catalog_snapshot and now - _catalog_fetched_at < MODEL_CATALOG_TTL_SECONDS:
+        return _catalog_snapshot
+    with _catalog_lock:
+        now = time.monotonic()
+        if not force_refresh and _catalog_snapshot and now - _catalog_fetched_at < MODEL_CATALOG_TTL_SECONDS:
+            return _catalog_snapshot
+        snapshot = {
         "runtimes": [
             {"id": "codex", "name": "Codex CLI", "capabilities": ["text", "images", "audio", "video"]},
             {"id": "agy", "name": "AGY CLI", "capabilities": ["text", "images", "audio", "video"]},
         ],
         "codex": discover_codex_models(), "agy": discover_agy_models(),
-    }
+        "fetched_at": time.time(),
+        "sources": {"codex": "codex-cli", "agy": "agy-cli"},
+        }
+        _catalog_snapshot = snapshot
+        _catalog_fetched_at = time.monotonic()
+        return snapshot
 
 
 def _schema_path(production_id: str) -> Path:
