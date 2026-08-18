@@ -121,7 +121,7 @@ def discover_agy_models(timeout: int = 20) -> list[dict[str, Any]]:
 def model_catalog() -> dict[str, Any]:
     return {
         "runtimes": [
-            {"id": "codex", "name": "Codex CLI", "capabilities": ["text", "images"]},
+            {"id": "codex", "name": "Codex CLI", "capabilities": ["text", "images", "audio", "video"]},
             {"id": "agy", "name": "AGY CLI", "capabilities": ["text", "images", "audio", "video"]},
         ],
         "codex": discover_codex_models(), "agy": discover_agy_models(),
