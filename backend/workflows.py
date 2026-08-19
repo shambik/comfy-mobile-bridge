@@ -220,7 +220,6 @@ def native_audio_lock_workflow(
         nodes["104"]["inputs"]["first_frame"] = ["200", 0]
     return deepcopy(nodes)
 
-
 def spectrum_workflow(
     prompt: str,
     duration: int,
