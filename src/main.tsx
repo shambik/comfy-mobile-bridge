@@ -207,6 +207,7 @@ function App() {
   const [comfyBusy, setComfyBusy] = useState(false)
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
   const [comfyLogCleared, setComfyLogCleared] = useState(false)
+  const [comfyLogOffset, setComfyLogOffset] = useState<number | null>(null)
   const [comfyError, setComfyError] = useState('')
   const [library, setLibrary] = useState<AssetLibrary>({ root: '', projects: [], assignments: [] })
   const [destinationProject, setDestinationProject] = useState('')
@@ -269,15 +270,19 @@ function App() {
 
   const loadComfy = async (forceLogs = false) => {
     try {
+      const logQuery = comfyLogCleared && comfyLogOffset !== null
+        ? `/api/comfy/logs?tail=400&since=${comfyLogOffset}`
+        : '/api/comfy/logs?tail=400'
       const [statusResponse, logsResponse] = await Promise.all([
         fetch('/api/comfy/status', { cache: 'no-store' }),
-        fetch('/api/comfy/logs?tail=400', { cache: 'no-store' }),
+        fetch(logQuery, { cache: 'no-store' }),
       ])
       if (!statusResponse.ok || !logsResponse.ok) throw new Error('ComfyUI status unavailable')
       const status = await statusResponse.json()
       const logs = await logsResponse.json()
       setComfyRunning(Boolean(status.running))
-      if (forceLogs || !comfyLogCleared) setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
+      if (forceLogs || !comfyLogCleared || comfyLogOffset !== null) setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
+      if (typeof logs.size === 'number' && comfyLogCleared && comfyLogOffset === null) setComfyLogOffset(logs.size)
       setComfyError('')
     } catch {
       setComfyError('Unable to read ComfyUI status')
@@ -402,7 +407,7 @@ function App() {
     void loadComfy()
     const timer = window.setInterval(() => { void loadComfy() }, 2000)
     return () => window.clearInterval(timer)
-  }, [comfyLogCleared])
+  }, [comfyLogCleared, comfyLogOffset])
 
   useEffect(() => {
     if (!openingFrame) { setOpeningPreview(''); return }
@@ -485,7 +490,7 @@ function App() {
   }, [confirming])
 
   const paragraphCount = useMemo(() => batch ? prompt.trim().split(/\n\s*\n/).filter(Boolean).length : 1, [prompt, batch])
-  const effectiveEngine: Engine = mode === 'lip_sync' ? 'standard' : mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
+  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
   const effectiveEncoder: Encoder = mode === 'lip_sync' ? 'native' : preferences.encoder
   const generationSteps = mode === 'reference' && effectiveEngine === 'turbo' ? 4 : effectiveEngine === 'turbo' ? preferences.turboSteps : effectiveEngine === 'spectrum' ? preferences.spectrumSteps : preferences.standardSteps
   const stepRange = effectiveEngine === 'turbo'
@@ -691,14 +696,13 @@ function App() {
   }
 
   const selectEngine = (engine: Engine) => {
-    if (mode === 'lip_sync') return
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
     setPreferences(current => ({ ...current, engine }))
   }
 
   const selectEncoder = (encoder: Encoder) => {
-    if (mode === 'lip_sync') return
+    if (mode === 'lip_sync' && encoder !== 'native') return
     if (encoder === 'clipproj' && !clipprojReady) return
     setPreferences(current => ({ ...current, encoder }))
   }
@@ -852,12 +856,12 @@ function App() {
         <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
-        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
+        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
 
     <section className="asset-library-panel">
       <div className="asset-library-head"><div><span className="eyebrow"><Folder size={15}/> Asset library</span><h2>Projects and folders</h2><small dir="ltr">{library.root || 'state/projects'}</small></div><button type="button" onClick={() => { void createStudioProject() }}><FolderPlus size={16}/> New project</button></div>
@@ -938,7 +942,7 @@ function App() {
           <div className="setting-block">
             <div className="setting-title"><span>מנוע</span><small>מהירות מול איכות</small></div>
             <div className="engine-toggle">
-              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'lip_sync' || mode === 'reference' && !referenceTurboReady} onClick={() => selectEngine('turbo')}>
+              <button type="button" className={effectiveEngine === 'turbo' ? 'active' : ''} aria-pressed={effectiveEngine === 'turbo'} disabled={mode === 'reference' && !referenceTurboReady} onClick={() => selectEngine('turbo')}>
                 <Zap size={16} /><span><strong>Turbo</strong><small>מהיר</small></span>
               </button>
               <button type="button" className={effectiveEngine === 'standard' ? 'active' : ''} aria-pressed={effectiveEngine === 'standard'} onClick={() => selectEngine('standard')}>
@@ -950,7 +954,7 @@ function App() {
             </div>
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
             {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
-            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · Standard · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
+            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
             {effectiveEngine === 'turbo' && mode !== 'reference' && <>
               <div className="setting-title turbo-profile-title"><span>Turbo LoRA</span><small>בחירת אופי התוצאה</small></div>
