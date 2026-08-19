@@ -85,8 +85,8 @@ def normalize_generation_settings(
     resolved_encoder = encoder or "native"
     if resolved_encoder not in ("native", "clipproj"):
         raise ValueError("Text encoder must be native or clipproj")
-    if mode == "lip_sync" and resolved_engine != "standard":
-        raise ValueError("Lip-sync uses the Standard engine")
+    if mode == "lip_sync" and resolved_engine not in ("standard", "turbo"):
+        raise ValueError("Lip-sync supports only the Standard or Turbo engine")
     if mode == "lip_sync" and resolved_encoder != "native":
         raise ValueError("Lip-sync uses the native 32B encoder")
     resolved_turbo_profile = turbo_profile or "v1"

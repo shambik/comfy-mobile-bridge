@@ -347,8 +347,12 @@ class QueueWorker:
 
         if job["mode"] == "lip_sync":
             required |= {"KSamplerSelect", "LoadAudio", "MiniMaxH3NativeAudioLock"}
-            if job["engine"] != "standard" or (job.get("encoder") or "native") != "native":
-                raise RuntimeError("Lip-sync requires the Standard engine and native 32B encoder")
+            if job["engine"] == "turbo":
+                required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
+            elif job["engine"] != "standard":
+                raise RuntimeError("Lip-sync supports only the Standard or Turbo engine")
+            if (job.get("encoder") or "native") != "native":
+                raise RuntimeError("Lip-sync requires the native 32B encoder")
             if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
                 raise RuntimeError("Native AudioLock node is not installed")
             if not job.get("reference_audio_name"):
@@ -392,6 +396,7 @@ class QueueWorker:
                 steps=job["steps"], width=job["width"], height=job["height"],
                 megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 encoder=encoder,
+                turbo=job["engine"] == "turbo", turbo_profile=job.get("turbo_profile") or "v1",
             )
         elif job["mode"] == "reference":
             reference_images = json.loads(job.get("reference_images_json") or "[]")
