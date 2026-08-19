@@ -5,6 +5,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import traceback
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -129,6 +130,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="H3 Mobile Bridge", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception):
+    """Keep API failures diagnosable instead of returning an opaque 500."""
+    print(f"[BRIDGE ERROR] {request.method} {request.url.path}: {exc!r}", flush=True)
+    traceback.print_exc()
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": f"Internal server error: {exc}"}, status_code=500)
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
 
 @app.middleware("http")
@@ -1363,7 +1374,7 @@ async def create_jobs(
         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
         raise HTTPException(400, "Text mode does not accept reference media")
-    if mode == "lip_sync" and (image or reference_images or reference_videos or reference_audio or last_frame):
+    if mode == "lip_sync" and (reference_images or reference_videos or reference_audio or last_frame):
         raise HTTPException(400, "Lip-sync accepts an optional opening frame and one uploaded audio track")
     if mode == "lip_sync" and not audio:
         raise HTTPException(400, "Lip-sync requires an uploaded audio track")

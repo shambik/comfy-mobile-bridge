@@ -183,6 +183,7 @@ function App() {
   const recordingStreamRef = useRef<MediaStream | null>(null)
   const recordingChunksRef = useRef<Blob[]>([])
   const recordingStartedAtRef = useRef(0)
+  const recordingTargetRef = useRef<'lip_sync' | 'reference'>('lip_sync')
   const discardRecordingRef = useRef(false)
   const [openingFrame, setOpeningFrame] = useState<File | null>(null)
   const [closingFrame, setClosingFrame] = useState<File | null>(null)
@@ -313,7 +314,7 @@ function App() {
     setRecordingSeconds(0)
   }
 
-  const startRecording = async () => {
+  const startRecording = async (target: 'lip_sync' | 'reference' = 'lip_sync') => {
     if (isRecording) return
     setError('')
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -329,6 +330,7 @@ function App() {
       const recordedMimeType = mimeType || 'audio/webm'
       recordingChunksRef.current = []
       recordingStartedAtRef.current = Date.now()
+      recordingTargetRef.current = target
       discardRecordingRef.current = false
       recordingStreamRef.current = stream
       recorderRef.current = recorder
@@ -353,9 +355,13 @@ function App() {
         }
         const blob = new Blob(chunks, { type: baseMimeType })
         const extension = baseMimeType.includes('ogg') ? 'ogg' : 'webm'
-        const file = new File([blob], `lip-sync-recording-${Date.now()}.${extension}`, { type: baseMimeType })
-        setLipSyncAudio(file)
-        setAudioTrimStart(0)
+        const prefix = target === 'reference' ? 'reference-recording' : 'lip-sync-recording'
+        const file = new File([blob], `${prefix}-${Date.now()}.${extension}`, { type: baseMimeType })
+        if (target === 'reference') setReferenceAudio(file)
+        else {
+          setLipSyncAudio(file)
+          setAudioTrimStart(0)
+        }
         setError('')
       }
       recorder.onerror = () => {
@@ -521,8 +527,13 @@ function App() {
 
   const mutate = async (url: string, method = 'POST', body?: BodyInit, sessionToken = csrf) => {
     const response = await fetch(url, { method, headers: { 'X-CSRF-Token': sessionToken }, body })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(data.detail || 'הפעולה נכשלה')
+    const raw = await response.text()
+    let data: Record<string, any> = {}
+    try { data = raw ? JSON.parse(raw) : {} } catch { /* preserve the raw server response below */ }
+    if (!response.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : raw.trim() || `HTTP ${response.status}`
+      throw new Error(detail)
+    }
     await load()
     return data
   }
@@ -879,11 +890,11 @@ function App() {
         <ImageDropzone label="הוסף פריים סוגר · אופציונלי" hint="אם מצורף, H3 יכוון את הסרטון גם לתמונה הזו" preview={closingPreview} onChange={setClosingFrame} />
       </div>}
       {mode === 'lip_sync' && <div className="lip-sync-inputs">
-        <ImageDropzone label="פריים פותח · אופציונלי" hint="הדמות שאותה תרצה לדובב · JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
+        <ImageDropzone label="פריים פותח · אופציונלי" hint="JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
         <div className="lip-sync-audio-box">
           <AudioDropzone file={lipSyncAudio} onChange={setLipSyncAudio} disabled={isRecording} label="הוסף אודיו לדיבוב · חובה" hint="WAV, MP3, M4A, AAC, FLAC, OGG או WebM · עד 50MB" />
           <div className="recording-controls">
-            {!isRecording ? <button type="button" className="record-button" onClick={() => { void startRecording() }} disabled={sending}>
+            {!isRecording ? <button type="button" className="record-button" onClick={() => { void startRecording('lip_sync') }} disabled={sending}>
               <Mic size={17} /><span>התחל הקלטה</span><small>מיקרופון · עד 60 שניות</small>
             </button> : <button type="button" className="record-button recording" onClick={stopRecording}>
               <Square size={15} /><span>עצור הקלטה</span><b dir="ltr">{formatClipTime(recordingSeconds)}</b>
@@ -904,7 +915,14 @@ function App() {
         <div className="reference-grid">
           <MultiImageDropzone files={referenceImages} onChange={setReferenceImages} />
           <VideoDropzone files={referenceVideos} onChange={setReferenceVideos} />
-          <AudioDropzone file={referenceAudio} onChange={setReferenceAudio} />
+          <AudioDropzone file={referenceAudio} onChange={setReferenceAudio} disabled={isRecording} />
+        </div>
+        <div className="recording-controls reference-recording-controls">
+          {!isRecording ? <button type="button" className="record-button" onClick={() => { void startRecording('reference') }} disabled={sending}>
+            <Mic size={17} /><span>הקלט אודיו לרפרנס</span><small>מיקרופון · עד 60 שניות</small>
+          </button> : <button type="button" className="record-button recording" onClick={stopRecording}>
+            <Square size={15} /><span>עצור הקלטה</span><b dir="ltr">{formatClipTime(recordingSeconds)}</b>
+          </button>}
         </div>
         <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>
         {referenceAudio && <div className="reference-audio-note"><AudioLines size={14} /><span>בפרומפט אפשר לכתוב <b dir="ltr">&lt;Picture 1&gt;</b> ו־<b dir="ltr">&lt;Audio 1&gt;</b>. H3 ישתמש בקול ובתזמון כרפרנס וייצר אודיו חדש יחד עם תנועת השפתיים.</span></div>}
@@ -972,7 +990,7 @@ function App() {
 
           <div className="setting-block audio-setting-block">
             <div className="setting-title"><span>אודיו</span><small>ערוץ שמע בתוצאה</small></div>
-            {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר מדויק בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>}
+            {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>}
           </div>
 
           <div className="setting-block resolution-block">
