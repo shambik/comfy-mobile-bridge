@@ -307,15 +307,22 @@ async def session(request: Request):
     return response
 
 
-def read_comfy_log(limit: int = 300) -> list[str]:
+def read_comfy_log(limit: int = 300, since: int | None = None) -> tuple[list[str], int]:
     path = LOGS / "comfy-8190.log"
     if not path.exists():
-        return []
+        return [], 0
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        size = path.stat().st_size
+        if since is not None:
+            offset = max(0, min(int(since), size))
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                lines = handle.read().decode("utf-8", errors="replace").splitlines()
+        else:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
-        return []
-    return lines[-max(1, min(limit, 1000)):]
+        return [], 0
+    return lines[-max(1, min(limit, 1000)):], size
 
 
 @app.get("/api/comfy/status")
@@ -334,7 +341,13 @@ async def comfy_logs(request: Request):
         limit = int(request.query_params.get("tail", "300"))
     except ValueError:
         limit = 300
-    return {"running": await worker.comfy.ready(), "lines": read_comfy_log(limit)}
+    try:
+        since_param = request.query_params.get("since")
+        since = int(since_param) if since_param is not None else None
+    except ValueError:
+        since = None
+    lines, size = read_comfy_log(limit, since)
+    return {"running": await worker.comfy.ready(), "lines": lines, "size": size}
 
 
 @app.post("/api/comfy/start")
@@ -1400,8 +1413,10 @@ async def create_jobs(
         raise HTTPException(400, "Reference mode supports up to 3 videos")
     if mode not in ("reference",) and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
-    if mode == "lip_sync" and (generation.engine != "standard" or generation.encoder != "native"):
-        raise HTTPException(400, "Lip-sync uses the Standard engine and native 32B encoder")
+    if mode == "lip_sync" and generation.engine not in ("standard", "turbo"):
+        raise HTTPException(400, "Lip-sync supports only the Standard or Turbo engine")
+    if mode == "lip_sync" and generation.encoder != "native":
+        raise HTTPException(400, "Lip-sync uses the native 32B encoder")
     if mode == "lip_sync" and batch:
         raise HTTPException(400, "Lip-sync creates one video at a time")
     if mode != "reference" and generation.turbo_profile == "v4" and not (MODELS / "loras" / TURBO_LORAS["v4"]).exists():

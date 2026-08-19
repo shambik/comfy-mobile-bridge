@@ -190,17 +190,21 @@ def native_audio_lock_workflow(
     megapixels: float | None = None,
     aspect_ratio: str | None = None,
     encoder: str = "native",
+    turbo: bool = False,
+    turbo_profile: str = "v1",
 ):
     """Native H3 video with an uploaded audio track locked into the AV latent."""
+    model_node = "20" if turbo else "18"
+    sampler_node = {"id": "21", "scheduler": "9"} if turbo else {"id": "17", "scheduler": "9"}
     nodes = _common_decode(
-        "104", "18", {"id": "17", "scheduler": "9"},
+        "104", model_node, sampler_node,
         seed, prefix, encoder, include_audio=False,
     )
     nodes.update({
         **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "6": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}},
-        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["18", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
         "17": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
         "18": {"class_type": "MiniMaxH3NativeAudioLock", "inputs": {
             "model": ["6", 0], "av_latent": ["104", 1],
@@ -213,8 +217,25 @@ def native_audio_lock_workflow(
             "width": ["7", 0], "height": ["7", 1], "length": ["106", 1],
         }},
     })
-    nodes["14"]["inputs"]["latent_image"] = ["18", 1]
-    nodes["91"]["inputs"]["audio"] = ["18", 2]
+    if turbo:
+        nodes["18"] = {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
+            "model": ["6", 0], "lora_name": TURBO_LORAS[turbo_profile],
+            "strength": 1.0, "low_vram": True,
+        }}
+        nodes["19"] = {"class_type": "MiniMaxH3SigmaShift", "inputs": {
+            "model": ["18", 0], "shift_video": 12.0, "shift_audio": 3.0,
+        }}
+        nodes["20"] = {"class_type": "MiniMaxH3NativeAudioLock", "inputs": {
+            "model": ["19", 0], "av_latent": ["104", 1],
+            "audio_vae": ["24", 0], "audio": ["23", 0],
+        }}
+        nodes["21"] = {"class_type": "MiniMaxH3TurboSampler", "inputs": {}}
+        nodes["14"]["inputs"]["sampler"] = ["21", 0]
+        nodes["14"]["inputs"]["latent_image"] = ["20", 1]
+        nodes["91"]["inputs"]["audio"] = ["20", 2]
+    else:
+        nodes["14"]["inputs"]["latent_image"] = ["18", 1]
+        nodes["91"]["inputs"]["audio"] = ["18", 2]
     if first_frame_name:
         nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
         nodes["104"]["inputs"]["first_frame"] = ["200", 0]
