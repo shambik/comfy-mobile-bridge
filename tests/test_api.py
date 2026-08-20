@@ -7,7 +7,7 @@ from unittest.mock import ANY, AsyncMock, patch
 from fastapi.testclient import TestClient
 
 import backend.db as db_module
-from backend.main import app, worker
+from backend.main import app, packet_audio_duration, worker
 
 
 class JobApiTests(unittest.TestCase):
@@ -117,6 +117,15 @@ class JobApiTests(unittest.TestCase):
         response = self.post(mode="lip_sync", engine="standard", encoder="native")
         self.assertEqual(response.status_code, 400)
         self.assertIn("uploaded audio", response.text)
+
+    def test_live_webm_packet_duration_fallback(self):
+        payload = {
+            "packets": [
+                {"pts_time": "-0.007", "duration_time": "0.020"},
+                {"pts_time": "4.973", "duration_time": "0.020"},
+            ]
+        }
+        self.assertAlmostEqual(packet_audio_duration(payload), 5.0, places=3)
 
     def test_spectrum_profile_is_persisted(self):
         response = self.post(engine="spectrum", steps="16", resolution="736x416")
