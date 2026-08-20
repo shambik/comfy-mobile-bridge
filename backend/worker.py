@@ -39,7 +39,9 @@ class QueueWorker:
         self.wake.set()
         if self.task:
             await self.task
-        await self.comfy.shutdown()
+        # The bridge lifecycle is independent from ComfyUI. Restarting or
+        # reloading the app must not kill a manually running ComfyUI process;
+        # only the explicit /api/comfy/stop action calls shutdown().
 
     def notify(self):
         self.wake.set()
@@ -326,6 +328,16 @@ class QueueWorker:
             update_job(job["id"], phase="starting", eta_seconds=round(estimated_total, 1))
             self._update_parent_progress(job, "starting", 0, estimated_total)
         await self.comfy.ensure_started()
+        runtime = await self.comfy.runtime_metadata()
+        runtime["job"] = {
+            "mode": job["mode"], "engine": job["engine"],
+            "turbo_profile": job.get("turbo_profile") or "v1",
+            "encoder": job.get("encoder") or "native", "duration": job["duration"],
+            "steps": job["steps"], "width": job["width"], "height": job["height"],
+            "megapixels": job.get("megapixels"), "aspect_ratio": job.get("aspect_ratio"),
+            "seed": job.get("seed"), "no_audio": bool(job.get("no_audio")),
+        }
+        update_job(job["id"], runtime=runtime)
         info = await self.comfy.object_info()
         required = {
             "UNETLoader", "VAELoader", "MiniMaxH3ImageToVideo", "CreateVideo", "SaveVideo",
@@ -388,7 +400,9 @@ class QueueWorker:
         seed = int(job["seed"])
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
+        workflow_builder = "unknown"
         if job["mode"] == "lip_sync":
+            workflow_builder = "native_audio_lock_workflow"
             workflow = native_audio_lock_workflow(
                 job["prompt"], job["duration"], seed, prefix,
                 audio_name=job["reference_audio_name"],
@@ -399,6 +413,7 @@ class QueueWorker:
                 turbo=job["engine"] == "turbo", turbo_profile=job.get("turbo_profile") or "v1",
             )
         elif job["mode"] == "reference":
+            workflow_builder = "reference_workflow"
             reference_images = json.loads(job.get("reference_images_json") or "[]")
             if not reference_images and image_name:
                 reference_images = [image_name]
@@ -423,6 +438,7 @@ class QueueWorker:
                 "spectrum": spectrum_workflow,
                 "standard": standard_workflow,
             }[job["engine"]]
+            workflow_builder_name = f"{workflow_builder.__name__}"
             workflow_options = {
                 "first_frame_name": first_frame_name,
                 "last_frame_name": last_frame_name,
@@ -436,6 +452,14 @@ class QueueWorker:
             workflow = workflow_builder(
                 job["prompt"], job["duration"], seed, prefix, **workflow_options,
             )
+            workflow_builder = workflow_builder_name
+
+        runtime["workflow"] = {
+            "builder": workflow_builder,
+            "node_count": len(workflow),
+            "node_classes": sorted({str(node.get("class_type")) for node in workflow.values()}),
+        }
+        update_job(job["id"], runtime=runtime)
 
         client_id = str(uuid.uuid4())
         prompt_id: str | None = None
@@ -515,6 +539,8 @@ class QueueWorker:
                 progress=0, step=0, total_steps=0,
                 eta_seconds=round(estimated_total, 1) if estimated_total else None,
             )
+            runtime.setdefault("comfy", {})["prompt_id"] = prompt_id
+            update_job(job["id"], runtime=runtime)
             peak = {}
             samples = []
             while True:

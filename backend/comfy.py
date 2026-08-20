@@ -2,9 +2,12 @@ import asyncio
 import ctypes
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -19,6 +22,7 @@ class ComfyClient:
     def __init__(self):
         self.process: subprocess.Popen | None = None
         self.log_handle = None
+        self.last_command: list[str] | None = None
 
     async def ready(self) -> bool:
         try:
@@ -31,6 +35,166 @@ class ComfyClient:
             return True
         except Exception:
             return False
+
+    async def system_stats(self) -> dict:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(COMFY_URL + "/system_stats")
+            response.raise_for_status()
+            return response.json()
+
+    def _git_metadata(self, root: Path | None = None) -> dict:
+        root = root or COMFY_CODE
+        result = {}
+        for key, args in (
+            ("commit", ["rev-parse", "HEAD"]),
+            ("branch", ["symbolic-ref", "--short", "-q", "HEAD"]),
+        ):
+            try:
+                value = subprocess.run(
+                    ["git", "-C", str(root), *args],
+                    capture_output=True, text=True, timeout=5, check=False,
+                ).stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                value = ""
+            if value:
+                result[key] = value
+        try:
+            result["dirty"] = bool(subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5, check=False,
+            ).stdout.strip())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return result
+
+    @staticmethod
+    def _argv_value(argv: list[str], flag: str) -> str | None:
+        try:
+            index = argv.index(flag)
+        except ValueError:
+            return None
+        return str(argv[index + 1]) if index + 1 < len(argv) else None
+
+    @staticmethod
+    def _runtime_root(argv: list[str]) -> Path:
+        base_directory = ComfyClient._argv_value(argv, "--base-directory")
+        if base_directory:
+            return Path(base_directory).resolve()
+        if argv:
+            main_path = Path(str(argv[0]))
+            if main_path.name.lower() == "main.py":
+                return main_path.parent.resolve()
+        return COMFY_CODE
+
+    def _listening_pid(self) -> int | None:
+        """Return the process owning the configured ComfyUI port on Windows."""
+        if os.name != "nt":
+            return None
+        script = (
+            f"Get-NetTCPConnection -LocalPort {COMFY_PORT} -State Listen "
+            "-ErrorAction SilentlyContinue | "
+            "Select-Object -First 1 -ExpandProperty OwningProcess"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            for line in result.stdout.splitlines():
+                if line.strip().isdigit():
+                    return int(line.strip())
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+        return None
+
+    @staticmethod
+    def _process_executable(pid: int | None) -> str | None:
+        if os.name != "nt" or not pid:
+            return None
+        script = (
+            f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}' "
+            "-ErrorAction SilentlyContinue).ExecutablePath"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            value = result.stdout.strip()
+            return value or None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _runtime_matches_config(self, stats: dict) -> bool:
+        system = stats.get("system") or {}
+        argv = [str(item) for item in (system.get("argv") or [])]
+        if self._runtime_root(argv) != COMFY_CODE.resolve():
+            return False
+        configured_models = MODELS.resolve()
+        server_models = self._argv_value(argv, "--models-directory")
+        if server_models and Path(server_models).resolve() != configured_models:
+            return False
+        pid = self.discovered_pid() or self._listening_pid()
+        executable = self._process_executable(pid)
+        if executable and Path(executable).resolve() != COMFY_PYTHON.resolve():
+            return False
+        return True
+
+    async def runtime_metadata(self, stats: dict | None = None) -> dict:
+        """Capture the exact ComfyUI runtime used by a generation.
+
+        The server's own /system_stats argv is authoritative when ComfyUI was
+        started outside the bridge. This prevents the card from claiming the
+        configured interpreter when a stale process answered on the port.
+        """
+        try:
+            payload = stats or await self.system_stats()
+        except Exception as exc:
+            return {"capture_error": str(exc), "captured_at": datetime.now(timezone.utc).isoformat()}
+        system = payload.get("system") or {}
+        pytorch = str(system.get("pytorch_version") or "")
+        match = re.search(r"\+cu(\d+)", pytorch)
+        cuda_digits = match.group(1) if match else ""
+        cuda = f"{cuda_digits[:-1]}.{cuda_digits[-1]}" if len(cuda_digits) >= 3 else (cuda_digits or None)
+        argv = system.get("argv") or self.last_command or []
+        root = self._runtime_root([str(item) for item in argv])
+        pid = self.discovered_pid() or self._listening_pid()
+        executable = self._process_executable(pid)
+        command_argv = [str(item) for item in argv]
+        command_line = ([executable] + command_argv) if executable else command_argv
+        return {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "bridge": {"python": sys.executable, "pid": os.getpid()},
+            "comfy": {
+                "version": system.get("comfyui_version"),
+                "commit": self._git_metadata(root),
+                "root": str(root),
+                "pid": pid,
+                "python": executable or self._python_from_argv(argv) or str(COMFY_PYTHON),
+                "python_version": system.get("python_version"),
+                "pytorch": pytorch,
+                "cuda": cuda,
+                "host": COMFY_HOST,
+                "port": COMFY_PORT,
+                "argv": command_argv,
+                "command_line": subprocess.list2cmdline(command_line) if command_line else None,
+                "packages": system.get("comfy_package_versions") or [],
+                "log_file": str(LOGS / "comfy-8190.log"),
+                "paths": {
+                    flag.lstrip("-").replace("-", "_"): self._argv_value(command_argv, flag)
+                    for flag in ("--base-directory", "--models-directory", "--input-directory", "--output-directory", "--temp-directory", "--user-directory", "--database-url")
+                    if self._argv_value(command_argv, flag)
+                },
+            },
+            "devices": payload.get("devices") or [],
+        }
+
+    @staticmethod
+    def _python_from_argv(argv: list[str]) -> str | None:
+        if not argv:
+            return None
+        first = str(argv[0])
+        return first if first.lower().endswith(("python.exe", "python")) else None
 
     def _windows_process_ids(self) -> list[int]:
         """Find ComfyUI processes even when this app lost its Popen handle."""
@@ -64,7 +228,14 @@ class ComfyClient:
 
     async def ensure_started(self):
         if await self.ready():
-            return
+            stats = await self.system_stats()
+            if self._runtime_matches_config(stats):
+                return
+            actual_root = self._runtime_root([str(item) for item in (stats.get("system") or {}).get("argv", [])])
+            raise RuntimeError(
+                "ComfyUI is already responding on the configured port, but it is not the configured runtime: "
+                f"{actual_root}. Stop that instance before starting {COMFY_CODE}."
+            )
         if not COMFY_PYTHON.exists() or not (COMFY_CODE / "main.py").exists():
             raise RuntimeError("ComfyUI installation is missing")
 
@@ -96,6 +267,7 @@ class ComfyClient:
             "--preview-method", "none",
             "--log-stdout",
         ]
+        self.last_command = command
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         child_env = os.environ.copy()
         # ComfyUI custom nodes may emit Unicode (including emoji) while

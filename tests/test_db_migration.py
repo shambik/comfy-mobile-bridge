@@ -98,6 +98,15 @@ class DatabaseMigrationTests(unittest.TestCase):
             ["reference-old", "turbo-old"],
         )
 
+    def test_runtime_metadata_is_serialized_and_restored(self):
+        db_module.init_db()
+        runtime = {
+            "comfy": {"version": "0.33.0", "pytorch": "2.5.1+cu121"},
+            "job": {"steps": 6},
+        }
+        db_module.update_job("turbo-old", runtime=runtime)
+        self.assertEqual(db_module.get_job("turbo-old")["runtime"], runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

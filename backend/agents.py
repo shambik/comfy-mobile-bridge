@@ -107,7 +107,11 @@ def discover_codex_models(timeout: int = 30) -> list[dict[str, Any]]:
         if payload:
             models = []
             for item in payload["models"]:
-                if item.get("visibility") not in (None, "list") or not item.get("slug"):
+                # The CLI can mark a model as hidden while still exposing it
+                # for API/CLI use.  The Production settings page should show
+                # every model the installed CLI reports as usable; only
+                # entries explicitly marked unavailable are excluded.
+                if item.get("supported_in_api") is False or not item.get("slug"):
                     continue
                 efforts = [
                     str(level["effort"]) for level in item.get("supported_reasoning_levels", [])
