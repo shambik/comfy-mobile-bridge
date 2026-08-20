@@ -12,12 +12,27 @@ type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Page = 'studio' | 'production' | 'comfy'
+type RuntimeMetadata = {
+  captured_at?: string
+  capture_error?: string
+  bridge?: { python?: string; pid?: number }
+  comfy?: {
+    version?: string; commit?: { commit?: string; branch?: string; dirty?: boolean }; root?: string;
+    python?: string; python_version?: string; pytorch?: string; cuda?: string; host?: string; port?: number;
+    argv?: string[]; command_line?: string; prompt_id?: string;
+    packages?: { name?: string; installed?: string; required?: string }[]
+  }
+  devices?: { name?: string; type?: string; vram_total?: number; vram_free?: number }[]
+  job?: Record<string, unknown>
+  workflow?: { builder?: string; node_count?: number; node_classes?: string[] }
+}
+type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
-  id: string; prompt: string; mode: Mode; duration: number; status: Status; progress: number;
+  id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
   engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; created_at: string; started_at?: string; finished_at?: string;
-  metrics?: { generation_seconds?: number };
+  metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
 }
 
 type SequenceKind = 'connected' | 'history'
@@ -190,6 +205,7 @@ function App() {
   const [openingPreview, setOpeningPreview] = useState('')
   const [closingPreview, setClosingPreview] = useState('')
   const [sending, setSending] = useState(false)
+  const [rerunLoading, setRerunLoading] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [referenceReady, setReferenceReady] = useState(false)
   const [reference10Ready, setReference10Ready] = useState(false)
@@ -434,9 +450,7 @@ function App() {
     probe.preload = 'metadata'
     probe.onloadedmetadata = () => {
       if (Number.isFinite(probe.duration) && probe.duration > 0) {
-        const nextDuration = Math.max(0.5, Math.min(60, probe.duration))
         setLipSyncAudioDuration(probe.duration)
-        setDuration(current => Math.min(current, Math.round(nextDuration * 10) / 10))
       }
     }
     probe.src = url
@@ -447,13 +461,18 @@ function App() {
     }
   }, [lipSyncAudio])
 
+  const maxAudioStart = lipSyncAudioDuration
+    ? lipSyncAudioDuration > duration + 0.08
+      ? Math.max(0, lipSyncAudioDuration - duration)
+      : Math.max(0, lipSyncAudioDuration - 0.1)
+    : 0
+
   useEffect(() => {
     if (mode !== 'lip_sync' || !lipSyncAudioDuration) return
-    const maxStart = Math.max(0, lipSyncAudioDuration - duration)
-    setAudioTrimStart(current => Math.min(Math.max(0, current), maxStart))
-  }, [mode, lipSyncAudioDuration, duration])
+    setAudioTrimStart(current => Math.min(Math.max(0, current), maxAudioStart))
+  }, [mode, lipSyncAudioDuration, duration, maxAudioStart])
 
-  const audioPreviewIsTrimmed = mode === 'lip_sync' && !!lipSyncAudioDuration && lipSyncAudioDuration > duration + 0.08
+  const audioPreviewIsTrimmed = mode === 'lip_sync' && !!lipSyncAudioDuration && (lipSyncAudioDuration > duration + 0.08 || audioTrimStart > 0.01)
   const audioPreviewEnd = audioPreviewIsTrimmed && lipSyncAudioDuration
     ? Math.min(lipSyncAudioDuration, audioTrimStart + duration)
     : null
@@ -614,6 +633,75 @@ function App() {
     catch (e) { setError(e instanceof Error ? e.message : 'Could not delete asset') }
   }
 
+  const rerunJob = async (job: Job) => {
+    if (rerunLoading || !['completed', 'failed'].includes(job.status)) return
+    const assets = job.source_assets || []
+    const reuseAssets = assets.length > 0 && window.confirm(
+      `לעבודה הזו יש ${assets.length} קבצי מקור.\n\nאישור: לטעון אותם מחדש.\nביטול: לטעון רק את ההגדרות, בלי הקבצים.`
+    )
+    setError('')
+    setRerunLoading(job.id)
+    try {
+      const loadedAssets = reuseAssets
+        ? await Promise.all(assets.map(async asset => {
+            const response = await fetch(asset.url, { cache: 'no-store' })
+            if (!response.ok) throw new Error(`לא ניתן לטעון את ${asset.name}`)
+            const blob = await response.blob()
+            return { ...asset, file: new File([blob], asset.name, { type: blob.type || 'application/octet-stream' }) }
+          }))
+        : []
+      const files = new Map(loadedAssets.map(asset => [asset.field, asset.file]))
+      const jobEngine = job.engine || 'turbo'
+      const aspect = aspectOptions.includes(job.aspect_ratio as Aspect) ? job.aspect_ratio as Aspect : '16:9'
+      const megapixels = job.megapixels ?? Math.max(0.1, Math.min(2, (job.width * job.height) / 1_000_000))
+      const matchingResolution = resolutions.find(item => item.width === job.width && item.height === job.height)
+      setPage('studio')
+      setPrompt(job.prompt)
+      setMode(job.mode)
+      setDuration(Math.max(0.5, Math.min(60, job.duration)))
+      setBatch(false)
+      setConnected(false)
+      setNoAudio(Boolean(job.no_audio))
+      setAudioTrimStart(Math.max(0, Number(job.audio_start) || 0))
+      const assignment = assignmentFor('job', job.id)
+      setDestinationProject(assignment?.project_id || '')
+      setDestinationFolder(assignment?.folder_id || '')
+      setPreferences(current => ({
+        ...current,
+        engine: jobEngine,
+        encoder: job.encoder || 'native',
+        turboProfile: job.turbo_profile || current.turboProfile,
+        turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
+        standardSteps: jobEngine === 'standard' ? Math.max(8, Math.min(30, job.steps)) : current.standardSteps,
+        spectrumSteps: jobEngine === 'spectrum' ? Math.max(8, Math.min(30, job.steps)) : current.spectrumSteps,
+        resolution: matchingResolution?.id || current.resolution,
+        aspect,
+        megapixels,
+      }))
+      setReferenceImages([])
+      setReferenceVideos([])
+      setReferenceAudio(null)
+      setLipSyncAudio(null)
+      setOpeningFrame(null)
+      setClosingFrame(null)
+      if (reuseAssets) {
+        const referenceImages = loadedAssets.filter(asset => asset.field.startsWith('reference_image_')).map(asset => asset.file)
+        const referenceVideos = loadedAssets.filter(asset => asset.field.startsWith('reference_video_')).map(asset => asset.file)
+        setReferenceImages(referenceImages)
+        setReferenceVideos(referenceVideos)
+        setReferenceAudio(files.get('reference_audio') || null)
+        setLipSyncAudio(files.get('audio') || null)
+        setOpeningFrame(files.get('first_frame') || files.get('image') || null)
+        setClosingFrame(files.get('last_frame') || null)
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'לא ניתן לטעון מחדש את קבצי המקור')
+    } finally {
+      setRerunLoading(null)
+    }
+  }
+
   const controlComfy = async (action: 'start' | 'stop') => {
     if (comfyBusy) return
     setComfyBusy(true)
@@ -731,7 +819,6 @@ function App() {
     if (mode === 'frames' && !openingFrame) return setError('צריך לצרף פריים פותח')
     if (mode === 'lip_sync' && !audioLockReady) return setError('Native AudioLock עדיין לא נטען ב־ComfyUI')
     if (mode === 'lip_sync' && !lipSyncAudio) return setError('צריך לצרף אודיו לדיבוב')
-    if (mode === 'lip_sync' && lipSyncAudioDuration && audioTrimStart + duration > lipSyncAudioDuration + 0.08) return setError('הקטע שנבחר קצר מדי למשך הג׳נרוט')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -740,7 +827,7 @@ function App() {
     const sessionToken = csrf || await loadSession()
     if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
-    const requestPrompt = prompt.trim() || 'Use the supplied audio with natural, precise lip-sync. Keep the face and camera stable.'
+    const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
     form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
     form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
     if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
@@ -822,7 +909,7 @@ function App() {
     const { job } = asset
     const reference = `job:${job.id}`
     const order = selectedResults.indexOf(reference) + 1
-    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
   }
 
   const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode) => {
@@ -906,13 +993,12 @@ function App() {
             {!isRecording && <span className="recording-alternative"><Mic size={13} /> או הקלט מהמיקרופון במקום להעלות קובץ</span>}
           </div>
           {lipSyncAudioPreview && <audio ref={lipSyncAudioElementRef} className="lip-sync-audio-player" controls preload="metadata" src={lipSyncAudioPreview} onLoadedMetadata={syncLipSyncAudioPreview} onPlay={syncLipSyncAudioPreview} onSeeking={syncLipSyncAudioPreview} onTimeUpdate={stopAtLipSyncAudioPreviewEnd} />}
-          {lipSyncAudio && lipSyncAudioDuration && lipSyncAudioDuration > duration + 0.08 && <div className="audio-trim-box">
-            <div className="audio-trim-heading"><span>חיתוך אודיו</span><small>נבחר קטע של {duration.toFixed(1)} שנ׳ מתוך {lipSyncAudioDuration.toFixed(1)} שנ׳</small></div>
-            <input className="audio-trim-range" dir="ltr" type="range" min="0" max={Math.max(0, lipSyncAudioDuration - duration)} step="0.1" value={audioTrimStart} onChange={event => setAudioTrimStart(Number(event.target.value))} aria-label="נקודת התחלה באודיו" />
+          {lipSyncAudio && lipSyncAudioDuration && <div className="audio-trim-box">
+            <div className="audio-trim-heading"><span>חיתוך אודיו</span><small>מתחיל ב־{audioTrimStart.toFixed(1)} שנ׳ · אורך הווידאו {duration.toFixed(1)} שנ׳ מתוך {lipSyncAudioDuration.toFixed(1)} שנ׳</small></div>
+            <input className="audio-trim-range" dir="ltr" type="range" min="0" max={maxAudioStart} step="0.1" value={audioTrimStart} onChange={event => setAudioTrimStart(Number(event.target.value))} aria-label="נקודת התחלה באודיו" disabled={maxAudioStart <= 0} />
             <div className="audio-trim-times" dir="ltr"><span>{formatClipTime(audioTrimStart)}</span><span>{formatClipTime(audioTrimStart + duration)}</span></div>
-            <small className="audio-trim-note">הנגן יעצור בסוף הקטע, ולרינדור יישלח הקטע החתוך בלבד.</small>
+            <small className="audio-trim-note">נקודת ההתחלה נשמרת. האודיו ייחתך לאורך המבוקש או יושלם בשקט אם הוא קצר יותר.</small>
           </div>}
-          {lipSyncAudio && lipSyncAudioDuration && lipSyncAudioDuration <= duration + 0.08 && <div className="reference-audio-note"><AudioLines size={14} /><span>האודיו קצר או שווה למשך הג׳נרוט, ולכן לא צריך חיתוך.</span></div>}
         </div>
       </div>}
       {mode === 'reference' && <>
@@ -1012,7 +1098,7 @@ function App() {
       </div>
 
       <div className="final-row">
-        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(mode === 'lip_sync' && lipSyncAudioDuration ? Math.min(value, lipSyncAudioDuration) : value) }} /><small>{mode === 'lip_sync' ? 'האודיו ייחתך לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
+        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(value) }} /><small>{mode === 'lip_sync' ? 'האודיו ייחתך או יושלם בשקט לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
         <button className="create-button" onClick={() => { void submit() }} disabled={sending || isRecording} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
@@ -1080,7 +1166,7 @@ function App() {
   </main>
 }
 
-function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void }) {
+function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, rerunLoading }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; rerunLoading?: boolean }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
@@ -1092,6 +1178,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
   const [now, setNow] = useState(() => Date.now())
   const [promptExpanded, setPromptExpanded] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   useEffect(() => {
     if (!active) return
     setNow(Date.now())
@@ -1137,12 +1224,22 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
         </div>
       </div>}
       {job.error && <div className="job-error">{job.error}</div>}
+      <button className="advanced-log-toggle" type="button" onClick={() => setAdvancedOpen(current => !current)} aria-expanded={advancedOpen}><Terminal size={13} /> {advancedOpen ? 'הסתר פרטי ריצה' : 'פרטי ריצה מתקדמים'}</button>
+      {advancedOpen && <div className="advanced-log" dir="ltr">
+        {!job.runtime && <p>אין נתוני runtime שמורים עבור עבודה זו.</p>}
+        {job.runtime && <>
+          <div className="advanced-log-summary"><b>{job.runtime.comfy?.version || 'ComfyUI לא ידוע'}</b><span>{job.runtime.comfy?.pytorch || 'PyTorch לא ידוע'}</span><span>CUDA {job.runtime.comfy?.cuda || 'לא ידוע'}</span><span>{job.runtime.comfy?.commit?.commit?.slice(0, 12) || 'commit לא ידוע'}</span></div>
+          <dl><dt>ComfyUI root</dt><dd>{job.runtime.comfy?.root || '—'}</dd><dt>ComfyUI Python</dt><dd>{job.runtime.comfy?.python || '—'}</dd><dt>Bridge Python</dt><dd>{job.runtime.bridge?.python || '—'}</dd><dt>Command line</dt><dd>{job.runtime.comfy?.command_line || '—'}</dd><dt>Workflow</dt><dd>{job.runtime.workflow?.builder || '—'} · {job.runtime.workflow?.node_count ?? '—'} nodes</dd><dt>Prompt ID</dt><dd>{job.runtime.comfy?.prompt_id || '—'}</dd></dl>
+          <details><summary>Full runtime JSON</summary><pre>{JSON.stringify(job.runtime, null, 2)}</pre></details>
+        </>}
+      </div>}
       <div className="job-actions">
         {job.status === 'queued' && <><button onClick={onUp} disabled={index === 0}><ArrowUp size={17} /></button><button onClick={onDown} disabled={index === (total || 0) - 1}><ArrowDown size={17} /></button></>}
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
-        {onCancel && <button className="danger" onClick={onCancel}>ביטול</button>}
+        {onRerun && <button className="rerun-button" onClick={onRerun} disabled={rerunLoading}>{rerunLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} {rerunLoading ? 'טוען…' : 'הרצה מחדש'}</button>}
+        {onCancel && <button className="danger cancel-action" onClick={onCancel}>ביטול</button>}
         {onDelete && <button className="trash" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>}
         {job.metrics?.generation_seconds && <span className="elapsed">נוצר תוך {formatDuration(job.metrics.generation_seconds)}</span>}
       </div>
@@ -1179,7 +1276,7 @@ function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage,
         {sequence.video_url && <><a href={sequence.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
-        {onCancel && <button className="danger" onClick={onCancel}>ביטול</button>}
+        {onCancel && <button className="danger cancel-action" onClick={onCancel}>ביטול</button>}
         {onDelete && <button className="trash" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>}
         {sequence.metrics?.assembly_seconds && <span className="elapsed">חובר תוך {formatDuration(sequence.metrics.assembly_seconds)}</span>}
       </div>

@@ -31,6 +31,7 @@ def _create_jobs_table(db):
         prompt TEXT NOT NULL,
         mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync')),
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
+        audio_start REAL NOT NULL DEFAULT 0,
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
@@ -51,6 +52,8 @@ def _create_jobs_table(db):
         reference_videos_json TEXT,
         reference_audio_path TEXT,
         reference_audio_name TEXT,
+        source_audio_path TEXT,
+        source_audio_name TEXT,
         no_audio INTEGER NOT NULL DEFAULT 0,
         first_frame_path TEXT,
         first_frame_name TEXT,
@@ -65,6 +68,7 @@ def _create_jobs_table(db):
         eta_seconds REAL,
         error TEXT,
         metrics_json TEXT,
+        runtime_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         started_at TEXT,
@@ -156,14 +160,14 @@ def _rebuild_jobs_table(db):
     _create_jobs_table(db)
 
     columns = [
-        "id", "prompt", "mode", "duration", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+        "id", "prompt", "mode", "duration", "audio_start", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
-        "reference_audio_path", "reference_audio_name", "no_audio",
+        "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "output_path", "prompt_id",
         "progress", "phase", "step", "total_steps", "eta_seconds", "error",
-        "metrics_json", "created_at", "updated_at",
+        "metrics_json", "runtime_json", "created_at", "updated_at",
         "started_at", "finished_at",
     ]
     defaults = {
@@ -175,6 +179,7 @@ def _rebuild_jobs_table(db):
         "height": "416",
         "megapixels": "0.31",
         "aspect_ratio": "'16:9'",
+        "audio_start": "0",
         "progress": "0",
         "phase": "'queued'",
         "step": "0",
@@ -182,12 +187,29 @@ def _rebuild_jobs_table(db):
         "eta_seconds": "NULL",
         "reference_images_json": "NULL",
         "reference_videos_json": "NULL",
+        "source_audio_path": "NULL",
+        "source_audio_name": "NULL",
         "no_audio": "0",
+        "runtime_json": "NULL",
     }
-    select_values = ",".join(
-        column if column in old_columns else defaults.get(column, "NULL")
-        for column in columns
-    )
+    select_values = []
+    for column in columns:
+        if column not in old_columns:
+            select_values.append(defaults.get(column, "NULL"))
+        elif column == "mode":
+            # LTX was removed from the active app, but old failed/completed
+            # cards must remain readable instead of preventing the bridge from
+            # starting. Keep their history as opening-frame jobs.
+            select_values.append("CASE WHEN mode='ltx_i2v' THEN 'opening' ELSE mode END")
+        elif column in {"width", "height"}:
+            # The retired LTX UI accepted dimensions that were not on H3's
+            # current 32-pixel grid. Normalize only those archived rows.
+            select_values.append(
+                f"CASE WHEN mode='ltx_i2v' THEN MAX(256, (MIN(2048, {column}) / 32) * 32) ELSE {column} END"
+            )
+        else:
+            select_values.append(column)
+    select_values = ",".join(select_values)
     db.execute(
         f"INSERT INTO jobs ({','.join(columns)}) SELECT {select_values} FROM jobs_legacy"
     )
@@ -196,6 +218,16 @@ def _rebuild_jobs_table(db):
 
 def init_db():
     with connect() as db:
+        # Recover the source table if a previous SQLite rebuild was interrupted
+        # after the rename but before rows were copied. DDL can survive an
+        # application crash independently of the surrounding transaction.
+        legacy = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs_legacy'").fetchone()
+        current_count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone() else 0
+        if legacy and current_count == 0:
+            db.execute("DROP TABLE jobs")
+            db.execute("ALTER TABLE jobs_legacy RENAME TO jobs")
         table = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
         if table:
             table_sql = table[0] or ""
@@ -203,9 +235,12 @@ def init_db():
                 "first_frame_path", "first_frame_name", "last_frame_path", "last_frame_name",
                 "phase", "step", "total_steps", "eta_seconds",
                 "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+                "audio_start",
                 "sequence_id", "sequence_index", "sequence_total",
                 "reference_audio_path", "reference_audio_name",
+                "source_audio_path", "source_audio_name",
                 "reference_images_json", "reference_videos_json", "no_audio",
+                "runtime_json",
             }
             if "frames" not in table_sql or "spectrum" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
@@ -239,11 +274,48 @@ def row_dict(row):
         return None
     item = dict(row)
     raw_metrics = json.loads(item.pop("metrics_json") or "{}")
+    raw_runtime = json.loads(item.pop("runtime_json") or "{}")
     item["metrics"] = {key: raw_metrics[key] for key in ("generation_seconds", "peak_gpu", "ffprobe") if key in raw_metrics}
+    item["runtime"] = raw_runtime or None
+    source_assets = []
+
+    def add_source(field: str, name: str | None, kind: str):
+        if name:
+            source_assets.append({
+                "field": field,
+                "kind": kind,
+                "name": name,
+                "url": f"/api/jobs/{item['id']}/input/{field}",
+            })
+
+    mode = item.get("mode")
+    if mode == "reference":
+        try:
+            reference_images = json.loads(item.get("reference_images_json") or "[]")
+        except json.JSONDecodeError:
+            reference_images = []
+        try:
+            reference_videos = json.loads(item.get("reference_videos_json") or "[]")
+        except json.JSONDecodeError:
+            reference_videos = []
+        for index, name in enumerate(reference_images):
+            add_source(f"reference_image_{index}", name, "reference image")
+        for index, name in enumerate(reference_videos):
+            add_source(f"reference_video_{index}", name, "reference video")
+        add_source("reference_audio", item.get("reference_audio_name"), "reference audio")
+        if not source_assets and item.get("input_name"):
+            add_source("image", item.get("input_name"), "image")
+    else:
+        add_source("image", item.get("input_name"), "image")
+        add_source("audio", item.get("source_audio_name") or item.get("reference_audio_name"), "audio")
+        add_source("first_frame", item.get("first_frame_name"), "opening frame")
+        add_source("last_frame", item.get("last_frame_name"), "closing frame")
+    item["source_assets"] = source_assets
+    item["no_audio"] = bool(item.get("no_audio"))
     output_path = item.pop("output_path", None)
     for private_key in (
         "seed", "input_path", "input_name", "reference_images_json", "reference_videos_json",
-        "reference_audio_path", "reference_audio_name", "no_audio",
+        "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "prompt_id",
     ):
@@ -291,6 +363,8 @@ def update_job(job_id: str, **values):
     values["updated_at"] = now_iso()
     if "metrics" in values:
         values["metrics_json"] = json.dumps(values.pop("metrics"), ensure_ascii=False)
+    if "runtime" in values:
+        values["runtime_json"] = json.dumps(values.pop("runtime"), ensure_ascii=False)
     assignments = ",".join(f"{key}=?" for key in values)
     with connect() as db:
         db.execute(f"UPDATE jobs SET {assignments} WHERE id=?", (*values.values(), job_id))

@@ -155,9 +155,9 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     }
   }
 
-  useEffect(() => { void loadCatalog() }, [])
+  useEffect(() => { void loadCatalog(true) }, [])
   useEffect(() => {
-    if (view === 'settings') void loadCatalog()
+    if (view === 'settings') void loadCatalog(true)
   }, [view])
   useEffect(() => {
     if (!selectedId) return

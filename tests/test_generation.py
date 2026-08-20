@@ -48,8 +48,7 @@ class GenerationSettingsTests(unittest.TestCase):
             normalize_generation_settings("text", "turbo", 9, turbo_profile="v4")
         with self.assertRaises(ValueError):
             normalize_generation_settings("text", turbo_profile="unknown")
-        with self.assertRaises(ValueError):
-            normalize_generation_settings("lip_sync", "turbo", 4)
+        self.assertEqual(normalize_generation_settings("lip_sync", "turbo", 4).engine, "turbo")
         with self.assertRaises(ValueError):
             normalize_generation_settings("lip_sync", "standard", 20, encoder="clipproj")
 

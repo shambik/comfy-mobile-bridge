@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import json
+import mimetypes
 import os
 import secrets
 import shutil
@@ -1278,14 +1279,14 @@ def probe_audio_duration(path: Path) -> float:
 
 
 def trim_audio(path: Path, start: float, duration: float) -> tuple[str, str]:
-    """Create a normalized WAV segment for Native AudioLock."""
+    """Create a normalized WAV segment, padding trailing silence when needed."""
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise HTTPException(503, "ffmpeg is required to trim uploaded audio")
     target = INPUT / f"audio_{uuid.uuid4().hex}_trimmed.wav"
     result = subprocess.run(
         [ffmpeg, "-y", "-v", "error", "-ss", f"{start:.6f}", "-i", str(path),
-         "-t", f"{duration:.6f}", "-ar", "48000", "-ac", "2",
+         "-af", "apad", "-t", f"{duration:.6f}", "-ar", "48000", "-ac", "2",
          "-c:a", "pcm_s16le", str(target)],
         capture_output=True, text=True, timeout=120,
     )
@@ -1295,7 +1296,7 @@ def trim_audio(path: Path, start: float, duration: float) -> tuple[str, str]:
     trimmed_duration = probe_audio_duration(target)
     if trimmed_duration < max(0.1, duration - 0.08):
         target.unlink(missing_ok=True)
-        raise HTTPException(400, "The trimmed audio is shorter than the requested generation")
+        raise HTTPException(400, "Could not prepare the requested audio duration")
     return str(target), target.name
 
 
@@ -1425,11 +1426,12 @@ async def create_jobs(
         raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
     if mode == "reference" and duration > 5 and not REFERENCE_10S_MARKER.exists():
         raise HTTPException(409, "Reference mode above 5 seconds is not ready")
-    prompts = parse_prompts(prompt or "Use the supplied audio with natural, precise lip-sync.", batch)
+    prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
     input_path = input_name = None
     reference_audio_path = reference_audio_name = None
+    source_audio_path = source_audio_name = None
     first_frame_path = first_frame_name = None
     last_frame_path = last_frame_name = None
     saved_paths: list[str] = []
@@ -1457,16 +1459,13 @@ async def create_jobs(
             if reference_audio_path:
                 saved_paths.append(reference_audio_path)
         if audio:
-            reference_audio_path, reference_audio_name = await save_audio(audio, allow_longer=True)
-            if reference_audio_path:
-                saved_paths.append(reference_audio_path)
-                source_duration = probe_audio_duration(Path(reference_audio_path))
-                if audio_start + duration > source_duration + 0.08:
-                    raise HTTPException(400, "The uploaded audio is shorter than the requested generation")
-                if audio_start > 0.01 or source_duration > duration + 0.08:
-                    trimmed_path, trimmed_name = trim_audio(Path(reference_audio_path), audio_start, duration)
-                    Path(reference_audio_path).unlink(missing_ok=True)
-                    saved_paths.remove(reference_audio_path)
+            source_audio_path, source_audio_name = await save_audio(audio, allow_longer=True)
+            if source_audio_path:
+                saved_paths.append(source_audio_path)
+                reference_audio_path, reference_audio_name = source_audio_path, source_audio_name
+                source_duration = probe_audio_duration(Path(source_audio_path))
+                if audio_start > 0.01 or source_duration > duration + 0.08 or source_duration < audio_start + duration - 0.08:
+                    trimmed_path, trimmed_name = trim_audio(Path(source_audio_path), audio_start, duration)
                     saved_paths.append(trimmed_path)
                     reference_audio_path, reference_audio_name = trimmed_path, trimmed_name
         if first_frame:
@@ -1513,17 +1512,19 @@ async def create_jobs(
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,audio_start,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
+                   source_audio_path,source_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, generation.engine, generation.turbo_profile, generation.encoder,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (job_id, text, mode, duration, audio_start, generation.engine, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    str(secrets.randbits(64)), position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
                    reference_audio_path, reference_audio_name,
+                   source_audio_path, source_audio_name,
                    first_frame_path, first_frame_name,
                    last_frame_path, last_frame_name, now, now))
             created.append(job_id)
@@ -1669,7 +1670,7 @@ async def delete_job(request: Request, job_id: str):
         raise HTTPException(409, "This video is currently used by an active join")
     input_paths = {
         job.get(key) for key in (
-            "input_path", "reference_audio_path", "first_frame_path", "last_frame_path",
+            "input_path", "reference_audio_path", "source_audio_path", "first_frame_path", "last_frame_path",
         ) if job.get(key)
     }
     remove_assignment("job", job_id)
@@ -1678,8 +1679,8 @@ async def delete_job(request: Request, job_id: str):
         for path in input_paths:
             remaining = db.execute("""
                 SELECT COUNT(*) FROM jobs
-                WHERE input_path=? OR reference_audio_path=? OR first_frame_path=? OR last_frame_path=?
-            """, (path, path, path, path)).fetchone()[0]
+                WHERE input_path=? OR reference_audio_path=? OR source_audio_path=? OR first_frame_path=? OR last_frame_path=?
+            """, (path, path, path, path, path)).fetchone()[0]
             if remaining == 0:
                 Path(path).unlink(missing_ok=True)
     if job.get("output_path"):
@@ -1731,6 +1732,50 @@ async def video(job_id: str):
     if not path.exists():
         raise HTTPException(404, "Video file is missing")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+def _job_input_asset_path(job: dict, asset_key: str) -> Path | None:
+    """Resolve a previously uploaded job input without accepting a filesystem path from the client."""
+    direct_paths = {
+        "image": job.get("input_path"),
+        "audio": job.get("source_audio_path") or job.get("reference_audio_path"),
+        "reference_audio": job.get("reference_audio_path"),
+        "first_frame": job.get("first_frame_path"),
+        "last_frame": job.get("last_frame_path"),
+    }
+    path_value = direct_paths.get(asset_key)
+    if asset_key.startswith("reference_image_"):
+        try:
+            index = int(asset_key.removeprefix("reference_image_"))
+            names = json.loads(job.get("reference_images_json") or "[]")
+            name = names[index]
+            path_value = str(INPUT / Path(name).name)
+        except (ValueError, IndexError, TypeError, json.JSONDecodeError):
+            path_value = None
+    elif asset_key.startswith("reference_video_"):
+        try:
+            index = int(asset_key.removeprefix("reference_video_"))
+            names = json.loads(job.get("reference_videos_json") or "[]")
+            name = names[index]
+            path_value = str(INPUT / Path(name).name)
+        except (ValueError, IndexError, TypeError, json.JSONDecodeError):
+            path_value = None
+    if not path_value:
+        return None
+    path = Path(path_value).resolve()
+    return path if path.is_file() else None
+
+
+@app.get("/api/jobs/{job_id}/input/{asset_key}")
+async def job_input(job_id: str, asset_key: str):
+    job = get_job(job_id, public=False)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    path = _job_input_asset_path(job, asset_key)
+    if not path:
+        raise HTTPException(404, "Input asset not found")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.get("/api/artifacts/final-video")
