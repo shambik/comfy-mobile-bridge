@@ -68,6 +68,20 @@ class ProductionStudioTests(unittest.TestCase):
             files={"song": ("song.wav", b"RIFF-test", "audio/wav")},
         )
 
+    def test_create_production_accepts_browser_recorded_webm(self):
+        response = self.client.post(
+            "/api/productions",
+            headers={"X-CSRF-Token": self.token},
+            data={
+                "title": "Recorded production", "lyrics": "Line one\nLine two",
+                "participation_mode": "interactive", "continuity_mode": "hybrid",
+                "skills_json": "[]", "approval_gates_json": "[]",
+            },
+            files={"song": ("recording.webm", b"webm-test", "audio/webm;codecs=opus")},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["song_name"], "recording.webm")
+
     def test_create_and_start_production_preserves_user_configuration(self):
         response = self.create_production()
         self.assertEqual(response.status_code, 200, response.text)

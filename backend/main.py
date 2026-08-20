@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import json
+import math
 import mimetypes
 import os
 import secrets
@@ -947,11 +948,13 @@ async def create_production_route(
     allowed_audio = {
         "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
         "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
-        "audio/flac": ".flac", "audio/ogg": ".ogg",
+        "audio/flac": ".flac", "audio/ogg": ".ogg", "audio/webm": ".webm",
+        "video/webm": ".webm",
     }
-    suffix = allowed_audio.get(song.content_type or "")
+    content_type = (song.content_type or "").split(";", 1)[0].strip().lower()
+    suffix = allowed_audio.get(content_type)
     if not suffix:
-        raise HTTPException(400, "Song must be WAV, MP3, M4A, AAC, FLAC or OGG")
+        raise HTTPException(400, "Song must be WAV, MP3, M4A, AAC, FLAC, OGG or WebM")
     data = await song.read(250 * 1024 * 1024 + 1)
     if len(data) > 250 * 1024 * 1024:
         raise HTTPException(400, "Song is larger than 250 MB")
@@ -1241,39 +1244,72 @@ async def save_audio(upload: UploadFile | None, *, allow_longer: bool = False) -
     if not ffprobe:
         target.unlink(missing_ok=True)
         raise HTTPException(503, "ffprobe is required to validate reference audio")
-    try:
-        result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type",
-             "-of", "json", str(target)],
-            capture_output=True, text=True, timeout=30,
-        )
-        payload = json.loads(result.stdout) if result.returncode == 0 else {}
-        duration = float(payload.get("format", {}).get("duration") or 0)
-        has_audio = any(stream.get("codec_type") == "audio" for stream in payload.get("streams", []))
-        max_duration = 3600 if allow_longer else 60
-        if not has_audio or not 0.1 <= duration <= max_duration:
-            raise ValueError
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+    duration, has_audio = probe_audio_file(target)
+    max_duration = 3600 if allow_longer else 60
+    if not has_audio or not 0.1 <= duration <= max_duration:
         target.unlink(missing_ok=True)
         limit = "3600" if allow_longer else "60"
         raise HTTPException(400, f"The uploaded file is not valid audio between 0.1 and {limit} seconds")
     return str(target), name
 
 
-def probe_audio_duration(path: Path) -> float:
+def packet_audio_duration(payload: dict) -> float:
+    """Estimate duration when a browser WebM has no container duration metadata."""
+    ranges: list[tuple[float, float]] = []
+    for packet in payload.get("packets", []):
+        try:
+            start = float(packet.get("pts_time"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            packet_duration = float(packet.get("duration_time") or 0)
+        except (TypeError, ValueError):
+            packet_duration = 0.0
+        if not math.isfinite(start) or not math.isfinite(packet_duration):
+            continue
+        ranges.append((start, start + max(0.0, packet_duration)))
+    if not ranges:
+        return 0.0
+    return max(0.0, max(end for _, end in ranges) - min(start for start, _ in ranges))
+
+
+def probe_audio_file(path: Path) -> tuple[float, bool]:
+    """Return duration and audio presence, including durationless browser WebM."""
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
-        raise HTTPException(503, "ffprobe is required to validate uploaded audio")
+        raise HTTPException(503, "ffprobe is required to validate reference audio")
     try:
         result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type,duration",
+             "-of", "json", str(path)],
             capture_output=True, text=True, timeout=30,
         )
-        duration = float(result.stdout.strip()) if result.returncode == 0 else 0.0
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+        payload = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return 0.0, False
+    streams = payload.get("streams", [])
+    has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+    try:
+        duration = float(payload.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
         duration = 0.0
-    if duration <= 0:
+    if duration <= 0 and has_audio:
+        try:
+            packets = subprocess.run(
+                [ffprobe, "-v", "error", "-select_streams", "a:0",
+                 "-show_entries", "packet=pts_time,duration_time", "-of", "json", str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            packet_payload = json.loads(packets.stdout) if packets.returncode == 0 else {}
+            duration = packet_audio_duration(packet_payload)
+        except (OSError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            duration = 0.0
+    return duration, has_audio
+
+
+def probe_audio_duration(path: Path) -> float:
+    duration, has_audio = probe_audio_file(path)
+    if not has_audio or duration <= 0:
         raise HTTPException(400, "Could not read the uploaded audio duration")
     return duration
 
