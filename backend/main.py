@@ -212,6 +212,11 @@ class ShotEditBody(BaseModel):
     prompt: str | None = None
     mode: str | None = None
     continuity: str | None = None
+    audio_mode: str | None = None
+    audio_source: str | None = None
+    audio_start: float | None = None
+    audio_duration: float | None = None
+    audio_reference_id: str | None = None
     duration: float | None = None
     megapixels: float | None = None
     aspect_ratio: str | None = None
@@ -356,7 +361,7 @@ async def comfy_logs(request: Request):
 async def start_comfy(request: Request):
     require_csrf(request)
     try:
-        await worker.comfy.ensure_started()
+        await worker.start_comfy()
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
     return await comfy_status()
@@ -365,7 +370,7 @@ async def start_comfy(request: Request):
 @app.post("/api/comfy/stop")
 async def stop_comfy(request: Request):
     require_csrf(request)
-    await worker.comfy.shutdown()
+    await worker.stop_comfy()
     return await comfy_status()
 
 
@@ -644,6 +649,12 @@ async def upload_production_reference(
     require_csrf(request)
     if not get_production(production_id, private=True):
         raise HTTPException(404, "Production not found")
+    return await _store_production_reference_upload(production_id, media, notes)
+
+
+async def _store_production_reference_upload(
+    production_id: str, media: UploadFile, notes: str = "",
+):
     content_type = media.content_type or ""
     if content_type.startswith("image/"):
         kind = "image"
@@ -745,6 +756,10 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
         raise HTTPException(400, "Shot mode must be text, opening, or reference")
     if merged["continuity"] not in {"hard_cut", "sequential"}:
         raise HTTPException(400, "Shot continuity must be hard_cut or sequential")
+    if merged.get("audio_mode", "silent") not in {"silent", "lip_sync"}:
+        raise HTTPException(400, "Shot audio mode must be silent or lip_sync")
+    if merged.get("audio_source", "song") not in {"song", "reference"}:
+        raise HTTPException(400, "Shot audio source must be song or reference")
     if not str(merged["title"]).strip() or not str(merged["prompt"]).strip():
         raise HTTPException(400, "Shot title and prompt are required")
     reference_ids = [str(value) for value in merged.get("reference_ids", [])]
@@ -753,11 +768,40 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
         raise HTTPException(400, "One or more references do not belong to this production")
     if merged["mode"] == "reference" and not reference_ids:
         raise HTTPException(400, "R2V shots require at least one reference")
+    if merged.get("audio_mode", "silent") == "lip_sync" and merged["mode"] == "reference":
+        raise HTTPException(400, "Production R2V + lip-sync is reserved for a future workflow; use T2V or I2V")
+    if merged.get("audio_mode", "silent") == "lip_sync":
+        try:
+            audio_start = float(merged.get("audio_start") or 0)
+            audio_duration = float(merged.get("audio_duration") or merged["duration"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Lip-sync audio timing must be numeric") from exc
+        if not math.isfinite(audio_start) or audio_start < 0:
+            raise HTTPException(400, "Lip-sync audio start must be non-negative")
+        if not math.isfinite(audio_duration) or not 0.5 <= audio_duration <= 60:
+            raise HTTPException(400, "Lip-sync audio duration must be between 0.5 and 60 seconds")
+        if merged.get("audio_source", "song") == "reference":
+            selected_audio = None
+            requested_audio_id = str(merged.get("audio_reference_id") or "")
+            if requested_audio_id:
+                selected_audio = get_reference(production_id, requested_audio_id, private=True)
+                if not selected_audio or selected_audio["kind"] != "audio":
+                    raise HTTPException(400, "The selected audio reference does not belong to this production")
+                if selected_audio["id"] not in reference_ids:
+                    reference_ids.append(selected_audio["id"])
+                    references.append(selected_audio)
+            else:
+                selected_audio = next((item for item in references if item and item["kind"] == "audio"), None)
+            if not selected_audio:
+                raise HTTPException(400, "Choose an assigned audio reference for this lip-sync shot")
+    elif merged.get("audio_source", "song") != "song":
+        raise HTTPException(400, "A reference audio source requires lip-sync mode")
     if merged["mode"] == "opening" and merged["continuity"] != "sequential" and not any(item["kind"] == "image" for item in references):
         raise HTTPException(400, "Independent I2V shots require an image reference")
     try:
         normalized = normalize_generation_settings(
-            merged["mode"], merged["engine"], int(merged["steps"]),
+            "lip_sync" if merged.get("audio_mode", "silent") == "lip_sync" else merged["mode"],
+            merged["engine"], int(merged["steps"]),
             turbo_profile=merged["turbo_profile"], megapixels=float(merged["megapixels"]),
             aspect_ratio=merged["aspect_ratio"],
         )
@@ -765,7 +809,13 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
         raise HTTPException(400, str(exc)) from exc
     values.update({"title": str(merged["title"]).strip(), "prompt": str(merged["prompt"]).strip(),
                    "steps": normalized.steps, "megapixels": normalized.megapixels,
-                   "aspect_ratio": normalized.aspect_ratio, "reference_ids": reference_ids})
+                   "aspect_ratio": normalized.aspect_ratio, "reference_ids": reference_ids,
+                   "audio_mode": merged.get("audio_mode", "silent"),
+                   "audio_source": merged.get("audio_source", "song"),
+                   "audio_start": float(merged.get("audio_start") or 0),
+                   "audio_duration": float(merged.get("audio_duration") or merged["duration"])
+                   if merged.get("audio_mode", "silent") == "lip_sync" else None,
+                   "audio_reference_id": merged.get("audio_reference_id") if merged.get("audio_mode", "silent") == "lip_sync" and merged.get("audio_source", "song") == "reference" else None})
     if shot.get("accepted_attempt"):
         values.update({"status": "planned", "accepted_attempt": None})
     update_shot(shot_id, **values)
@@ -868,6 +918,9 @@ async def duplicate_production(production_id: str, request: Request):
             replace_shot_plan(duplicate_id, [{
                 "title": shot["title"], "prompt": shot["prompt"], "mode": shot["mode"],
                 "continuity": shot["continuity"], "duration": shot["duration"],
+                "audio_mode": shot.get("audio_mode", "silent"), "audio_source": shot.get("audio_source", "song"),
+                "audio_start": shot.get("audio_start", 0), "audio_duration": shot.get("audio_duration"),
+                "audio_reference_id": reference_map.get(shot.get("audio_reference_id")) if shot.get("audio_reference_id") else None,
                 "megapixels": shot["megapixels"], "aspect_ratio": shot["aspect_ratio"],
                 "steps": shot["steps"], "engine": shot["engine"],
                 "turbo_profile": shot["turbo_profile"],
@@ -935,6 +988,7 @@ async def create_production_route(
     agy_effort: str = Form(""),
     skills_json: str = Form("[]"),
     approval_gates_json: str = Form("[]"),
+    reference_files: list[UploadFile] = File(default=[]),
 ):
     require_csrf(request)
     if not title.strip() or len(title) > 160:
@@ -1007,7 +1061,7 @@ async def create_production_route(
     song_path = intake / ("song" + suffix)
     song_path.write_bytes(data)
     try:
-        return create_production({
+        created = create_production({
             "id": production_id, "title": title.strip(), "lyrics": lyrics.strip(),
             "song_path": str(song_path), "song_name": song.filename or song_path.name,
             "concept": concept.strip(), "participation_mode": participation_mode,
@@ -1021,6 +1075,9 @@ async def create_production_route(
             "skills": [str(value) for value in selected_skills],
             "approval_gates": [str(value) for value in approval_gates],
         })
+        for reference_file in reference_files:
+            await _store_production_reference_upload(production_id, reference_file)
+        return get_production(production_id, include_messages=True) or created
     except Exception:
         shutil.rmtree(PRODUCTIONS / production_id, ignore_errors=True)
         raise
@@ -1371,6 +1428,21 @@ async def save_video(upload: UploadFile | None) -> tuple[str | None, str | None]
     return str(target), name
 
 
+MAX_SEED = (1 << 64) - 1
+
+
+def normalize_seed(raw: str | None) -> str | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if not value.isascii() or not value.isdecimal():
+        raise HTTPException(400, "Seed must be a non-negative integer")
+    parsed = int(value)
+    if parsed > MAX_SEED:
+        raise HTTPException(400, "Seed must be between 0 and 18446744073709551615")
+    return str(parsed)
+
+
 def parse_prompts(raw: str, batch: bool) -> list[str]:
     raw = raw.strip()
     if not raw:
@@ -1391,6 +1463,7 @@ async def create_jobs(
     resolution: str | None = Form(None),
     megapixels: float | None = Form(None), aspect_ratio: str | None = Form(None),
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
+    seed: str = Form(""),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
     reference_images: list[UploadFile] = File(default=[]),
@@ -1405,6 +1478,7 @@ async def create_jobs(
     require_csrf(request)
     if mode not in ("text", "opening", "closing", "frames", "reference", "lip_sync") or not 0.5 <= duration <= 60:
         raise HTTPException(400, "Duration must be between 0.5 and 60 seconds")
+    selected_seed = normalize_seed(seed)
     selected_project = project_id.strip() or None
     selected_folder = folder_id.strip() or None
     try:
@@ -1536,6 +1610,7 @@ async def create_jobs(
         for index, text in enumerate(prompts):
             job_id = uuid.uuid4().hex
             now = now_iso()
+            job_seed = selected_seed or str(secrets.randbits(64))
             if connected:
                 db.execute(
                     """INSERT INTO jobs
@@ -1544,7 +1619,7 @@ async def create_jobs(
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
                     (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
                      generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
-                     str(secrets.randbits(64)), sequence_id, index + 1, len(prompts), position, now, now),
+                     job_seed, sequence_id, index + 1, len(prompts), position, now, now),
                 )
             else:
                 db.execute("""INSERT INTO jobs
@@ -1557,7 +1632,7 @@ async def create_jobs(
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (job_id, text, mode, duration, audio_start, generation.engine, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
-                   str(secrets.randbits(64)), position + index,
+                   job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
                    reference_audio_path, reference_audio_name,
                    source_audio_path, source_audio_name,

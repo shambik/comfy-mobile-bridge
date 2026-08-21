@@ -18,6 +18,10 @@ from .config import (COMFY_CODE, COMFY_HOST, COMFY_PORT, COMFY_PYTHON,
                      COMFY_URL, INPUT, LOGS, MODELS, OUTPUT, TEMP, USER)
 
 
+class ComfyCancellationError(RuntimeError):
+    """Raised when ComfyUI still owns a prompt after cancellation was requested."""
+
+
 class ComfyClient:
     def __init__(self):
         self.process: subprocess.Popen | None = None
@@ -362,11 +366,57 @@ class ComfyClient:
         async with httpx.AsyncClient(timeout=20) as client:
             return (await client.get(COMFY_URL + "/queue")).raise_for_status().json()
 
+    @staticmethod
+    def _queue_contains_prompt(payload: dict, prompt_id: str) -> bool:
+        """Handle ComfyUI's tuple-shaped queue entries and newer dict entries."""
+        for queue_name in ("queue_running", "queue_pending"):
+            for item in payload.get(queue_name) or []:
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    if str(item[1]) == prompt_id:
+                        return True
+                elif isinstance(item, dict) and str(item.get("prompt_id")) == prompt_id:
+                    return True
+        return False
+
+    async def wait_for_prompt_clear(self, prompt_id: str, timeout: float = 20.0) -> bool:
+        """Wait until a canceled prompt is absent from both ComfyUI queues.
+
+        Interrupting a prompt is asynchronous.  In particular, a heavy model
+        forward can remain in ``queue_running`` for several seconds after the
+        interrupt request.  The bridge must not dequeue another job during
+        that interval.  If the server has already gone away, the prompt
+        cannot continue using the GPU and is therefore considered cleared.
+        """
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                payload = await self.queue()
+                last_error = None
+                if not self._queue_contains_prompt(payload, prompt_id):
+                    return True
+            except Exception as exc:
+                last_error = exc
+                # A manually stopped or crashed ComfyUI cannot keep executing
+                # the prompt.  Let the worker's restart gate recover it.
+                if not await self.ready():
+                    return True
+            await asyncio.sleep(0.5)
+
+        detail = f" ({last_error})" if last_error else ""
+        raise ComfyCancellationError(
+            f"ComfyUI did not clear canceled prompt {prompt_id} within {int(timeout)} seconds{detail}"
+        )
+
     async def cancel(self, prompt_id: str | None):
         async with httpx.AsyncClient(timeout=20) as client:
-            await client.post(COMFY_URL + "/interrupt")
+            (await client.post(COMFY_URL + "/interrupt")).raise_for_status()
             if prompt_id:
-                await client.post(COMFY_URL + "/queue", json={"delete": [prompt_id]})
+                (await client.post(
+                    COMFY_URL + "/queue", json={"delete": [prompt_id]}
+                )).raise_for_status()
+        if prompt_id:
+            await self.wait_for_prompt_clear(prompt_id)
 
     async def free_models(self):
         try:

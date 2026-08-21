@@ -314,7 +314,7 @@ def row_dict(row):
     item["no_audio"] = bool(item.get("no_audio"))
     output_path = item.pop("output_path", None)
     for private_key in (
-        "seed", "input_path", "input_name", "reference_images_json", "reference_videos_json",
+        "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "prompt_id",
