@@ -29,7 +29,7 @@ type RuntimeMetadata = {
 type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
-  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; position?: number;
+  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
@@ -180,6 +180,8 @@ function App() {
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<Mode>('text')
   const [duration, setDuration] = useState(5)
+  const [seedEnabled, setSeedEnabled] = useState(false)
+  const [seedInput, setSeedInput] = useState('')
   const [batch, setBatch] = useState(false)
   const [connected, setConnected] = useState(false)
   const [preferences, setPreferences] = useState<Preferences>(readPreferences)
@@ -662,6 +664,8 @@ function App() {
       setBatch(false)
       setConnected(false)
       setNoAudio(Boolean(job.no_audio))
+      setSeedEnabled(Boolean(job.seed))
+      setSeedInput(job.seed || '')
       setAudioTrimStart(Math.max(0, Number(job.audio_start) || 0))
       const assignment = assignmentFor('job', job.id)
       setDestinationProject(assignment?.project_id || '')
@@ -700,6 +704,15 @@ function App() {
     } finally {
       setRerunLoading(null)
     }
+  }
+
+  const useJobSeed = (job: Job) => {
+    if (!job.seed) return
+    setPage('studio')
+    setSeedEnabled(true)
+    setSeedInput(job.seed)
+    setError('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const controlComfy = async (action: 'start' | 'stop') => {
@@ -820,6 +833,7 @@ function App() {
     if (mode === 'lip_sync' && !audioLockReady) return setError('Native AudioLock עדיין לא נטען ב־ComfyUI')
     if (mode === 'lip_sync' && !lipSyncAudio) return setError('צריך לצרף אודיו לדיבוב')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
+    if (seedEnabled && !seedInput.trim()) return setError('יש להזין מספר Seed או לבטל את הסימון')
     if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
     if (effectiveEncoder === 'clipproj' && !clipprojReady) return setError('ClipProj עדיין לא מוכן להפעלה')
@@ -829,7 +843,7 @@ function App() {
     const form = new FormData()
     const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
     form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio))
+    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
     if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
     if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
     if (mode === 'frames') {
@@ -909,7 +923,7 @@ function App() {
     const { job } = asset
     const reference = `job:${job.id}`
     const order = selectedResults.indexOf(reference) + 1
-    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
   }
 
   const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode) => {
@@ -1088,6 +1102,10 @@ function App() {
             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
             <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
+            <div className="seed-control">
+              <label className="seed-checkbox"><input type="checkbox" checked={seedEnabled} onChange={event => setSeedEnabled(event.target.checked)} /><span>הזנת Seed ידנית</span><small>כבוי = אקראי</small></label>
+              {seedEnabled && <input className="seed-input" dir="ltr" type="text" inputMode="numeric" pattern="[0-9]*" value={seedInput} placeholder="למשל 123456789" onChange={event => setSeedInput(event.target.value.replace(/[^0-9]/g, '').slice(0, 20))} />}
+            </div>
           </div>
         </div>
 
@@ -1166,7 +1184,7 @@ function App() {
   </main>
 }
 
-function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, rerunLoading }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; rerunLoading?: boolean }) {
+function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
@@ -1211,7 +1229,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
       {assignment && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment.project_name}{assignment.folder_name ? ` / ${assignment.folder_name}` : ''}</span><b>{assignment.filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}</div>
+      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -1238,6 +1256,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
+        {onUseSeed && job.seed && <button className="seed-button" onClick={onUseSeed}><Zap size={15} /> השתמש ב־Seed</button>}
         {onRerun && <button className="rerun-button" onClick={onRerun} disabled={rerunLoading}>{rerunLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />} {rerunLoading ? 'טוען…' : 'הרצה מחדש'}</button>}
         {onCancel && <button className="danger cancel-action" onClick={onCancel}>ביטול</button>}
         {onDelete && <button className="trash" onClick={onDelete} aria-label="מחיקה"><Trash2 size={17} /></button>}

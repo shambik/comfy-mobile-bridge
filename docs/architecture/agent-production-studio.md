@@ -106,9 +106,33 @@ provider can be selected explicitly. Manual stills pass the same AGY inspection
 and Codex co-producer review before registration. Upload remains available when
 neither provider is usable.
 
+Source references can also be attached during intake, before either agent is
+started. They are stored in the production's reference set and included in the
+read-only Codex/AGY context with their local paths and notes. The council must
+preserve supplied references, create only missing character/location/prop/scene
+references, and select the relevant image reference for a shot. Production
+generation currently sends those selected images through the existing I2V
+opening-frame path. User video references remain source material for agent
+analysis and scene/reference development; production does not route them
+through R2V yet.
+
+Each shot has independent controls for visual mode, continuity, and audio:
+
+```text
+visual:      T2V or I2V       continuity: hard cut or previous last frame
+audio:       silent or lip-sync   source: song segment or assigned audio ref
+```
+
+This permits, for example, a hard-cut I2V lip-sync shot, a silent sequential
+I2V shot, or an independent silent T2V shot in the same production. R2V remains
+in the regular bridge for future testing but is deliberately not selected by
+the production agent planner or used for production lip-sync.
+
 The normalized prompt package persists each shot and numbered attempt before
-any side effect. Production jobs are ordinary `jobs` rows with `no_audio=1`;
-the existing `QueueWorker` remains the only ComfyUI caller. Megapixels and
+any side effect. Silent production jobs are ordinary `jobs` rows with
+`no_audio=1`; lip-sync shots use the Native AudioLock workflow with
+`no_audio=0` and a trimmed WAV segment beginning at zero. The existing
+`QueueWorker` remains the only ComfyUI caller. Megapixels and
 aspect ratio are forwarded to `ResolutionSelector`, and duration is forwarded
 to the workflow duration expression. The production layer does not calculate
 latent dimensions or frame counts itself.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,34 @@ def _local_host(value: Any, name: str) -> str:
     if host != "127.0.0.1":
         raise RuntimeError(f"{name} must be 127.0.0.1 (or app.host may be 0.0.0.0)")
     return host
+
+
+def _local_network_hosts() -> set[str]:
+    """Return hostnames and IPv4 addresses assigned to this computer.
+
+    The bridge can intentionally listen on all interfaces so a phone can use
+    it over the home LAN.  TrustedHostMiddleware still needs to recognize the
+    LAN address from the HTTP Host header, and that address may change when
+    DHCP renews.  Discovering the addresses at startup keeps the allow-list
+    current without weakening it to ``*``.
+    """
+    hosts = {"127.0.0.1", "localhost", "testserver"}
+    try:
+        hostname = socket.gethostname()
+        if hostname:
+            hosts.add(hostname)
+        fqdn = socket.getfqdn()
+        if fqdn:
+            hosts.add(fqdn)
+        for result in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            address = result[4][0]
+            if address:
+                hosts.add(address)
+    except OSError:
+        # Loopback and configured hostnames remain available if address
+        # discovery is temporarily unavailable during startup.
+        pass
+    return hosts
 
 
 def _port(value: Any, default: int, name: str) -> int:
@@ -136,6 +165,10 @@ TAILSCALE_ENABLED = bool(tailscale_config.get("enabled", True))
 TAILSCALE_SCOPE = str(tailscale_config.get("scope", "tailnet"))
 TAILSCALE_HOSTNAME = str(tailscale_config.get("hostname") or "").strip()
 ALLOWED_HOSTS = ["127.0.0.1", "localhost", "testserver"]
+if APP_HOST == "0.0.0.0":
+    for local_host in sorted(_local_network_hosts()):
+        if local_host not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(local_host)
 if TAILSCALE_HOSTNAME and TAILSCALE_HOSTNAME not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(TAILSCALE_HOSTNAME)
 

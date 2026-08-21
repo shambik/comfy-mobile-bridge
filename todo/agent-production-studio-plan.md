@@ -19,8 +19,11 @@ intervention, ComfyUI generation, per-shot QC, assembly, and final user approval
    shot attempt, extract dense frames, and run Codex/AGY QC.
 5. Add FFmpeg assembly, original-song attachment, final AGY/Codex review, and
    explicit user acceptance.
-6. Add authenticated Codex ImageGen reference stills, per-reference AGY/Codex
-   review, per-shot reference assignment, R2V, targeted retries, and imports.
+6. Add authenticated Codex ImageGen reference stills, optional intake source
+   references, per-reference AGY/Codex review, per-shot I2V reference assignment,
+   targeted retries, and imports. Keep production R2V deferred until its
+   separate workflow testing is complete; do not route production shots through
+   R2V in this POC.
 7. Add runtime-aware model catalogs, editable frozen configurations, lifecycle
    controls, and production export.
 8. Verify restart recovery, loop detection, pause/stop/resume behavior, mobile
@@ -35,10 +38,12 @@ approved.
 
 ## Implementation status
 
-All implementation stages are coded. Automated tests cover persistence, user
-authority, dynamic model catalogs, skill safety, reference generation control
-flow, shot editing/retry, R2V job construction, lifecycle duplication,
-media sampling/muxing, and backward-compatible API behavior.
+The production POC is coded through the current shot execution contract.
+Automated tests cover persistence, user authority, dynamic model catalogs,
+skill safety, optional intake references, reference generation control flow,
+per-shot visual/continuity/audio combinations, shot editing/retry, existing
+R2V job compatibility, lifecycle duplication, media sampling/muxing, and
+backward-compatible API behavior.
 
 Runtime acceptance remains intentionally outstanding for authenticated
 Codex/AGY calls, actual ImageGen quality, full ComfyUI GPU generation, and

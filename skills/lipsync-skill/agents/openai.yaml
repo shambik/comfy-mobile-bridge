@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lip-Sync Music Video"
+  short_description: "Plan Turbo music videos with lip-sync, non-lip-sync, or hybrid shots"
+  default_prompt: "Use the music-video planning workflow; analyze the song, choose lip-sync mode per project or shot, and get approval before generating."

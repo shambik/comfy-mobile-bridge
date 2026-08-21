@@ -82,6 +82,28 @@ class ProductionStudioTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["song_name"], "recording.webm")
 
+    def test_create_production_accepts_optional_source_references_before_agent_start(self):
+        image = io.BytesIO()
+        Image.new("RGB", (32, 32), "green").save(image, "PNG")
+        response = self.client.post(
+            "/api/productions",
+            headers={"X-CSRF-Token": self.token},
+            data={
+                "title": "Reference-led production", "lyrics": "Line one",
+                "participation_mode": "autonomous", "continuity_mode": "hybrid",
+                "skills_json": "[]", "approval_gates_json": "[]",
+            },
+            files=[
+                ("song", ("song.wav", b"RIFF-test", "audio/wav")),
+                ("reference_files", ("hero.png", image.getvalue(), "image/png")),
+            ],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        references = response.json()["references"]
+        self.assertEqual(len(references), 1)
+        self.assertEqual(references[0]["name"], "hero.png")
+        self.assertEqual(references[0]["kind"], "image")
+
     def test_create_and_start_production_preserves_user_configuration(self):
         response = self.create_production()
         self.assertEqual(response.status_code, 200, response.text)
@@ -174,6 +196,27 @@ class ProductionStudioTests(unittest.TestCase):
         self.assertEqual(shots[0]["megapixels"], .7)
         self.assertEqual(shots[0]["mode"], "text")  # the first shot cannot inherit a previous frame
 
+    def test_prompt_references_become_i2v_and_audio_is_independent_from_continuity(self):
+        references = [
+            {"id": "hero", "name": "Hero.png", "kind": "image"},
+            {"id": "voice", "name": "Voice.wav", "kind": "audio"},
+        ]
+        shots = production_orchestrator._normalize_shots([{
+            "title": "Hero close-up", "prompt": "The hero turns toward camera",
+            "mode": "r2v", "reference_names": ["Hero.png"], "continuity": "hard_cut",
+            "duration": 5, "audio_mode": "lip_sync", "audio_source": "reference",
+            "audio_reference": "Voice.wav", "audio_start": 3.5, "audio_duration": 5,
+            "steps": "not-a-number",
+        }], "hybrid", references)
+        self.assertEqual(shots[0]["mode"], "opening")
+        self.assertEqual(shots[0]["continuity"], "hard_cut")
+        self.assertEqual(shots[0]["reference_ids"], ["hero"])
+        self.assertEqual(shots[0]["audio_mode"], "lip_sync")
+        self.assertEqual(shots[0]["audio_source"], "reference")
+        self.assertEqual(shots[0]["audio_reference_id"], "voice")
+        self.assertEqual(shots[0]["audio_start"], 3.5)
+        self.assertEqual(shots[0]["steps"], 4)
+
     def test_reference_upload_assignment_and_targeted_retry(self):
         production = self.create_production().json()
         image = io.BytesIO()
@@ -204,6 +247,45 @@ class ProductionStudioTests(unittest.TestCase):
         self.assertEqual(retried.status_code, 200, retried.text)
         self.assertEqual(retried.json()["stage"], "shot_generation")
         self.assertEqual(retried.json()["status"], "queued")
+
+    def test_lip_sync_shot_prepares_audio_segment_and_uses_native_audio_lock_job(self):
+        production = self.create_production().json()
+        source_audio = self.root / "voice.wav"
+        source_audio.write_bytes(b"source")
+        comfy_audio = self.root / "input" / "voice.wav"
+        comfy_audio.write_bytes(b"source")
+        audio_reference = add_reference(
+            production["id"], "audio", "Voice.wav", str(source_audio),
+            str(comfy_audio), comfy_audio.name,
+        )
+        shot = replace_shot_plan(production["id"], [{
+            "title": "Dialogue", "prompt": "The character speaks to camera", "mode": "opening",
+            "continuity": "hard_cut", "audio_mode": "lip_sync", "audio_source": "reference",
+            "audio_start": 2.5, "audio_duration": 5, "audio_reference_id": audio_reference["id"],
+            "duration": 5, "megapixels": 1.5, "aspect_ratio": "16:9", "steps": 4,
+            "engine": "turbo", "turbo_profile": "v1", "reference_ids": [audio_reference["id"]],
+        }])[0]
+
+        class Queue:
+            def notify(self): pass
+
+        def fake_prepare(_source, target, _start, _duration):
+            target.write_bytes(b"prepared wav")
+            return target
+
+        original = production_orchestrator.queue_worker
+        production_orchestrator.bind_queue(Queue())
+        try:
+            with patch.object(production_module, "prepare_audio_segment", side_effect=fake_prepare):
+                job_id = production_orchestrator._queue_job({**shot, "production_id": production["id"]}, None)
+        finally:
+            production_orchestrator.queue_worker = original
+        from backend.db import get_job
+        job = get_job(job_id, public=False)
+        self.assertEqual(job["mode"], "lip_sync")
+        self.assertEqual(job["no_audio"], 0)
+        self.assertEqual(job["audio_start"], 0)
+        self.assertEqual(job["reference_audio_name"], f"production_{production['id']}_shot_001_audio.wav")
 
     def test_production_reference_limits_match_the_ui_contract(self):
         production = self.create_production().json()
@@ -270,8 +352,14 @@ class ProductionStudioTests(unittest.TestCase):
 
     def test_reference_stills_are_generated_reviewed_and_registered_without_comfy(self):
         production = get_production(self.create_production().json()["id"], private=True)
+        source_path = self.root / "productions" / production["id"] / "references" / "source.png"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (128, 72), "navy").save(source_path, "PNG")
+        source_comfy = self.root / "input" / "source.png"
+        Image.new("RGB", (128, 72), "navy").save(source_comfy, "PNG")
+        add_reference(production["id"], "image", "Source.png", str(source_path), str(source_comfy), source_comfy.name)
 
-        async def create_image(_production_id, _prompt, output_path, _model, _effort):
+        async def create_image(_production_id, _prompt, output_path, _model, _effort, **_kwargs):
             output_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("RGB", (128, 72), "orange").save(output_path, "PNG")
             return output_path
@@ -281,13 +369,14 @@ class ProductionStudioTests(unittest.TestCase):
                     "content": {}, "requires_user": False}, "", None, "test", "high",
         )
         package = {"references": [{"name": "Hero", "kind": "character", "image_prompt": "A grounded hero reference"}]}
-        with patch.object(process_manager, "generate_reference_image", new=AsyncMock(side_effect=create_image)), \
+        with patch.object(process_manager, "generate_reference_image", new=AsyncMock(side_effect=create_image)) as image_generator, \
              patch.object(production_orchestrator, "_agy", new=AsyncMock(return_value=approved)), \
              patch.object(production_orchestrator, "_codex", new=AsyncMock(return_value=approved)):
             generated = asyncio.run(production_orchestrator._generate_reference_stills(production, package))
         self.assertEqual(len(generated), 1)
         self.assertTrue(Path(generated[0]["path"]).is_file())
         self.assertTrue(Path(generated[0]["comfy_path"]).is_file())
+        self.assertEqual(image_generator.await_args.kwargs["source_images"], [source_path])
 
     def test_manual_reference_generation_api_uses_selected_provider(self):
         production = self.create_production().json()

@@ -4,6 +4,8 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
+
 from .comfy import ComfyClient, find_video, gpu_sample, media_probe
 from .config import (AUDIOLOCK_NODE_DIR, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, INPUT, MODELS, REF2VA_MODEL,
@@ -30,6 +32,24 @@ class QueueWorker:
         self.current_job: str | None = None
         self.current_sequence: str | None = None
         self.cancelled: set[str] = set()
+        # A prompt can survive /interrupt while a model forward is running.
+        # Keep the worker blocked until Comfy has been restarted, so a new
+        # queued job can never run behind the canceled prompt.
+        self.comfy_restart_required = False
+        self.comfy_manual_stop = False
+
+    @staticmethod
+    def _error_text(exc: BaseException) -> str:
+        """Keep failure cards useful even when an exception has no message."""
+        detail = str(exc).strip()
+        return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+    async def _read_comfy_history(self, prompt_id: str):
+        """Read history without turning a transient bridge poll failure into a job failure."""
+        try:
+            return await self.comfy.history(prompt_id), None
+        except (httpx.HTTPError, asyncio.TimeoutError, ValueError) as exc:
+            return None, exc
 
     def start(self):
         self.task = asyncio.create_task(self.loop())
@@ -46,6 +66,32 @@ class QueueWorker:
     def notify(self):
         self.wake.set()
 
+    async def _cancel_comfy_prompt(self, prompt_id: str | None):
+        try:
+            await self.comfy.cancel(prompt_id)
+        except Exception:
+            # If Comfy did not acknowledge the cancellation, kill only the
+            # configured ComfyUI process tree.  The loop will restart it
+            # before taking another queued job.
+            self.comfy_restart_required = True
+            try:
+                await self.comfy.shutdown()
+            except Exception:
+                pass
+
+    async def start_comfy(self):
+        self.comfy_manual_stop = False
+        await self.comfy.ensure_started()
+
+    async def stop_comfy(self):
+        self.comfy_manual_stop = True
+        if self.current_job:
+            self.cancelled.add(self.current_job)
+            current = get_job(self.current_job, public=False)
+            await self._cancel_comfy_prompt(current.get("prompt_id") if current else None)
+        await self.comfy.shutdown()
+        self.comfy_restart_required = False
+
     async def cancel(self, job_id: str):
         job = get_job(job_id, public=False)
         if not job:
@@ -60,7 +106,8 @@ class QueueWorker:
             return True
         if job_id == self.current_job and job["status"] in ACTIVE_STATUSES:
             self.cancelled.add(job_id)
-            await self.comfy.cancel(job.get("prompt_id"))
+            await self._cancel_comfy_prompt(job.get("prompt_id"))
+            self.wake.set()
             return True
         return False
 
@@ -95,7 +142,8 @@ class QueueWorker:
         if sequence_id == self.current_sequence and self.current_job:
             self.cancelled.add(self.current_job)
             current = get_job(self.current_job, public=False)
-            await self.comfy.cancel(current.get("prompt_id") if current else None)
+            await self._cancel_comfy_prompt(current.get("prompt_id") if current else None)
+            self.wake.set()
         return True
 
     async def reconcile(self):
@@ -202,6 +250,16 @@ class QueueWorker:
     async def loop(self):
         await self.reconcile()
         while not self.stopping:
+            if self.comfy_restart_required and not self.comfy_manual_stop:
+                try:
+                    await self.comfy.ensure_started()
+                except Exception:
+                    # Do not dequeue work while the recovery start is still
+                    # failing.  The next pass retries without losing jobs.
+                    await asyncio.sleep(2)
+                    continue
+                self.comfy_restart_required = False
+
             task = self.take_next()
             if not task:
                 self.wake.clear()
@@ -219,9 +277,10 @@ class QueueWorker:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    error = self._error_text(exc)
                     update_sequence(
                         record["id"], status="failed", phase="failed",
-                        eta_seconds=None, error=str(exc)[:8000], finished_at=now_iso(),
+                        eta_seconds=None, error=error[:8000], finished_at=now_iso(),
                     )
                 finally:
                     self.current_sequence = None
@@ -236,7 +295,7 @@ class QueueWorker:
                 raise
             except Exception as exc:
                 status = "canceled" if job["id"] in self.cancelled else "failed"
-                error = str(exc)[:8000]
+                error = self._error_text(exc)[:8000]
                 update_job(
                     job["id"], status=status, phase=status, eta_seconds=None,
                     error=error, finished_at=now_iso(),
@@ -543,10 +602,55 @@ class QueueWorker:
             update_job(job["id"], runtime=runtime)
             peak = {}
             samples = []
+            consecutive_history_failures = 0
+            total_history_failures = 0
+            history_poll_started = time.monotonic()
+            # Audio-locked jobs can spend many minutes in VAE/audio/video
+            # post-processing after the final diffusion step. The bridge must
+            # not label those jobs failed just because /history is temporarily
+            # unavailable. Keep a long safety limit for a genuinely lost job.
+            watchdog_seconds = max(3600.0, (estimated_total or 0) * 10 + 600)
             while True:
                 if job["id"] in self.cancelled:
                     raise RuntimeError("Generation canceled")
-                history = await self.comfy.history(prompt_id)
+                history, history_error = await self._read_comfy_history(prompt_id)
+                if history_error is not None:
+                    consecutive_history_failures += 1
+                    total_history_failures += 1
+                    poll_error = self._error_text(history_error)
+                    runtime.setdefault("comfy", {})["history_poll"] = {
+                        "status": "retrying",
+                        "consecutive_failures": consecutive_history_failures,
+                        "total_failures": total_history_failures,
+                        "last_error": poll_error,
+                        "last_attempt_at": now_iso(),
+                    }
+                    if consecutive_history_failures == 1 or consecutive_history_failures % 5 == 0:
+                        update_job(
+                            job["id"],
+                            status="running",
+                            phase="processing" if sampling_started is not None else "starting",
+                            runtime=runtime,
+                            error=None,
+                        )
+                    if time.monotonic() - history_poll_started >= watchdog_seconds:
+                        raise RuntimeError(
+                            "ComfyUI status polling did not recover within "
+                            f"{int(watchdog_seconds)} seconds ({poll_error})"
+                        )
+                    await asyncio.sleep(5)
+                    continue
+
+                if consecutive_history_failures:
+                    runtime.setdefault("comfy", {})["history_poll"] = {
+                        "status": "recovered",
+                        "consecutive_failures": consecutive_history_failures,
+                        "total_failures": total_history_failures,
+                        "recovered_at": now_iso(),
+                    }
+                    update_job(job["id"], runtime=runtime, error=None)
+                    consecutive_history_failures = 0
+
                 sample = gpu_sample()
                 if sample:
                     samples.append({"at_seconds": round(time.monotonic() - started, 1), **sample})
@@ -561,6 +665,11 @@ class QueueWorker:
                             raise RuntimeError("ComfyUI execution error: " + json.dumps(errors[-1][1], ensure_ascii=False)[:7500])
                     if status.get("completed"):
                         break
+                if time.monotonic() - history_poll_started >= watchdog_seconds:
+                    raise RuntimeError(
+                        "ComfyUI did not report a completed prompt within "
+                        f"{int(watchdog_seconds)} seconds"
+                    )
                 await asyncio.sleep(5)
 
             elapsed = time.monotonic() - started
@@ -570,7 +679,15 @@ class QueueWorker:
                 eta_seconds=round(eta, 1) if eta is not None else None,
             )
             self._update_parent_progress(job, "verifying", 1, eta)
-            video = find_video(prefix)
+            video = None
+            # SaveVideo can finish just after the completed history response;
+            # give the filesystem a short grace period before declaring the
+            # output missing.
+            for _ in range(12):
+                video = find_video(prefix)
+                if video:
+                    break
+                await asyncio.sleep(5)
             if not video:
                 raise RuntimeError("ComfyUI completed but no MP4 was found")
             probe = await asyncio.to_thread(

@@ -332,10 +332,16 @@ class AgentProcessManager:
         request_dir.mkdir(parents=True, exist_ok=True)
         request_path = request_dir / f"agy-request-{uuid.uuid4().hex}.md"
         request_path.write_text(prompt, encoding="utf-8")
+        # Production is an explicitly user-authorized local workflow. AGY must be
+        # able to inspect audio/video with its own tools without stopping for an
+        # interactive approval prompt that the bridge cannot answer. Do not put
+        # this invocation in the restricted sandbox: the production folder is
+        # still the only workspace exposed to the agent through --add-dir.
         command = [executable, "--print", f"Read {request_path} and return only the required structured response.",
                    "--output-format", "stream-json", "--json-schema", str(schema),
-                   "--model", model, "--effort", effort, "--mode", "plan", "--sandbox",
-                   "--add-dir", str(PRODUCTIONS / production_id), "--print-timeout", f"{AGENT_TIMEOUT_SECONDS}s"]
+                   "--model", model, "--effort", effort, "--mode", "accept-edits",
+                   "--dangerously-skip-permissions", "--add-dir", str(PRODUCTIONS / production_id),
+                   "--print-timeout", f"{AGENT_TIMEOUT_SECONDS}s"]
         if session_id:
             command.extend(["--conversation", session_id])
         raw = await self._run(production_id, command)
@@ -363,6 +369,7 @@ class AgentProcessManager:
     async def generate_reference_image(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
         provider: str = "auto", agy_model: str | None = None, agy_effort: str | None = None,
+        source_images: list[Path] | None = None,
     ) -> Path:
         """Generate a project-bound still with Codex ImageGen or AGY fallback."""
         if provider not in {"auto", "codex", "agy"}:
@@ -371,7 +378,7 @@ class AgentProcessManager:
         if provider in {"auto", "codex"}:
             try:
                 return await self._generate_reference_image_codex(
-                    production_id, prompt, output_path, model, effort,
+                    production_id, prompt, output_path, model, effort, source_images or [],
                 )
             except Exception as exc:
                 if provider == "codex":
@@ -382,6 +389,7 @@ class AgentProcessManager:
                 return await self._generate_reference_image_agy(
                     production_id, prompt, output_path,
                     agy_model or AGY_DEFAULT_MODEL, agy_effort or AGY_DEFAULT_EFFORT,
+                    source_images or [],
                 )
             except Exception as exc:
                 if provider == "agy":
@@ -403,6 +411,7 @@ class AgentProcessManager:
 
     async def _generate_reference_image_codex(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
+        source_images: list[Path],
     ) -> Path:
         executable = _command_path(CODEX_COMMAND)
         if not executable:
@@ -420,6 +429,9 @@ production reference still from the specification below. This is a project-bound
 SPECIFICATION:
 {prompt}
 
+SOURCE REFERENCE IMAGES (preserve their relevant identity, wardrobe, props, and setting):
+{chr(10).join(str(path) for path in source_images) or '(none)'}
+
 Requirements:
 - Generate a polished 16:9 reference still suitable as MiniMax H3 I2V input.
 - Do not add visible text, logos, license-plate characters, captions, or watermarks unless the specification
@@ -433,13 +445,17 @@ Requirements:
             executable, "exec", "--json", "--sandbox", "workspace-write",
             "--ask-for-approval", "never", "--skip-git-repo-check", "--ephemeral",
             "-C", str(production_root), "--model", model,
-            "-c", f'model_reasoning_effort="{effort}"', "-",
+            "-c", f'model_reasoning_effort="{effort}"',
         ]
+        for image in source_images:
+            command.extend(["--image", str(image)])
+        command.append("-")
         await self._run(production_id, command, task)
         return self._validate_generated_image(target, "Codex ImageGen")
 
     async def _generate_reference_image_agy(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
+        source_images: list[Path],
     ) -> Path:
         executable = _command_path(AGY_COMMAND)
         if not executable:
@@ -456,6 +472,9 @@ Use your image-generation capability to create exactly one polished 16:9 product
 SPECIFICATION:
 {prompt}
 
+SOURCE REFERENCE IMAGES (inspect these and preserve relevant identity, wardrobe, props, and setting):
+{chr(10).join(str(path) for path in source_images) or '(none)'}
+
 Requirements:
 - Suitable as a MiniMax H3 I2V opening/reference image.
 - No visible text, logos, plate characters, captions, or watermarks unless exact text is quoted above.
@@ -465,8 +484,9 @@ Requirements:
 """.strip()
         command = [
             executable, "--print", task, "--output-format", "text",
-            "--model", model, "--effort", effort, "--mode", "accept-edits", "--sandbox",
-            "--add-dir", str(production_root), "--print-timeout", f"{AGENT_TIMEOUT_SECONDS}s",
+            "--model", model, "--effort", effort, "--mode", "accept-edits",
+            "--dangerously-skip-permissions", "--add-dir", str(production_root),
+            "--print-timeout", f"{AGENT_TIMEOUT_SECONDS}s",
         ]
         await self._run(production_id, command)
         return self._validate_generated_image(target, "AGY ImageGen")

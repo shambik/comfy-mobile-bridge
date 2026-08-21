@@ -121,6 +121,11 @@ def init_production_db() -> None:
                 prompt TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 continuity TEXT NOT NULL DEFAULT 'hard_cut',
+                audio_mode TEXT NOT NULL DEFAULT 'silent',
+                audio_source TEXT NOT NULL DEFAULT 'song',
+                audio_start REAL NOT NULL DEFAULT 0,
+                audio_duration REAL,
+                audio_reference_id TEXT,
                 duration REAL NOT NULL,
                 megapixels REAL NOT NULL,
                 aspect_ratio TEXT NOT NULL DEFAULT '16:9',
@@ -215,6 +220,16 @@ def init_production_db() -> None:
         shot_columns = {row[1] for row in db.execute("PRAGMA table_info(production_shots)").fetchall()}
         if "reference_ids_json" not in shot_columns:
             db.execute("ALTER TABLE production_shots ADD COLUMN reference_ids_json TEXT NOT NULL DEFAULT '[]'")
+        if "audio_mode" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN audio_mode TEXT NOT NULL DEFAULT 'silent'")
+        if "audio_source" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN audio_source TEXT NOT NULL DEFAULT 'song'")
+        if "audio_start" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN audio_start REAL NOT NULL DEFAULT 0")
+        if "audio_duration" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN audio_duration REAL")
+        if "audio_reference_id" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN audio_reference_id TEXT")
 
 
 def ensure_agent_settings(defaults: dict[str, str]) -> None:
@@ -456,12 +471,15 @@ def replace_shot_plan(production_id: str, shots: list[dict[str, Any]]) -> list[d
         for index, shot in enumerate(shots, 1):
             db.execute(
                 """INSERT INTO production_shots
-                   (id,production_id,shot_index,title,prompt,mode,continuity,duration,
+                   (id,production_id,shot_index,title,prompt,mode,continuity,
+                    audio_mode,audio_source,audio_start,audio_duration,audio_reference_id,duration,
                     megapixels,aspect_ratio,steps,engine,turbo_profile,reference_ids_json,status,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)""",
                 (
                     uuid.uuid4().hex, production_id, index, shot["title"], shot["prompt"], shot["mode"],
-                    shot.get("continuity", "hard_cut"), shot["duration"], shot["megapixels"],
+                    shot.get("continuity", "hard_cut"), shot.get("audio_mode", "silent"),
+                    shot.get("audio_source", "song"), shot.get("audio_start", 0), shot.get("audio_duration"),
+                    shot.get("audio_reference_id"), shot["duration"], shot["megapixels"],
                     shot.get("aspect_ratio", "16:9"), shot.get("steps", 6), shot.get("engine", "turbo"),
                     shot.get("turbo_profile", "v1"), _json(shot.get("reference_ids", [])), now, now,
                 ),
@@ -699,12 +717,15 @@ def import_completed_jobs(production_id: str, jobs: list[dict[str, Any]]) -> lis
             mode = job.get("mode") or "text"
             db.execute(
                 """INSERT INTO production_shots
-                   (id,production_id,shot_index,title,prompt,mode,continuity,duration,megapixels,
+                   (id,production_id,shot_index,title,prompt,mode,continuity,
+                    audio_mode,audio_source,audio_start,audio_duration,audio_reference_id,duration,megapixels,
                     aspect_ratio,steps,engine,turbo_profile,reference_ids_json,status,accepted_attempt,
                     created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',1,?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accepted',1,?,?)""",
                 (shot_id, production_id, index, f"Imported shot {index}", job["prompt"], mode,
-                 "hard_cut", job["duration"], job.get("megapixels") or .31,
+                 "hard_cut", "lip_sync" if mode == "lip_sync" else "silent",
+                 "reference" if job.get("reference_audio_name") else "song", job.get("audio_start") or 0,
+                 job["duration"] if mode == "lip_sync" else None, None, job["duration"], job.get("megapixels") or .31,
                  job.get("aspect_ratio") or "16:9", job["steps"], job["engine"],
                  job.get("turbo_profile") or "v1", "[]", now, now),
             )

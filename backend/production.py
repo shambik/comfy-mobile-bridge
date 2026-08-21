@@ -13,7 +13,8 @@ from .agents import AgentResult, discover_codex_models, process_manager
 from .config import INPUT, PRODUCTIONS, PRODUCTION_CONCURRENCY
 from .db import connect, get_job, next_position, now_iso
 from .generation import normalize_generation_settings
-from .media import assemble_clips, attach_song, extract_last_frame, extract_review_frames
+from .media import (assemble_clips, attach_song, extract_last_frame, extract_review_frames,
+                    prepare_audio_segment, probe_audio_metadata)
 from .production_db import (add_artifact, add_decision, add_event, add_message, add_reference,
                             create_shot_attempt, get_production, list_messages, list_shots,
                             get_reference, list_references, recover_productions, replace_shot_plan, resolve_decision,
@@ -169,6 +170,14 @@ class ProductionOrchestrator:
 
     def _base_context(self, production: dict[str, Any]) -> str:
         skills = selected_skill_context(production.get("skills", []))
+        references = list_references(production["id"], private=True)
+        reference_context = json.dumps([
+            {
+                "id": item["id"], "kind": item["kind"], "name": item["name"],
+                "path": item["path"], "notes": item.get("notes", ""),
+            }
+            for item in references
+        ], ensure_ascii=False, indent=2)
         user_messages = [
             message for message in list_messages(production["id"])
             if message["participant"] == "user" and message["kind"] in {"intervention", "decision", "control"}
@@ -188,6 +197,10 @@ Lyrics:
 {production['lyrics']}
 Song file: {production['song_path']}
 
+User-provided and approved production references (optional; use these as source constraints,
+and fill only missing categories with new references):
+{reference_context or '(none; develop the visual bible from the user description)'}
+
 Latest user instructions and decisions (highest priority):
 {instructions or '(none beyond intake)'}
 
@@ -195,8 +208,17 @@ Enabled production skills:
 {skills or '(none)'}
 """.strip()
 
+    @staticmethod
+    def _reference_image_paths(production: dict[str, Any]) -> list[Path]:
+        return [
+            Path(item["path"])
+            for item in list_references(production["id"], private=True)
+            if item.get("kind") == "image" and Path(item["path"]).is_file()
+        ]
+
     async def _codex(self, production: dict[str, Any], request: str, images: list[Path] | None = None) -> AgentResult:
         runtime = production.get("codex_runtime") or "codex"
+        images = self._reference_image_paths(production) if images is None else images
         result = await process_manager.invoke(
             runtime, "codex", production["id"], self._base_context(production) + "\n\nTASK:\n" + request,
             production["codex_model"], production["codex_effort"], production.get("codex_session_id"), images,
@@ -212,6 +234,7 @@ Enabled production skills:
 
     async def _agy(self, production: dict[str, Any], request: str, images: list[Path] | None = None) -> AgentResult:
         runtime = production.get("agy_runtime") or "agy"
+        images = self._reference_image_paths(production) if images is None else images
         result = await process_manager.invoke(
             runtime, "agy", production["id"], self._base_context(production) + "\n\nTASK:\n" + request,
             production["agy_model"], production["agy_effort"], production.get("agy_session_id"), images,
@@ -316,6 +339,10 @@ Enabled production skills:
         if not specs:
             raise RuntimeError("The approved reference package contains no executable references array")
         existing_images = [item for item in list_references(production["id"], private=True) if item["kind"] == "image"]
+        source_images = [Path(item["path"]) for item in existing_images if Path(item["path"]).is_file()]
+        existing_by_name = {
+            str(item["name"]).strip().casefold(): item for item in existing_images if item.get("name")
+        }
         available_slots = max(0, 9 - len(existing_images))
         if not available_slots:
             return existing_images
@@ -329,6 +356,10 @@ Enabled production skills:
             if kind not in {"image", "still", "character", "location", "vehicle", "prop"}:
                 continue
             name = str(spec.get("name") or f"Reference {index}").strip()[:160]
+            existing = existing_by_name.get(name.casefold())
+            if existing:
+                generated.append(existing)
+                continue
             image_prompt = str(spec.get("image_prompt") or spec.get("prompt") or spec.get("description") or "").strip()
             if not image_prompt:
                 continue
@@ -339,12 +370,13 @@ Enabled production skills:
                 if provider == "auto":
                     await process_manager.generate_reference_image(
                         production["id"], image_prompt, path, image_model, image_effort,
+                        source_images=source_images,
                     )
                 else:
                     await process_manager.generate_reference_image(
                         production["id"], image_prompt, path, image_model, image_effort,
                         provider=provider, agy_model=production["agy_model"],
-                        agy_effort=production["agy_effort"],
+                        agy_effort=production["agy_effort"], source_images=source_images,
                     )
                 refreshed = get_production(production["id"], private=True) or production
                 agy = await self._agy(refreshed, f"""
@@ -416,10 +448,39 @@ AGY review: {json.dumps(agy.content, ensure_ascii=False)}
             return 0.6
         return 0.5
 
-    def _normalize_shots(self, raw: list[dict[str, Any]], continuity_mode: str) -> list[dict[str, Any]]:
+    def _normalize_shots(
+        self, raw: list[dict[str, Any]], continuity_mode: str,
+        references: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         if not raw:
             raise RuntimeError("The joint prompt package did not contain a shots array")
+        references = references or []
+        reference_by_id = {str(item["id"]): item for item in references}
+        reference_by_name = {
+            str(item["name"]).strip().casefold(): item for item in references if item.get("name")
+        }
+
+        def resolve_reference_ids(item: dict[str, Any], key: str = "reference_ids") -> list[str]:
+            values: list[Any] = []
+            raw_ids = item.get(key)
+            if isinstance(raw_ids, list):
+                values.extend(raw_ids)
+            selectors = item.get("reference_names") or item.get("references")
+            if isinstance(selectors, (str, dict)):
+                selectors = [selectors]
+            if isinstance(selectors, list):
+                values.extend(selectors)
+            resolved: list[str] = []
+            for value in values:
+                candidate = value.get("id") if isinstance(value, dict) else value
+                name = value.get("name") if isinstance(value, dict) else value
+                match = reference_by_id.get(str(candidate)) or reference_by_name.get(str(name).strip().casefold())
+                if match and match["id"] not in resolved:
+                    resolved.append(match["id"])
+            return resolved
+
         result = []
+        timeline_cursor = 0.0
         for index, item in enumerate(raw, 1):
             prompt = str(item.get("prompt") or item.get("video_prompt") or "").strip()
             if not prompt:
@@ -439,27 +500,75 @@ AGY review: {json.dumps(agy.content, ensure_ascii=False)}
                 sequential = index > 1
             elif continuity_mode == "hard_cut":
                 sequential = False
-            requested_mode = str(item.get("mode") or "").lower()
-            mode = "reference" if requested_mode in {"reference", "r2v", "ref2v"} else (
-                "opening" if sequential and index > 1 else "text"
-            )
+            requested_mode = str(item.get("mode") or item.get("visual_mode") or "").lower()
+            reference_ids = resolve_reference_ids(item)
+            # Production intentionally does not use R2V yet. If the agents
+            # mention it, treat the selected image reference as an I2V
+            # opening frame instead of silently routing the shot to R2V.
+            if requested_mode in {"reference", "r2v", "ref2v"}:
+                mode = "opening" if reference_ids else "text"
+            elif requested_mode in {"opening", "i2v", "image_to_video"}:
+                mode = "opening"
+            else:
+                has_image_reference = any(
+                    reference_by_id.get(reference_id, {}).get("kind") == "image"
+                    for reference_id in reference_ids
+                )
+                mode = "opening" if has_image_reference or (sequential and index > 1) else "text"
+
+            raw_audio_mode = str(item.get("audio_mode") or item.get("audio") or "silent").lower()
+            audio_mode = "lip_sync" if raw_audio_mode in {"lip_sync", "lipsync", "lip-sync", "dialogue"} else "silent"
+            raw_audio_source = str(item.get("audio_source") or "song").lower()
+            audio_source = "reference" if raw_audio_source in {"reference", "uploaded", "ref"} else "song"
+            try:
+                audio_start = max(0.0, float(item.get("audio_start", item.get("song_start", timeline_cursor))))
+            except (TypeError, ValueError):
+                audio_start = timeline_cursor
+            try:
+                audio_duration = min(60.0, max(0.5, float(item.get("audio_duration", duration))))
+            except (TypeError, ValueError):
+                audio_duration = duration
+            audio_reference_value = item.get("audio_reference_id") or item.get("audio_reference")
+            audio_reference = reference_by_id.get(str(audio_reference_value)) or reference_by_name.get(str(audio_reference_value).strip().casefold())
+            audio_reference_id = audio_reference["id"] if audio_reference and audio_reference.get("kind") == "audio" else None
+            timeline_cursor = max(timeline_cursor, audio_start + audio_duration)
+            try:
+                steps = int(item.get("steps") or (4 if audio_mode == "lip_sync" else 6))
+            except (TypeError, ValueError):
+                steps = 4 if audio_mode == "lip_sync" else 6
             result.append({
                 "title": str(item.get("title") or item.get("name") or f"Shot {index}"),
                 "prompt": prompt, "mode": mode,
-                "continuity": "sequential" if mode == "opening" else "hard_cut",
+                "continuity": "sequential" if sequential else "hard_cut",
+                "audio_mode": audio_mode, "audio_source": audio_source,
+                "audio_start": audio_start, "audio_duration": audio_duration,
+                "audio_reference_id": audio_reference_id,
                 "duration": duration, "megapixels": megapixels,
                 "aspect_ratio": str(item.get("aspect_ratio") or "16:9"),
-                "steps": 4 if mode == "reference" else 6,
+                "steps": steps,
                 "engine": "turbo", "turbo_profile": "v1",
-                "reference_ids": [str(value) for value in item.get("reference_ids", [])],
+                "reference_ids": reference_ids,
             })
         return result
 
     def _queue_job(self, shot: dict[str, Any], opening_frame: Path | None) -> str:
         if not self.queue_worker:
             raise RuntimeError("The production orchestrator is not connected to the ComfyUI queue")
+        production = get_production(shot["production_id"], private=True)
+        if not production:
+            raise RuntimeError("The production no longer exists")
+        visual_mode = shot["mode"]
+        audio_mode = shot.get("audio_mode") or "silent"
+        if audio_mode not in {"silent", "lip_sync"}:
+            raise RuntimeError(f"Unsupported production audio mode: {audio_mode}")
+        if audio_mode == "lip_sync" and visual_mode == "reference":
+            raise RuntimeError(
+                "Production R2V + lip-sync is reserved for a future workflow. "
+                "Use T2V or I2V for a lip-sync shot."
+            )
+        job_mode = "lip_sync" if audio_mode == "lip_sync" else visual_mode
         settings = normalize_generation_settings(
-            shot["mode"], engine=shot["engine"], steps=int(shot["steps"]),
+            job_mode, engine=shot["engine"], steps=int(shot["steps"]),
             megapixels=float(shot["megapixels"]), aspect_ratio=shot["aspect_ratio"],
             turbo_profile=shot["turbo_profile"],
         )
@@ -475,30 +584,49 @@ AGY review: {json.dumps(agy.content, ensure_ascii=False)}
                 opening_frame = Path(image_reference["comfy_path"])
         if shot["mode"] == "reference" and not references:
             raise RuntimeError(f"{shot['title']} is R2V but has no assigned references")
+        audio_path = None
+        audio_name = None
+        audio_reference = next(
+            (item for item in references if item["id"] == shot.get("audio_reference_id") and item["kind"] == "audio"),
+            None,
+        )
+        if not audio_reference and shot.get("audio_source") == "reference":
+            audio_reference = next((item for item in references if item["kind"] == "audio"), None)
+        if audio_mode == "lip_sync":
+            if shot.get("audio_source") == "reference":
+                if not audio_reference:
+                    raise RuntimeError(f"{shot['title']} uses a reference audio source but no audio reference is assigned")
+                source_audio = Path(audio_reference["path"])
+            else:
+                source_audio = Path(production["song_path"])
+            prepared = INPUT / f"production_{shot['production_id']}_shot_{shot['shot_index']:03d}_audio.wav"
+            prepare_audio_segment(
+                source_audio, prepared, float(shot.get("audio_start") or 0),
+                float(shot.get("audio_duration") or shot["duration"]),
+            )
+            audio_path, audio_name = str(prepared), prepared.name
         first_path = str(opening_frame) if opening_frame else None
         first_name = opening_frame.name if opening_frame else None
         image_names = [item["comfy_name"] for item in references if item["kind"] == "image"]
         video_names = [item["comfy_name"] for item in references if item["kind"] == "video"]
-        audio_reference = next((item for item in references if item["kind"] == "audio"), None)
         input_reference = next((item for item in references if item["kind"] == "image"), None)
         with connect() as db:
             db.execute(
                 """INSERT INTO jobs
-                   (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,
+                   (id,prompt,mode,duration,audio_start,engine,turbo_profile,encoder,steps,width,height,
                     megapixels,aspect_ratio,seed,status,position,no_audio,input_path,input_name,
                     reference_images_json,reference_videos_json,reference_audio_path,reference_audio_name,
                     first_frame_path,first_frame_name,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,1,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    job_id, shot["prompt"], shot["mode"], shot["duration"], settings.engine,
-                    settings.turbo_profile, settings.encoder, settings.steps, settings.width,
+                    job_id, shot["prompt"], job_mode, shot["duration"], 0,
+                    settings.engine, settings.turbo_profile, settings.encoder, settings.steps, settings.width,
                     settings.height, settings.megapixels, settings.aspect_ratio,
-                    str(secrets.randbits(64)), next_position(db),
+                    str(secrets.randbits(64)), next_position(db), int(audio_mode != "lip_sync"),
                     input_reference["comfy_path"] if input_reference else None,
                     input_reference["comfy_name"] if input_reference else None,
                     json.dumps(image_names), json.dumps(video_names),
-                    audio_reference["comfy_path"] if audio_reference else None,
-                    audio_reference["comfy_name"] if audio_reference else None,
+                    audio_path, audio_name,
                     first_path, first_name, now, now,
                 ),
             )
@@ -581,11 +709,44 @@ text that a normal viewer cannot read.
 
         if stage == "song_analysis":
             add_message(production_id, "system", "all", "status", "AGY is analyzing the song and lyric timing.")
-            analysis = await self._media_agent(production, """
+            try:
+                audio_metadata = await asyncio.to_thread(probe_audio_metadata, Path(production["song_path"]))
+            except (RuntimeError, OSError) as exc:
+                audio_metadata = {"preflight_error": str(exc)}
+            analysis_request = f"""
 Analyze the actual song file and lyrics. Return duration, BPM and confidence, meter, genre, sections,
 energy curve, vocal entrances, instrumental breaks, transitions, estimated timestamped lyric map,
 and concrete visual opportunities. Mark uncertain timing as estimated. Put the full analysis in content.
-""")
+The bridge already performed this basic audio preflight:
+{json.dumps(audio_metadata, ensure_ascii=False)}
+Use your media/audio inspection capability if available, but do not run shell commands or ask for command
+permission; use the provided file path and metadata. Put the full analysis in content.
+"""
+            try:
+                analysis = await self._media_agent(production, analysis_request)
+            except RuntimeError as exc:
+                if "permission check failed" not in str(exc).lower():
+                    raise
+                fallback = {
+                    "summary": "AGY shell inspection was unavailable; continuing with backend audio metadata.",
+                    "decision": "continue",
+                    "next_action": "continue",
+                    "content": {
+                        "audio_metadata": audio_metadata,
+                        "analysis_limitation": "BPM, genre, sections, and lyric timing still require agent/media review.",
+                    },
+                    "issues": [{"type": "agent_permission", "message": str(exc)[-1200:]}],
+                    "requires_user": False,
+                }
+                analysis = AgentResult(
+                    "agy", fallback, "backend audio preflight fallback", None,
+                    production.get("agy_model", ""), production.get("agy_effort", ""),
+                )
+                add_message(
+                    production_id, "system", "all", "status",
+                    "AGY could not inspect the song through its media tools; backend audio metadata was preserved and the pipeline continued.",
+                    {"fallback": True, "reason": str(exc)[-1200:]},
+                )
             (self._folder(production_id) / "analysis" / "song_analysis.json").write_text(
                 json.dumps(analysis.content, ensure_ascii=False, indent=2), encoding="utf-8",
             )
@@ -603,6 +764,8 @@ and concrete visual opportunities. Mark uncertain timing as estimated. Put the f
 Using AGY's song analysis below, propose a professional treatment, visual language, character/location bible,
 continuity map, timestamped storyboard, shot durations, I2V/T2V choice, camera movement, transitions,
 megapixel policy, and acceptance criteria. Keep the story connected to the lyrics.
+The production context includes optional user-provided references. Treat those files as the user's visual
+constraints and use them wherever relevant; invent only the missing characters, locations, props, or wardrobe.
 AGY analysis: {analysis_text}
 """)
             if self._control_requested(production_id):
@@ -658,7 +821,10 @@ Create detailed original reference briefs for every recurring character, locatio
 and continuity anchor in this treatment: {treatment}
 The top-level content object MUST include a `references` array. Every item must include `name`, `kind`,
 `description`, and a complete `image_prompt` for a polished 16:9 still. Avoid visible text unless the exact
-text is narratively required.
+text is narratively required. The production context lists optional user-provided reference files. Preserve
+their identity, wardrobe, location, and prop details; do not recreate a user-supplied reference as a duplicate.
+Create new reference briefs only for categories the user did not provide. Mark user files as source references
+in the returned package so the later shot plan can select them by name.
 """)
             if self._control_requested(production_id):
                 return
@@ -713,12 +879,16 @@ Original: {json.dumps(codex.content, ensure_ascii=False)}
 
         if stage == "prompt_consultation":
             codex = await self._codex(production, """
-Create the complete shot-by-shot silent MiniMax H3 prompt package from the approved treatment and references.
+Create the complete shot-by-shot MiniMax H3 prompt package from the approved treatment and references.
 The top-level content object MUST contain a non-empty `shots` array. Every shot must contain title, prompt,
 duration (0.5-15 seconds), continuity (hard_cut or sequential), megapixels, aspect_ratio, camera movement,
 visible action, lyric timestamps, and acceptance criteria. Use I2V/sequential only when the previous accepted
-last frame should open the next shot; use T2V for intentional visual resets. Every generation uses six turbo
-steps and no generated audio. Ensure total shot duration covers the analyzed song.
+last frame should open the next shot; use T2V for intentional visual resets. Production does not use R2V yet:
+if a scene needs a reference, select the relevant image by its exact `reference_names` (or `reference_ids`)
+and use I2V. Every shot must also include `audio_mode` (`silent` or `lip_sync`), `audio_source` (`song` or
+`reference`), `audio_start`, and `audio_duration`; use lip_sync only for shots where visible mouth performance
+is required. For a reference audio source, include its exact `audio_reference` name. Every generation uses
+turbo and no generated audio unless `audio_mode` is lip_sync. Ensure total shot duration covers the analyzed song.
 """)
             if self._control_requested(production_id):
                 return
@@ -744,7 +914,10 @@ Final package: {json.dumps(final.content, ensure_ascii=False)}
             if self._control_requested(production_id):
                 return
             raw_shots = self._find_shots(final.content)
-            shots = self._normalize_shots(raw_shots, production["continuity_mode"])
+            shots = self._normalize_shots(
+                raw_shots, production["continuity_mode"],
+                list_references(production_id, private=True),
+            )
             for shot in shots:
                 shot["production_id"] = production_id
             replace_shot_plan(production_id, shots)

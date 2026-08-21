@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import json
 from pathlib import Path
 
 from .comfy import media_probe
@@ -56,6 +57,74 @@ def extract_review_frames(video: Path, target_dir: Path, fps: float = 1.0, limit
     if result.returncode or not frames:
         raise RuntimeError("Could not extract review frames: " + result.stderr[-1200:])
     return frames
+
+
+def prepare_audio_segment(source: Path, target: Path, start: float, duration: float) -> Path:
+    """Create an exact, ComfyUI-readable WAV segment for a production shot.
+
+    Production lip-sync uses a different song interval for each shot.  The
+    generated clip may contain audio for Native AudioLock, but the final
+    production soundtrack is still muxed separately from the original song.
+    Padding makes a short source segment deterministic at the requested shot
+    duration instead of allowing ffmpeg/ComfyUI to infer a different length.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to prepare production lip-sync audio")
+    if not source.is_file():
+        raise RuntimeError(f"Lip-sync audio source is missing: {source}")
+    if start < 0 or duration < 0.5:
+        raise ValueError("Lip-sync audio start must be non-negative and duration at least 0.5 seconds")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{start:.6f}", "-i", str(source),
+            "-af", "apad", "-t", f"{duration:.6f}",
+            "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", str(target),
+        ],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode or not target.exists() or target.stat().st_size == 0:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("Could not prepare production lip-sync audio: " + result.stderr[-1200:])
+    return target
+
+
+def probe_audio_metadata(path: Path) -> dict:
+    """Read basic audio metadata without asking an agent to run a shell command."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe is required for audio metadata")
+    result = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-show_entries",
+            "format=duration,size:stream=codec_type,codec_name,sample_rate,channels,bit_rate",
+            "-of", "json", str(path),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError("ffprobe failed: " + result.stderr[-1000:])
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ffprobe returned invalid audio metadata") from exc
+    stream = next((item for item in payload.get("streams", []) if item.get("codec_type") == "audio"), None)
+    if not stream:
+        raise RuntimeError("The song has no audio stream")
+    try:
+        duration = float(payload.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return {
+        "duration_seconds": duration,
+        "size_bytes": int(payload.get("format", {}).get("size") or 0),
+        "codec": stream.get("codec_name"),
+        "sample_rate": int(stream.get("sample_rate") or 0),
+        "channels": int(stream.get("channels") or 0),
+        "bit_rate": int(stream.get("bit_rate") or 0),
+    }
 
 
 def attach_song(video: Path, song: Path, output: Path) -> dict:
