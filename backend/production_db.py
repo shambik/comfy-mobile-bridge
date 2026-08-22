@@ -427,7 +427,10 @@ def _decode_generation_fields(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def _production_dict(row, *, include_messages: bool = False) -> dict[str, Any] | None:
+def _production_dict(
+    row, *, include_messages: bool = False, message_limit: int | None = None,
+    message_before: int | None = None,
+) -> dict[str, Any] | None:
     if not row:
         return None
     item = dict(row)
@@ -440,7 +443,15 @@ def _production_dict(row, *, include_messages: bool = False) -> dict[str, Any] |
     item["archived"] = bool(item.get("archived", 0))
     item.pop("song_path", None)
     if include_messages:
-        item["messages"] = list_messages(item["id"])
+        item["messages"] = list_messages(
+            item["id"], limit=message_limit, before=message_before,
+        )
+        if message_limit is not None:
+            item["message_total"] = count_messages(item["id"])
+            item["message_oldest_sequence"] = item["messages"][0]["sequence"] if item["messages"] else None
+            item["messages_has_older"] = bool(
+                item["messages"] and item["messages"][0]["sequence"] > 1
+            )
         item["decisions"] = list_decisions(item["id"])
         item["shots"] = list_shots(item["id"])
         item["artifacts"] = list_artifacts(item["id"])
@@ -485,7 +496,10 @@ def list_productions() -> list[dict[str, Any]]:
     return [_production_dict(row) for row in rows]
 
 
-def get_production(production_id: str, *, include_messages: bool = False, private: bool = False) -> dict[str, Any] | None:
+def get_production(
+    production_id: str, *, include_messages: bool = False, private: bool = False,
+    message_limit: int | None = None, message_before: int | None = None,
+) -> dict[str, Any] | None:
     with connect() as db:
         row = db.execute("SELECT * FROM productions WHERE id=?", (production_id,)).fetchone()
     if private:
@@ -498,7 +512,10 @@ def get_production(production_id: str, *, include_messages: bool = False, privat
         item["archived"] = bool(item.get("archived", 0))
         item["intervention_requested"] = bool(item.get("intervention_requested", 0))
         return item
-    return _production_dict(row, include_messages=include_messages)
+    return _production_dict(
+        row, include_messages=include_messages, message_limit=message_limit,
+        message_before=message_before,
+    )
 
 
 def update_production(production_id: str, **values: Any) -> None:
@@ -548,11 +565,31 @@ def add_message(
             "kind": kind, "content": content, "metadata": metadata or {}, "created_at": created}
 
 
-def list_messages(production_id: str) -> list[dict[str, Any]]:
+def count_messages(production_id: str) -> int:
     with connect() as db:
-        rows = db.execute(
-            "SELECT * FROM production_messages WHERE production_id=? ORDER BY sequence", (production_id,),
-        ).fetchall()
+        return int(db.execute(
+            "SELECT COUNT(*) FROM production_messages WHERE production_id=?", (production_id,),
+        ).fetchone()[0])
+
+
+def list_messages(
+    production_id: str, *, limit: int | None = None, before: int | None = None,
+) -> list[dict[str, Any]]:
+    with connect() as db:
+        params: list[Any] = [production_id]
+        query = "SELECT * FROM production_messages WHERE production_id=?"
+        if before is not None:
+            query += " AND sequence<?"
+            params.append(int(before))
+        if limit is None:
+            query += " ORDER BY sequence"
+        else:
+            safe_limit = max(1, min(int(limit), 500))
+            query += " ORDER BY sequence DESC LIMIT ?"
+            params.append(safe_limit)
+        rows = db.execute(query, tuple(params)).fetchall()
+    if limit is not None:
+        rows = list(reversed(rows))
     result = []
     for row in rows:
         item = dict(row)

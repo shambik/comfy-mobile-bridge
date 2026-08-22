@@ -623,8 +623,17 @@ def production_with_generation_progress(production: dict[str, Any] | None) -> di
 
 
 @app.get("/api/productions/{production_id}")
-async def production_detail(production_id: str):
-    production = get_production(production_id, include_messages=True)
+async def production_detail(
+    production_id: str, message_limit: int = 200, message_before: int | None = None,
+):
+    # The production room only needs the recent council window for its first
+    # render. Older messages can be requested explicitly without making every
+    # refresh transfer the complete agent transcript.
+    safe_limit = max(50, min(message_limit, 500))
+    production = get_production(
+        production_id, include_messages=True, message_limit=safe_limit,
+        message_before=message_before,
+    )
     if not production:
         raise HTTPException(404, "Production not found")
     return production_with_generation_progress(production)

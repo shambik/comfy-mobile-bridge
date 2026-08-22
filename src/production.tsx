@@ -31,7 +31,9 @@ type Production = {
   generation_aspect_ratio?: string; generation_megapixel_rules?: MegapixelRule[];
   skills: string[]; progress: number; error?: string;
   generation_progress?: GenerationProgress;
-  created_at: string; archived?: boolean; messages?: Message[]; decisions?: Decision[]; shots?: Shot[]; artifacts?: Artifact[]; references?: ReferenceMedia[]
+  created_at: string; archived?: boolean; messages?: Message[]; message_total?: number;
+  message_oldest_sequence?: number | null; messages_has_older?: boolean;
+  decisions?: Decision[]; shots?: Shot[]; artifacts?: Artifact[]; references?: ReferenceMedia[]
 }
 type GenerationProgress = {
   job_id: string; status: string; phase: string; progress: number; step: number; total_steps: number;
@@ -52,6 +54,7 @@ type RegularJob = { id: string; prompt: string; duration: number; status: string
 
 const effortLabels: Record<string, string> = { none: 'None', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', ultra: 'Ultra', max: 'Maximum' }
 const defaultGates = ['treatment', 'references', 'prompts', 'shots', 'final']
+const productionMessagePageSize = 200
 const defaultMegapixelRules: MegapixelRule[] = [
   { max_duration: 5, megapixels: 1.5 },
   { max_duration: 8, megapixels: 1.0 },
@@ -69,6 +72,21 @@ const resolutionOptions = [
 
 function copyMegapixelRules(rules?: MegapixelRule[]) {
   return (rules?.length ? rules : defaultMegapixelRules).map(rule => ({ ...rule }))
+}
+
+function mergeProductionMessagePage(current: Production | null, next: Production): Production {
+  if (!current || current.id !== next.id || !next.messages?.length) return next
+  const messages = new Map<number, Message>()
+  for (const message of [...(current.messages || []), ...next.messages]) messages.set(message.sequence, message)
+  const merged = [...messages.values()].sort((left, right) => left.sequence - right.sequence)
+  const total = next.message_total ?? current.message_total
+  return {
+    ...next,
+    messages: merged,
+    message_total: total,
+    message_oldest_sequence: merged[0]?.sequence ?? null,
+    messages_has_older: typeof total === 'number' ? merged.length < total : next.messages_has_older,
+  }
 }
 
 function MegapixelRulesEditor({ rules, onChange }: { rules?: MegapixelRule[]; onChange: (rules: MegapixelRule[]) => void }) {
@@ -443,6 +461,10 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const [productionLoadError, setProductionLoadError] = useState('')
   const productionRequestRef = useRef(0)
   const productionAbortRef = useRef<AbortController | null>(null)
+  const productionLoadInFlightRef = useRef<{ id: string; controller: AbortController } | null>(null)
+  const productionRefreshQueuedRef = useRef(false)
+  const productionRefreshTimerRef = useRef<number | null>(null)
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   type ErrorScope = 'system' | 'intake' | 'controls' | 'chat' | 'settings' | 'skills' | 'references' | 'shots' | 'shotModal' | 'config' | 'library'
   const [sectionErrors, setSectionErrors] = useState<Partial<Record<ErrorScope, string>>>({})
@@ -487,6 +509,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     catch { return false }
   })
   const messagesRef = useRef<HTMLDivElement | null>(null)
+  const messageScrollRestoreRef = useRef<{ height: number; top: number } | null>(null)
 
   const headers = useMemo(() => ({ 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' }), [csrf])
 
@@ -564,29 +587,78 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     await loadCatalog(true)
   }
 
-  const loadProduction = async (id = selectedId) => {
-    const requestId = ++productionRequestRef.current
+  const loadProduction = async (
+    id = selectedId, options: { force?: boolean; messageBefore?: number } = {},
+  ) => {
     if (!id) { setProduction(null); setProductionLoading(false); return }
-    productionAbortRef.current?.abort()
+    const olderPage = options.messageBefore !== undefined
+    const existing = productionLoadInFlightRef.current
+    if (existing) {
+      if (!options.force && existing.id === id) {
+        if (!olderPage) productionRefreshQueuedRef.current = true
+        return
+      }
+      existing.controller.abort()
+    }
+    const requestId = ++productionRequestRef.current
     const controller = new AbortController()
     productionAbortRef.current = controller
+    productionLoadInFlightRef.current = { id, controller }
     setProductionLoadError('')
-    setProductionLoading(true)
+    if (!olderPage) setProductionLoading(!production || production.id !== id)
     try {
-      const data = await jsonResponse(await fetch(`/api/productions/${id}`, { cache: 'no-store', signal: controller.signal }))
+      const params = new URLSearchParams({ message_limit: String(productionMessagePageSize) })
+      if (olderPage) params.set('message_before', String(options.messageBefore))
+      const data = await jsonResponse(await fetch(`/api/productions/${id}?${params.toString()}`, { cache: 'no-store', signal: controller.signal }))
       if (requestId !== productionRequestRef.current) return
-      setProduction(data)
-      setProductions(current => current.map(item => item.id === data.id ? { ...item, ...data } : item))
+      setProduction(current => mergeProductionMessagePage(current, data))
+      setProductions(current => current.map(item => item.id === data.id ? {
+        ...item, status: data.status, stage: data.stage, progress: data.progress,
+        error: data.error, archived: data.archived,
+      } : item))
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === 'AbortError') return
       if (requestId === productionRequestRef.current) {
         const message = reason instanceof Error ? reason.message : 'Unable to load production'
-        setProductionLoadError(message)
+        if (!olderPage && !production) setProductionLoadError(message)
         setSectionError('system', message)
       }
     } finally {
-      if (requestId === productionRequestRef.current) setProductionLoading(false)
+      if (requestId === productionRequestRef.current && !olderPage) setProductionLoading(false)
       if (productionAbortRef.current === controller) productionAbortRef.current = null
+      if (productionLoadInFlightRef.current?.controller === controller) {
+        productionLoadInFlightRef.current = null
+        if (!olderPage && productionRefreshQueuedRef.current) {
+          productionRefreshQueuedRef.current = false
+          scheduleProductionRefresh(id)
+        }
+      }
+    }
+  }
+
+  function scheduleProductionRefresh(id: string) {
+    if (!id || productionRefreshTimerRef.current !== null) return
+    productionRefreshTimerRef.current = window.setTimeout(() => {
+      productionRefreshTimerRef.current = null
+      void loadProduction(id)
+    }, 300)
+  }
+
+  const loadOlderMessages = async () => {
+    if (!production || olderMessagesLoading || !production.messages_has_older) return
+    const before = production.messages?.[0]?.sequence
+    if (!before) return
+    if (messagesRef.current) {
+      messageScrollRestoreRef.current = {
+        height: messagesRef.current.scrollHeight,
+        top: messagesRef.current.scrollTop,
+      }
+    }
+    setOlderMessagesLoading(true)
+    try {
+      await loadProduction(production.id, { messageBefore: before })
+    } finally {
+      setOlderMessagesLoading(false)
     }
   }
 
@@ -596,14 +668,21 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   }, [view])
   useEffect(() => {
     if (!selectedId) return
-    void loadProduction(selectedId)
+    void loadProduction(selectedId, { force: true })
     const events = new EventSource(`/api/productions/${selectedId}/events`)
-    events.onmessage = () => { void loadProduction(selectedId) }
-    const refresh = () => { void loadProduction(selectedId) }
+    events.onmessage = () => { scheduleProductionRefresh(selectedId) }
+    const refresh = () => { scheduleProductionRefresh(selectedId) }
     const eventNames = ['message.created', 'decision.created', 'decision.resolved', 'production.started', 'production.failed', 'production.recovered', 'production.reference_generation_retryable', 'production.reference_generation_retry_requested', 'shots.planned', 'shot.queued', 'shot.progress', 'shot.reviewing']
     eventNames.forEach(name => events.addEventListener(name, refresh))
     const timer = window.setInterval(refresh, 5000)
-    return () => { window.clearInterval(timer); events.close(); productionAbortRef.current?.abort() }
+    return () => {
+      window.clearInterval(timer)
+      if (productionRefreshTimerRef.current !== null) window.clearTimeout(productionRefreshTimerRef.current)
+      productionRefreshTimerRef.current = null
+      productionRefreshQueuedRef.current = false
+      events.close()
+      productionAbortRef.current?.abort()
+    }
   }, [selectedId])
   useEffect(() => {
     setCodexRuntime(settings.codex_runtime || 'codex'); setCodexModel(settings.codex_model); setCodexEffort(settings.codex_effort)
@@ -619,6 +698,14 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   useEffect(() => {
     const container = messagesRef.current
     if (!container) return
+    const restore = messageScrollRestoreRef.current
+    if (restore) {
+      messageScrollRestoreRef.current = null
+      window.requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight - restore.height + restore.top
+      })
+      return
+    }
     container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   }, [production?.id, production?.messages?.length, showLivePrints])
 
@@ -1061,7 +1148,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
             </div>
             {active && <div className={`ps-agent-activity ${generationIsActive ? 'generation' : production.status}`} role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><b>{generationIsActive ? 'GENERATION IN PROGRESS' : production.status === 'queued' ? 'AGENTS QUEUED IN BACKGROUND' : 'AGENTS WORKING IN BACKGROUND'}</b><span>{generationIsActive ? generationProgressText : production.status === 'queued' ? 'The production is queued and waiting for the controller to resume. Live agent activity will appear here when it starts.' : latestActivityText || 'The agents are active. Waiting for their first live status update…'}</span></div><small>{generationIsActive && generationProgress?.shot_index ? `SHOT ${generationProgress.shot_index}` : production.stage.replaceAll('_', ' ')}</small></div>}
             <SectionError message={sectionErrors.chat} className="ps-section-error" onDismiss={() => clearSectionError('chat')} />
-            <div className="ps-messages" ref={messagesRef}>{conversationMessages.map(message => {
+            <div className="ps-messages" ref={messagesRef}>{production.messages_has_older && <button type="button" className="ps-load-older" onClick={() => void loadOlderMessages()} disabled={olderMessagesLoading}>{olderMessagesLoading ? <><LoaderCircle className="spin" size={13} /> Loading older council messages…</> : `Load older council messages · ${Math.max(0, (production.message_total || 0) - (production.messages?.length || 0))} remaining`}</button>}{conversationMessages.map(message => {
               const trace = message.kind === 'agent_trace'
               const responseTrace = trace && message.metadata?.stream === 'response'
               const result = message.kind === 'agent' && (message.participant === 'agy' || message.participant === 'codex')
