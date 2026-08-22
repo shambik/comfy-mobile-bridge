@@ -3,6 +3,7 @@ import sqlite3
 import statistics
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import DB_PATH
 
@@ -321,6 +322,11 @@ def row_dict(row):
     ):
         item.pop(private_key, None)
     if output_path:
+        # Keep the public API free of local filesystem paths while still
+        # telling the UI which concrete file ComfyUI produced.  This is
+        # especially important for unassigned results, which have no library
+        # assignment from which the frontend could otherwise derive a name.
+        item["video_filename"] = Path(output_path).name
         item["video_url"] = f"/api/jobs/{item['id']}/video"
     return item
 

@@ -22,6 +22,12 @@ Use this skill as a portable production pipeline. Keep creative decisions explic
 - Keep generated clips silent unless explicitly requested. Add the original song only after video assembly.
 - Do not create reference images or start generation before the user approves the treatment, continuity strategy, and shot manifest. Draft references must remain clearly labeled.
 
+## AGY structured-output guardrail
+
+- Refresh the AGY response schema for every invocation, including resumed productions; old checkpoint copies must not be trusted.
+- Keep one canonical contract: textual `summary`/`decision`/`next_action`, real structured `content`, and `issues` as an array or null. The prompt must never contradict the schema by requesting JSON-encoded strings for those fields.
+- Treat type-descriptor output (`{"type":"string"}`, property definitions, or the complete schema) as a provider handoff failure. Preserve it for diagnostics, retry once in a fresh AGY conversation, and stop/escalate on a repeated signature instead of accepting it or regenerating creative shots.
+
 ## Workflow
 
 1. Validate environment and inputs. Use `scripts/analyze_media.py` for media metadata and frame extraction. Ask the user for anything missing.

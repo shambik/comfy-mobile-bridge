@@ -4,6 +4,7 @@ import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, Chevr
 import './styles.css'
 import { ProductionStudio } from './production'
 import { AppModal, useAppModal } from './app-modal'
+import { FeedbackToast, useFeedback } from './feedback'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
 type Engine = 'turbo' | 'standard' | 'spectrum'
@@ -32,7 +33,7 @@ type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
   engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
-  error?: string; video_url?: string; created_at: string; started_at?: string; finished_at?: string;
+  error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
 }
 
@@ -162,12 +163,12 @@ function VideoDropzone({ files, onChange }: { files: File[]; onChange: (files: F
   </label>
 }
 
-type ComfyPageProps = { running: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
+type ComfyPageProps = { running: boolean; loading: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
 
-function ComfyPage({ running, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
+function ComfyPage({ running, loading, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
   return <section className="comfy-page">
     <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><div className="log-actions"><button className="icon-button" onClick={onClear} aria-label="Clear visible log" title="Clear visible log"><Trash2 size={17} /></button><button className="icon-button" onClick={onRefresh} aria-label="Refresh log" title="Refresh log"><RefreshCw size={18} /></button></div></div>
-    <div className={`comfy-state ${running ? 'running' : 'stopped'}`}><i /> {running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
+    <div className={`comfy-state ${loading ? 'checking' : running ? 'running' : 'stopped'}`}><i /> {loading ? 'Checking ComfyUI…' : running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
     {error && <div className="error-banner">{error}</div>}
     <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
   </section>
@@ -175,9 +176,11 @@ function ComfyPage({ running, busy, lines, error, onRefresh, onClear }: ComfyPag
 
 function App() {
   const appModal = useAppModal()
+  const feedback = useFeedback()
   const [page, setPage] = useState<Page>('studio')
   const [csrf, setCsrf] = useState('')
   const [jobs, setJobs] = useState<Job[]>([])
+  const [jobsLoading, setJobsLoading] = useState(true)
   const [sequences, setSequences] = useState<Sequence[]>([])
   const [prompt, setPrompt] = useState('')
   const [mode, setMode] = useState<Mode>('text')
@@ -210,7 +213,9 @@ function App() {
   const [closingPreview, setClosingPreview] = useState('')
   const [sending, setSending] = useState(false)
   const [rerunLoading, setRerunLoading] = useState<string | null>(null)
-  const [error, setError] = useState('')
+  const [mainErrors, setMainErrors] = useState<Partial<Record<MainErrorScope, string>>>({})
+  const setMainError = (scope: MainErrorScope, message = '') => setMainErrors(current => ({ ...current, [scope]: message }))
+  const clearMainError = (scope: MainErrorScope) => setMainErrors(current => ({ ...current, [scope]: '' }))
   const [referenceReady, setReferenceReady] = useState(false)
   const [reference10Ready, setReference10Ready] = useState(false)
   const [spectrumReady, setSpectrumReady] = useState(false)
@@ -231,6 +236,7 @@ function App() {
   const [bulkFolder, setBulkFolder] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const [comfyRunning, setComfyRunning] = useState(false)
+  const [comfyLoading, setComfyLoading] = useState(true)
   const [comfyBusy, setComfyBusy] = useState(false)
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
   const [comfyLogCleared, setComfyLogCleared] = useState(false)
@@ -246,6 +252,8 @@ function App() {
   const [editFolder, setEditFolder] = useState('')
   const [editFilename, setEditFilename] = useState('')
   const [collapsedAssetGroups, setCollapsedAssetGroups] = useState<Record<string, boolean>>({})
+  const loadInFlightRef = useRef(false)
+  const comfyLoadInFlightRef = useRef(false)
 
   const loadSession = async (): Promise<string | null> => {
     try {
@@ -270,6 +278,8 @@ function App() {
   }
 
   const load = async () => {
+    if (loadInFlightRef.current) return
+    loadInFlightRef.current = true
     try {
       const response = await fetch('/api/jobs', { cache: 'no-store' })
       if (response.ok) {
@@ -279,6 +289,9 @@ function App() {
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
+    } finally {
+      setJobsLoading(false)
+      loadInFlightRef.current = false
     }
   }
 
@@ -296,6 +309,8 @@ function App() {
   }, [csrf])
 
   const loadComfy = async (forceLogs = false) => {
+    if (comfyLoadInFlightRef.current) return
+    comfyLoadInFlightRef.current = true
     try {
       const logQuery = comfyLogCleared && comfyLogOffset !== null
         ? `/api/comfy/logs?tail=400&since=${comfyLogOffset}`
@@ -313,6 +328,9 @@ function App() {
       setComfyError('')
     } catch {
       setComfyError('Unable to read ComfyUI status')
+    } finally {
+      setComfyLoading(false)
+      comfyLoadInFlightRef.current = false
     }
   }
 
@@ -348,9 +366,9 @@ function App() {
 
   const startRecording = async (target: 'lip_sync' | 'reference' = 'lip_sync') => {
     if (isRecording) return
-    setError('')
+    clearMainError('recording')
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setError('הדפדפן הזה לא תומך בהקלטה מהמיקרופון')
+      setMainError('recording', 'הדפדפן הזה לא תומך בהקלטה מהמיקרופון')
       return
     }
     let stream: MediaStream | null = null
@@ -382,7 +400,7 @@ function App() {
         setRecordingSeconds(seconds)
         if (shouldDiscard) return
         if (seconds < 0.5 || !chunks.length) {
-          setError('ההקלטה קצרה מדי. הקליטי לפחות חצי שנייה')
+          setMainError('recording', 'ההקלטה קצרה מדי. הקליטי לפחות חצי שנייה')
           return
         }
         const blob = new Blob(chunks, { type: baseMimeType })
@@ -394,11 +412,12 @@ function App() {
           setLipSyncAudio(file)
           setAudioTrimStart(0)
         }
-        setError('')
+        setMainError('recording')
+        feedback.notify('success', target === 'reference' ? 'Reference audio recording saved' : 'Lip-sync audio recording saved')
       }
       recorder.onerror = () => {
         discardRecordingRef.current = true
-        setError('ההקלטה נכשלה. בדקי שהמיקרופון זמין ונסי שוב')
+        setMainError('recording', 'ההקלטה נכשלה. בדקי שהמיקרופון זמין ונסי שוב')
         if (recorder.state !== 'inactive') recorder.stop()
       }
       recorder.start(250)
@@ -406,7 +425,7 @@ function App() {
       setIsRecording(true)
     } catch {
       stream?.getTracks().forEach(track => track.stop())
-      setError('אין גישה למיקרופון. אפשרי הרשאת מיקרופון בדפדפן ונסי שוב')
+      setMainError('recording', 'אין גישה למיקרופון. אפשרי הרשאת מיקרופון בדפדפן ונסי שוב')
     }
   }
 
@@ -620,7 +639,8 @@ function App() {
     try {
       const created = await mutate('/api/library/projects', 'POST', jsonBody({ name }))
       setLibraryProject(created.id); setLibraryFolder('all'); setDestinationProject(created.id); setDestinationFolder('')
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not create project') }
+      feedback.notify('success', `Project “${created.name || name}” created`)
+    } catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not create project') }
   }
 
   const createStudioFolder = async (projectId: string) => {
@@ -632,8 +652,8 @@ function App() {
       required: true,
     }))?.trim()
     if (!name) return
-    try { await mutate(`/api/library/projects/${projectId}/folders`, 'POST', jsonBody({ name })) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not create folder') }
+    try { await mutate(`/api/library/projects/${projectId}/folders`, 'POST', jsonBody({ name })); feedback.notify('success', `Folder “${name}” created`) }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not create folder') }
   }
 
   const renameStudioProject = async (project: LibraryProject) => {
@@ -645,8 +665,8 @@ function App() {
       required: true,
     }))?.trim()
     if (!name || name === project.name) return
-    try { await mutate(`/api/library/projects/${project.id}`, 'PATCH', jsonBody({ name })) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not rename project') }
+    try { await mutate(`/api/library/projects/${project.id}`, 'PATCH', jsonBody({ name })); feedback.notify('success', `Project renamed to “${name}”`) }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not rename project') }
   }
 
   const renameStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
@@ -658,8 +678,8 @@ function App() {
       required: true,
     }))?.trim()
     if (!name || name === folder.name) return
-    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'PATCH', jsonBody({ name })) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not rename folder') }
+    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'PATCH', jsonBody({ name })); feedback.notify('success', `Folder renamed to “${name}”`) }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not rename folder') }
   }
 
   const deleteStudioProject = async (project: LibraryProject) => {
@@ -669,8 +689,8 @@ function App() {
       confirmLabel: 'מחיקה',
       danger: true,
     })) return
-    try { await mutate(`/api/library/projects/${project.id}`, 'DELETE'); setLibraryProject('all'); setLibraryFolder('all') }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete project') }
+    try { await mutate(`/api/library/projects/${project.id}`, 'DELETE'); setLibraryProject('all'); setLibraryFolder('all'); feedback.notify('success', `Project “${project.name}” deleted`) }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not delete project') }
   }
 
   const deleteStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
@@ -680,14 +700,15 @@ function App() {
       confirmLabel: 'מחיקה',
       danger: true,
     })) return
-    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'DELETE'); setLibraryFolder('all') }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete folder') }
+    try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'DELETE'); setLibraryFolder('all'); feedback.notify('success', `Folder “${folder.name}” deleted`) }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not delete folder') }
   }
 
   const openAssetEditor = (type: 'job'|'sequence', id: string, label: string) => {
     // Release any active metadata/range request before Windows attempts to
     // move the selected MP4. The backend also retries short-lived locks.
     document.querySelectorAll('video').forEach(video => video.pause())
+    clearMainError('asset')
     const assignment = assignmentFor(type, id)
     setEditingAsset({ type, id, label })
     setEditProject(assignment?.project_id || '')
@@ -697,6 +718,7 @@ function App() {
 
   const saveAssetLocation = async () => {
     if (!editingAsset) return
+    clearMainError('asset')
     try {
       const original = assignmentFor(editingAsset.type, editingAsset.id)
       const currentBase = original?.filename?.replace(/\.mp4$/i, '') || ''
@@ -705,7 +727,8 @@ function App() {
         await mutate(`/api/library/assets/${editingAsset.type}/${editingAsset.id}/name`, 'PATCH', jsonBody({ name: editFilename.trim() }))
       }
       setEditingAsset(null)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Could not organize asset') }
+      feedback.notify('success', 'Asset location and name saved')
+    } catch (e) { setMainError('asset', e instanceof Error ? e.message : 'Could not organize asset') }
   }
 
   const deleteGeneratedAsset = async (type: 'job'|'sequence', id: string, label: string) => {
@@ -715,8 +738,8 @@ function App() {
       confirmLabel: 'מחיקה לצמיתות',
       danger: true,
     })) return
-    try { await mutate(type === 'job' ? `/api/jobs/${id}` : `/api/sequences/${id}`, 'DELETE') }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete asset') }
+    try { await mutate(type === 'job' ? `/api/jobs/${id}` : `/api/sequences/${id}`, 'DELETE'); feedback.notify('success', 'Asset deleted') }
+    catch (e) { setMainError('library', e instanceof Error ? e.message : 'Could not delete asset') }
   }
 
   const rerunJob = async (job: Job) => {
@@ -727,7 +750,7 @@ function App() {
       message: `לעבודה הזו יש ${assets.length} קבצי מקור. אישור יטען אותם מחדש; ביטול יטען רק את ההגדרות בלי הקבצים.`,
       confirmLabel: 'טען קבצים',
     })
-    setError('')
+    clearMainError('generation')
     setRerunLoading(job.id)
     try {
       const loadedAssets = reuseAssets
@@ -785,8 +808,9 @@ function App() {
         setClosingFrame(files.get('last_frame') || null)
       }
       window.scrollTo({ top: 0, behavior: 'smooth' })
+      feedback.notify('success', reuseAssets ? 'Generation settings and source assets loaded into the form' : 'Generation settings loaded into the form')
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'לא ניתן לטעון מחדש את קבצי המקור')
+      setMainError('generation', e instanceof Error ? e.message : 'לא ניתן לטעון מחדש את קבצי המקור')
     } finally {
       setRerunLoading(null)
     }
@@ -797,7 +821,7 @@ function App() {
     setPage('studio')
     setSeedEnabled(true)
     setSeedInput(job.seed)
-    setError('')
+    clearMainError('generation')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -813,8 +837,10 @@ function App() {
       if (!response.ok) throw new Error(data.detail || 'ComfyUI action failed')
       setComfyRunning(Boolean(data.running))
       await loadComfy()
+      feedback.notify('success', `ComfyUI ${action === 'start' ? 'started' : 'stopped'}`)
     } catch (e) {
       setComfyError(e instanceof Error ? e.message : 'ComfyUI action failed')
+      feedback.notify('error', e instanceof Error ? e.message : 'ComfyUI action failed')
     } finally {
       setComfyBusy(false)
     }
@@ -836,8 +862,10 @@ function App() {
       if (!response.ok) throw new Error(data.detail || 'Fortnite could not be closed')
       setGpuConflict(Boolean(data.gpu_conflict))
       await load()
+      feedback.notify('success', 'Fortnite closed and GPU status refreshed')
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Fortnite could not be closed')
+      setMainError('system', e instanceof Error ? e.message : 'Fortnite could not be closed')
+      feedback.notify('error', e instanceof Error ? e.message : 'Fortnite could not be closed')
     } finally { setGpuBusy(false) }
   }
 
@@ -853,17 +881,18 @@ function App() {
       const response = await fetch('/api/system/lock', { method: 'POST', headers: { 'X-CSRF-Token': sessionToken } })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.detail || 'The PC could not be locked')
-    } catch (e) { setError(e instanceof Error ? e.message : 'The PC could not be locked') }
+      feedback.notify('success', 'Windows lock command sent')
+    } catch (e) { setMainError('system', e instanceof Error ? e.message : 'The PC could not be locked'); feedback.notify('error', e instanceof Error ? e.message : 'The PC could not be locked') }
   }
 
   const selectMode = (next: Mode) => {
     if (next === 'lip_sync' && !audioLockReady) {
-      setError('מצב דיבוב עדיין לא מוכן. הפעילי מחדש את ComfyUI אחרי התקנת Native AudioLock')
+      setMainError('generation', 'מצב דיבוב עדיין לא מוכן. הפעילי מחדש את ComfyUI אחרי התקנת Native AudioLock')
       return
     }
     if (next !== 'lip_sync' && isRecording) cancelRecording()
     setMode(next)
-    setError('')
+    clearMainError('generation')
     if (next !== 'text') setConnected(false)
     if (next !== 'lip_sync') setLipSyncAudio(null)
     if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null) }
@@ -922,19 +951,19 @@ function App() {
   }
 
   const submit = async (confirmed = false) => {
-    setError('')
-    if (!prompt.trim() && mode !== 'lip_sync') return setError('צריך לכתוב פרומפט')
-    if (mode === 'frames' && !openingFrame) return setError('צריך לצרף פריים פותח')
-    if (mode === 'lip_sync' && !audioLockReady) return setError('Native AudioLock עדיין לא נטען ב־ComfyUI')
-    if (mode === 'lip_sync' && !lipSyncAudio) return setError('צריך לצרף אודיו לדיבוב')
-    if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setError('צריך לצרף לפחות תמונת או סרטון רפרנס')
-    if (seedEnabled && !seedInput.trim()) return setError('יש להזין מספר Seed או לבטל את הסימון')
-    if (batch && paragraphCount > 20) return setError('אפשר להוסיף עד 20 פרומפטים יחד')
-    if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setError('רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
-    if (effectiveEncoder === 'clipproj' && !clipprojReady) return setError('ClipProj עדיין לא מוכן להפעלה')
+    clearMainError('generation')
+    if (!prompt.trim() && mode !== 'lip_sync') return setMainError('generation', 'צריך לכתוב פרומפט')
+    if (mode === 'frames' && !openingFrame) return setMainError('generation', 'צריך לצרף פריים פותח')
+    if (mode === 'lip_sync' && !audioLockReady) return setMainError('generation', 'Native AudioLock עדיין לא נטען ב־ComfyUI')
+    if (mode === 'lip_sync' && !lipSyncAudio) return setMainError('generation', 'צריך לצרף אודיו לדיבוב')
+    if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setMainError('generation', 'צריך לצרף לפחות תמונת או סרטון רפרנס')
+    if (seedEnabled && !seedInput.trim()) return setMainError('generation', 'יש להזין מספר Seed או לבטל את הסימון')
+    if (batch && paragraphCount > 20) return setMainError('generation', 'אפשר להוסיף עד 20 פרומפטים יחד')
+    if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setMainError('generation', 'רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
+    if (effectiveEncoder === 'clipproj' && !clipprojReady) return setMainError('generation', 'ClipProj עדיין לא מוכן להפעלה')
     if (!confirmed && needsConfirmation) { setConfirming(true); return }
     const sessionToken = csrf || await loadSession()
-    if (!sessionToken) return setError('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
+    if (!sessionToken) return setMainError('generation', 'החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
     const form = new FormData()
     const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
     form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
@@ -958,7 +987,8 @@ function App() {
     try {
       await mutate('/api/jobs', 'POST', form, sessionToken)
       setPrompt(''); setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false); setAudioTrimStart(0)
-    } catch (e) { setError(e instanceof Error ? e.message : 'השליחה נכשלה') }
+      feedback.notify('success', 'Generation added to the queue')
+    } catch (e) { setMainError('generation', e instanceof Error ? e.message : 'השליחה נכשלה'); feedback.notify('error', e instanceof Error ? e.message : 'השליחה נכשלה') }
     finally { setSending(false) }
   }
 
@@ -966,7 +996,7 @@ function App() {
     const ids = queued.map(j => j.id); const index = ids.indexOf(id); const next = index + delta
     if (next < 0 || next >= ids.length) return
     ;[ids[index], ids[next]] = [ids[next], ids[index]]
-    try { await mutate('/api/queue/order', 'PATCH', new Blob([JSON.stringify({ ids })], { type: 'application/json' })) } catch (e) { setError(String(e)) }
+    try { await mutate('/api/queue/order', 'PATCH', new Blob([JSON.stringify({ ids })], { type: 'application/json' })); feedback.notify('success', 'Queue order saved') } catch (e) { setMainError('queue', String(e)) }
   }
 
   const toggleResult = (reference: string) => {
@@ -986,8 +1016,8 @@ function App() {
   }
 
   const joinSelected = async () => {
-    setError('')
-    if (selectedResults.length < 2) return setError('צריך לבחור לפחות שני סרטונים לחיבור')
+    clearMainError('queue')
+    if (selectedResults.length < 2) return setMainError('queue', 'צריך לבחור לפחות שני סרטונים לחיבור')
     if (joining) return
     setJoining(true)
     try {
@@ -995,7 +1025,7 @@ function App() {
       if (!sessionToken) throw new Error('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
       await mutate('/api/sequences/join', 'POST', new Blob([JSON.stringify({ ids: selectedResults })], { type: 'application/json' }), sessionToken)
       setSelectedResults([])
-    } catch (e) { setError(e instanceof Error ? e.message : 'החיבור נכשל') }
+    } catch (e) { setMainError('queue', e instanceof Error ? e.message : 'החיבור נכשל'); feedback.notify('error', e instanceof Error ? e.message : 'החיבור נכשל') }
     finally { setJoining(false) }
   }
 
@@ -1031,11 +1061,11 @@ function App() {
     const assets = selectedBulkAssets()
     if (!assets.length || bulkBusy) return
     if (bulkHasUnmovableSelection) {
-      setError('העברה לתיקייה אפשרית רק לנכסים שהסתיימו בהצלחה. אפשר למחוק את הכשלים והביטולים בבחירה המרובה.')
+      setMainError('library', 'העברה לתיקייה אפשרית רק לנכסים שהסתיימו בהצלחה. אפשר למחוק את הכשלים והביטולים בבחירה המרובה.')
       return
     }
     setBulkBusy(true)
-    setError('')
+    clearMainError('library')
     try {
       document.querySelectorAll('video').forEach(video => video.pause())
       for (const asset of assets) {
@@ -1046,8 +1076,9 @@ function App() {
       }
       await load()
       setBulkSelected([])
+      feedback.notify('success', `${assets.length} assets moved successfully`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'העברת הנכסים נכשלה')
+      setMainError('library', e instanceof Error ? e.message : 'העברת הנכסים נכשלה'); feedback.notify('error', e instanceof Error ? e.message : 'העברת הנכסים נכשלה')
     } finally { setBulkBusy(false) }
   }
 
@@ -1061,7 +1092,7 @@ function App() {
       danger: true,
     })) return
     setBulkBusy(true)
-    setError('')
+    clearMainError('library')
     try {
       document.querySelectorAll('video').forEach(video => video.pause())
       for (const asset of assets) {
@@ -1069,8 +1100,9 @@ function App() {
       }
       await load()
       setBulkSelected([])
+      feedback.notify('success', `${assets.length} assets deleted`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'מחיקת הנכסים נכשלה')
+      setMainError('library', e instanceof Error ? e.message : 'מחיקת הנכסים נכשלה'); feedback.notify('error', e instanceof Error ? e.message : 'מחיקת הנכסים נכשלה')
     } finally { setBulkBusy(false) }
   }
 
@@ -1127,7 +1159,7 @@ function App() {
       <div className="brand-mark"><Clapperboard size={22} /></div>
       <div><h1>H3 Studio</h1><p>יוצרים וידאו מהמחשב שלך</p></div>
       <div className="topbar-actions">
-        <button className={`comfy-status-button ${comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
+        <button className={`comfy-status-button ${comfyLoading ? 'checking' : comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyLoading ? 'Checking ComfyUI…' : comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
         <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
@@ -1135,16 +1167,21 @@ function App() {
     </header>
     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
+    <MainSectionError message={mainErrors.system} onDismiss={() => clearMainError('system')} />
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
+    {jobsLoading && <div className="app-loading-strip" role="status" aria-live="polite"><LoaderCircle className="spin" size={14} /> Loading generation history and asset library…</div>}
 
     <section className="asset-library-panel">
       <div className="asset-library-head"><div><span className="eyebrow"><Folder size={15}/> Asset library</span><h2>Projects and folders</h2><small dir="ltr">{library.root || 'state/projects'}</small></div><button type="button" onClick={() => { void createStudioProject() }}><FolderPlus size={16}/> New project</button></div>
+      <MainSectionError message={mainErrors.library} onDismiss={() => clearMainError('library')} />
       <div className="asset-library-toolbar"><label><span>Show assets</span><select value={libraryProject} onChange={event => { setLibraryProject(event.target.value); setLibraryFolder('all'); setBulkSelected([]) }}><option value="all">All assets</option><option value="unassigned">Unassigned</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name} ({project.asset_count})</option>)}</select></label>{!['all','unassigned'].includes(libraryProject) && <label><span>Folder</span><select value={libraryFolder} onChange={event => { setLibraryFolder(event.target.value); setBulkSelected([]) }}><option value="all">All folders</option><option value="root">Project root</option>{library.projects.find(project => project.id === libraryProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}</div>
       {!['all','unassigned'].includes(libraryProject) && (() => { const project=library.projects.find(item=>item.id===libraryProject); return project ? <div className="asset-project-detail"><div className="asset-project-title"><div className="asset-project-label"><b>{project.name}</b><span>{project.asset_count} assets</span></div><div className="asset-project-actions"><button onClick={() => { void createStudioFolder(project.id) }}><FolderPlus size={14}/> Folder</button><button onClick={() => { void renameStudioProject(project) }}><Pencil size={13}/> Rename</button><button className="danger" onClick={() => { void deleteStudioProject(project) }}><Trash2 size={13}/></button></div></div><div className="asset-folder-list">{project.folders.map(folder => <div key={folder.id}><div className="asset-folder-name"><Folder size={14}/><span>{folder.name}</span></div><div className="asset-folder-actions"><button onClick={() => { void renameStudioFolder(project,folder) }}><Pencil size={12}/></button><button onClick={() => { void deleteStudioFolder(project,folder) }}><Trash2 size={12}/></button></div></div>)}{!project.folders.length && <small>No folders yet. Assets can still be stored in the project root.</small>}</div></div> : null })()}
     </section>
 
     <section className="composer">
       <div className="eyebrow"><Sparkles size={15} /> יצירה חדשה</div>
+      <MainSectionError message={mainErrors.generation} onDismiss={() => clearMainError('generation')} />
+      <MainSectionError message={mainErrors.recording} onDismiss={() => clearMainError('recording')} />
       <div className="generation-destination"><Folder size={16}/><label><span>Save new results in project</span><select value={destinationProject} onChange={event => { setDestinationProject(event.target.value); setDestinationFolder('') }}><option value="">Unassigned · ComfyUI output</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>Folder</span><select value={destinationFolder} disabled={!destinationProject} onChange={event => setDestinationFolder(event.target.value)}><option value="">Project root</option>{library.projects.find(project => project.id === destinationProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>{destinationProject && <button type="button" onClick={() => { void createStudioFolder(destinationProject) }}><FolderPlus size={15}/> New folder</button>}</div>
       <textarea value={prompt} onChange={e => setPrompt(e.target.value)} maxLength={batch ? 80000 : 4000}
         placeholder={batch ? 'הדבק כמה פרומפטים. השאר שורה ריקה בין כל אחד…' : mode === 'lip_sync' ? 'אופציונלי: תאר את ההופעה, המצלמה וההבעה…' : 'תאר את הסרטון שאתה רוצה ליצור…'} />
@@ -1294,11 +1331,11 @@ function App() {
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
       {mode === 'reference' && referenceReady && !reference10Ready && <p className="quiet-warning">רפרנס מעל 5 שניות ייפתח רק אחרי בדיקת עומס מוצלחת.</p>}
-      {error && <div className="error-banner">{error}</div>}
     </section>
 
     <section className="queue-section">
       <div className="section-heading"><div><span>התור שלך</span><h2>{active.length || activeSequences.length ? 'היצירה בתנועה' : queued.length || queuedSequences.length ? 'ממתין ליצירה' : 'הכול שקט כרגע'}</h2></div><span className="queue-count">{active.length + queued.length + activeSequences.length + queuedSequences.length}</span></div>
+      <MainSectionError message={mainErrors.queue} onDismiss={() => clearMainError('queue')} />
       {!active.length && !queued.length && !activeSequences.length && !queuedSequences.length && <div className="empty"><div><Play size={22} /></div><p>הסרטון הבא שלך מתחיל בפרומפט למעלה</p></div>}
       <div className="queue-cards-grid">
         {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
@@ -1311,6 +1348,7 @@ function App() {
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
       <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
+      <MainSectionError message={mainErrors.library} onDismiss={() => clearMainError('library')} />
       {!!selectedResults.length && <div className="join-dock">
         <div className="join-dock-head"><div><Combine size={18} /><span><strong>{selectedResults.length} קטעים נבחרו</strong><small>זה יהיה סדר החיבור</small></span></div><button type="button" onClick={() => setSelectedResults([])}>נקה</button></div>
         <div className="join-order">{selectedResults.map((reference, index) => <div className="join-chip" key={reference}><b>{index + 1}</b><span>{selectedResultLabel(reference)}</span><button type="button" onClick={() => moveSelectedResult(index, -1)} disabled={index === 0}><ArrowUp size={14} /></button><button type="button" onClick={() => moveSelectedResult(index, 1)} disabled={index === selectedResults.length - 1}><ArrowDown size={14} /></button><button type="button" onClick={() => toggleResult(reference)}><X size={14} /></button></div>)}</div>
@@ -1366,10 +1404,18 @@ function App() {
         </div>
       </section>
     </div>}
-    {editingAsset && <div className="dialog-backdrop asset-dialog-backdrop" onMouseDown={() => setEditingAsset(null)}><section className="asset-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-dialog-title" onMouseDown={event => event.stopPropagation()}><div className="asset-dialog-head"><div><span>ארגון קובץ</span><h2 id="asset-dialog-title">העברה או שינוי שם</h2></div><button onClick={() => setEditingAsset(null)} aria-label="סגירה"><X size={17}/></button></div><p>{editingAsset.label}</p><label><span>פרויקט</span><select value={editProject} onChange={event => { setEditProject(event.target.value); setEditFolder('') }}><option value="">ללא פרויקט · חזרה לפלט של ComfyUI</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>תיקייה</span><select value={editFolder} disabled={!editProject} onChange={event => setEditFolder(event.target.value)}><option value="">שורש הפרויקט</option>{library.projects.find(project => project.id === editProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><label><span>שם הקובץ</span><div className="asset-filename"><input value={editFilename} disabled={!editProject} onChange={event => setEditFilename(event.target.value)} placeholder="השארת שם הקובץ הנוכחי"/><b>.mp4</b></div></label><small>העברה או שינוי שם כאן משנים את הקובץ בפועל ושומרים על הקישור ב־Studio.</small><div className="asset-dialog-actions"><button onClick={() => setEditingAsset(null)}>ביטול</button><button className="confirm" onClick={() => { void saveAssetLocation() }}><Move size={15}/> שמירת שינויים</button></div></section></div>}
+    {editingAsset && <div className="dialog-backdrop asset-dialog-backdrop" onMouseDown={() => setEditingAsset(null)}><section className="asset-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-dialog-title" onMouseDown={event => event.stopPropagation()}><MainSectionError message={mainErrors.asset} className="asset-modal-error" onDismiss={() => clearMainError('asset')} /><div className="asset-dialog-head"><div><span>ארגון קובץ</span><h2 id="asset-dialog-title">העברה או שינוי שם</h2></div><button onClick={() => setEditingAsset(null)} aria-label="סגירה"><X size={17}/></button></div><p>{editingAsset.label}</p><label><span>פרויקט</span><select value={editProject} onChange={event => { setEditProject(event.target.value); setEditFolder('') }}><option value="">ללא פרויקט · חזרה לפלט של ComfyUI</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>תיקייה</span><select value={editFolder} disabled={!editProject} onChange={event => setEditFolder(event.target.value)}><option value="">שורש הפרויקט</option>{library.projects.find(project => project.id === editProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><label><span>שם הקובץ</span><div className="asset-filename"><input value={editFilename} disabled={!editProject} onChange={event => setEditFilename(event.target.value)} placeholder="השארת שם הקובץ הנוכחי"/><b>.mp4</b></div></label><small>העברה או שינוי שם כאן משנים את הקובץ בפועל ושומרים על הקישור ב־Studio.</small><div className="asset-dialog-actions"><button onClick={() => setEditingAsset(null)}>ביטול</button><button className="confirm" onClick={() => { void saveAssetLocation() }}><Move size={15}/> שמירת שינויים</button></div></section></div>}
     </>}
+    <FeedbackToast feedback={feedback.feedback} onDismiss={feedback.dismiss} />
     <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
   </main>
+}
+
+type MainErrorScope = 'recording' | 'library' | 'asset' | 'settings' | 'system' | 'generation' | 'queue'
+
+function MainSectionError({ message, onDismiss, className = '' }: { message?: string; onDismiss: () => void; className?: string }) {
+  if (!message) return null
+  return <div className={`error-banner section-error ${className}`} role="alert"><span>{message}</span><button type="button" onClick={onDismiss} aria-label="Dismiss error"><X size={14} /></button></div>
 }
 
 function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
@@ -1415,7 +1461,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
     {job.video_url && <video src={job.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
-      {assignment && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment.project_name}{assignment.folder_name ? ` / ${assignment.folder_name}` : ''}</span><b>{assignment.filename}</b></div>}
+      {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
       <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>

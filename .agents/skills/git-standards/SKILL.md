@@ -1,3 +1,8 @@
+---
+name: git-standards
+description: Git conventions for branches, commits, pull requests, tags, and history maintenance.
+---
+
 # Git standards
 
 ## Trigger

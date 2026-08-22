@@ -1,3 +1,8 @@
+---
+name: h3-environment-bootstrap
+description: Windows setup and runtime separation rules for the H3 bridge, ComfyUI, models, state, and Tailscale.
+---
+
 # H3 environment bootstrap
 
 ## Trigger

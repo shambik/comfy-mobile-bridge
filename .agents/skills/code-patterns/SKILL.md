@@ -1,3 +1,8 @@
+---
+name: code-patterns
+description: Repository patterns for safe helpers, configuration, process lifecycle, tests, and security checks.
+---
+
 # Code patterns
 
 ## Trigger
@@ -19,6 +24,8 @@ field, process lifecycle code, test, or security check.
   text.
 - For SQLite: use existing connection helpers and never delete or recreate the
   database during an update.
+- For retries: classify transport, handoff/schema, and user-visible quality
+  failures separately; use bounded retries and stop on a repeated signature.
 
 ## Security
 

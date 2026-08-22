@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,8 @@ import backend.db as db_module
 import backend.library as library
 from backend.db import connect, now_iso
 from backend.main import app
+from backend.production_db import (add_artifact, create_production, create_shot_attempt,
+                                   init_production_db, replace_shot_plan, update_shot_attempt)
 
 
 class AssetLibraryTests(unittest.TestCase):
@@ -27,6 +30,7 @@ class AssetLibraryTests(unittest.TestCase):
         for item in self.patches:
             item.start()
         db_module.init_db()
+        init_production_db()
         library.init_library_db()
 
     def tearDown(self):
@@ -117,6 +121,58 @@ class AssetLibraryTests(unittest.TestCase):
         expected = self.projects / "New Project" / "New Folder" / "clip.mp4"
         self.assertTrue(expected.is_file())
         self.assertEqual(self.source_path("job-rename").resolve(), expected.resolve())
+
+    def test_move_updates_production_paths_and_stable_asset_resolution(self):
+        project = library.create_project("Production Project")
+        folder = library.create_folder(project["id"], "Accepted")
+        original = self.add_job("production-job", "production-shot.mp4")
+        production = create_production({
+            "title": "Path synchronization",
+            "participation_mode": "autonomous",
+            "continuity_mode": "sequential",
+            "lyrics": "",
+            "song_path": str(self.root / "song.mp3"),
+            "song_name": "song.mp3",
+            "codex_model": "codex-test",
+            "codex_effort": "medium",
+            "agy_model": "agy-test",
+            "agy_effort": "high",
+        })
+        shot = replace_shot_plan(production["id"], [{
+            "title": "Shot 1", "prompt": "A test shot", "mode": "opening",
+            "duration": 5, "megapixels": .7, "aspect_ratio": "16:9",
+            "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])[0]
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(
+            attempt["id"], job_id="production-job", status="accepted",
+            output_path=str(original), frames=[str(original)],
+        )
+        artifact = add_artifact(production["id"], "shot_output", str(original))
+
+        library.assign_asset("job", "production-job", project["id"], folder["id"])
+        moved = self.projects / "Production Project" / "Accepted" / "production-shot.mp4"
+        self.assertTrue(moved.is_file())
+
+        with connect() as db:
+            attempt_row = db.execute(
+                "SELECT output_path,frames_json FROM production_shot_attempts WHERE id=?",
+                (attempt["id"],),
+            ).fetchone()
+            artifact_row = db.execute(
+                "SELECT path FROM production_artifacts WHERE id=?", (artifact["id"],)
+            ).fetchone()
+        self.assertEqual(Path(attempt_row["output_path"]).resolve(), moved.resolve())
+        self.assertEqual(Path(json.loads(attempt_row["frames_json"])[0]).resolve(), moved.resolve())
+        self.assertEqual(Path(artifact_row["path"]).resolve(), moved.resolve())
+
+        # Simulate a legacy row that still contains the old Comfy path. The
+        # stable-ID resolver must use the assignment and repair it on demand.
+        with connect() as db:
+            db.execute("UPDATE jobs SET output_path=? WHERE id=?", (str(original), "production-job"))
+        resolved = library.resolve_asset_path("job", "production-job")
+        self.assertEqual(resolved.resolve(), moved.resolve())
+        self.assertEqual(self.source_path("production-job").resolve(), moved.resolve())
 
     def test_invalid_names_and_nonempty_deletion_are_rejected(self):
         with self.assertRaises(ValueError):

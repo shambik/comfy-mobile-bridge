@@ -1,3 +1,8 @@
+---
+name: release-process
+description: Release conventions for versions, changelogs, tags, and Release Please automation.
+---
+
 # Release process
 
 ## Trigger
