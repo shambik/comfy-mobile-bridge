@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
+import { AppModal, useAppModal } from './app-modal'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
 type Engine = 'turbo' | 'standard' | 'spectrum'
@@ -173,6 +174,7 @@ function ComfyPage({ running, busy, lines, error, onRefresh, onClear }: ComfyPag
 }
 
 function App() {
+  const appModal = useAppModal()
   const [page, setPage] = useState<Page>('studio')
   const [csrf, setCsrf] = useState('')
   const [jobs, setJobs] = useState<Job[]>([])
@@ -221,6 +223,13 @@ function App() {
   const [noAudio, setNoAudio] = useState(false)
   const [selectedResults, setSelectedResults] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
+  const [bulkMode, setBulkMode] = useState(false)
+  const [bulkSelected, setBulkSelected] = useState<string[]>([])
+  const [bulkSourceProject, setBulkSourceProject] = useState('')
+  const [bulkSourceFolder, setBulkSourceFolder] = useState('')
+  const [bulkProject, setBulkProject] = useState('')
+  const [bulkFolder, setBulkFolder] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [comfyRunning, setComfyRunning] = useState(false)
   const [comfyBusy, setComfyBusy] = useState(false)
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
@@ -546,6 +555,21 @@ function App() {
     ...visibleHistory.map(job => ({ kind: 'job' as const, id: job.id, created_at: job.created_at, job })),
     ...visibleSequenceHistory.map(sequence => ({ kind: 'sequence' as const, id: sequence.id, created_at: sequence.created_at, sequence })),
   ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  // Bulk delete also needs to cover failed and canceled history entries. Only
+  // completed entries have a generated file that can be moved to a folder.
+  const bulkCandidates = visibleResultAssets.filter(asset => {
+    if (!bulkSourceProject) return false
+    if (bulkSourceProject === 'all') return true
+    const assignment = assignmentFor(asset.kind, asset.id)
+    if (bulkSourceProject === 'unassigned') return !assignment
+    if (assignment?.project_id !== bulkSourceProject) return false
+    if (!bulkSourceFolder || bulkSourceFolder === 'all') return true
+    return bulkSourceFolder === 'root' ? !assignment.folder_id : assignment.folder_id === bulkSourceFolder
+  })
+  const bulkVisibleKeys = bulkCandidates.map(asset => `${asset.kind}:${asset.id}`)
+  const bulkMovableKeys = visibleResultAssets.filter(asset => asset.kind === 'job' ? asset.job.status === 'completed' : asset.sequence.status === 'completed').map(asset => `${asset.kind}:${asset.id}`)
+  const bulkHasUnmovableSelection = bulkSelected.some(key => !bulkMovableKeys.includes(key))
+  const allBulkVisibleSelected = bulkVisibleKeys.length > 0 && bulkVisibleKeys.every(key => bulkSelected.includes(key))
   const queuedTasks = [
     ...queued.map(job => ({ kind: 'job' as const, position: job.position || Number.MAX_SAFE_INTEGER, job })),
     ...queuedSequences.map(sequence => ({ kind: 'sequence' as const, position: sequence.position, sequence })),
@@ -564,10 +588,34 @@ function App() {
     return data
   }
 
+  const bulkMutation = async (url: string, method = 'POST', body?: unknown) => {
+    const sessionToken = csrf || await loadSession()
+    if (!sessionToken) throw new Error('החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
+    const response = await fetch(url, {
+      method,
+      headers: { 'X-CSRF-Token': sessionToken, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const raw = await response.text()
+    let data: Record<string, any> = {}
+    try { data = raw ? JSON.parse(raw) : {} } catch { /* preserve the raw response below */ }
+    if (!response.ok) {
+      const detail = typeof data.detail === 'string' ? data.detail : raw.trim() || `HTTP ${response.status}`
+      throw new Error(detail)
+    }
+    return data
+  }
+
   const jsonBody = (value: unknown) => new Blob([JSON.stringify(value)], { type: 'application/json' })
 
   const createStudioProject = async () => {
-    const name = window.prompt('Project name — this exact name will be used for its Windows folder:')?.trim()
+    const name = (await appModal.askPrompt({
+      title: 'יצירת פרויקט חדש',
+      message: 'השם הזה ישמש גם כשם התיקייה ב־Windows.',
+      placeholder: 'שם הפרויקט',
+      confirmLabel: 'יצירה',
+      required: true,
+    }))?.trim()
     if (!name) return
     try {
       const created = await mutate('/api/library/projects', 'POST', jsonBody({ name }))
@@ -576,39 +624,70 @@ function App() {
   }
 
   const createStudioFolder = async (projectId: string) => {
-    const name = window.prompt('Folder name — this exact name will be used on disk:')?.trim()
+    const name = (await appModal.askPrompt({
+      title: 'יצירת תיקייה',
+      message: 'השם הזה ישמש גם כשם התיקייה בדיסק.',
+      placeholder: 'שם התיקייה',
+      confirmLabel: 'יצירה',
+      required: true,
+    }))?.trim()
     if (!name) return
     try { await mutate(`/api/library/projects/${projectId}/folders`, 'POST', jsonBody({ name })) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not create folder') }
   }
 
   const renameStudioProject = async (project: LibraryProject) => {
-    const name = window.prompt('Rename project and its filesystem folder:', project.name)?.trim()
+    const name = (await appModal.askPrompt({
+      title: 'שינוי שם פרויקט',
+      message: 'שינוי השם יעדכן גם את תיקיית הפרויקט בדיסק.',
+      defaultValue: project.name,
+      confirmLabel: 'שמירת שם',
+      required: true,
+    }))?.trim()
     if (!name || name === project.name) return
     try { await mutate(`/api/library/projects/${project.id}`, 'PATCH', jsonBody({ name })) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not rename project') }
   }
 
   const renameStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
-    const name = window.prompt('Rename folder on disk:', folder.name)?.trim()
+    const name = (await appModal.askPrompt({
+      title: 'שינוי שם תיקייה',
+      message: 'שינוי השם יעדכן את התיקייה בדיסק.',
+      defaultValue: folder.name,
+      confirmLabel: 'שמירת שם',
+      required: true,
+    }))?.trim()
     if (!name || name === folder.name) return
     try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'PATCH', jsonBody({ name })) }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not rename folder') }
   }
 
   const deleteStudioProject = async (project: LibraryProject) => {
-    if (!window.confirm(`Delete the empty project “${project.name}” and its filesystem folder?`)) return
+    if (!await appModal.askConfirm({
+      title: 'מחיקת פרויקט ריק',
+      message: `למחוק את הפרויקט הריק „${project.name}” ואת תיקייתו בדיסק?`,
+      confirmLabel: 'מחיקה',
+      danger: true,
+    })) return
     try { await mutate(`/api/library/projects/${project.id}`, 'DELETE'); setLibraryProject('all'); setLibraryFolder('all') }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not delete project') }
   }
 
   const deleteStudioFolder = async (project: LibraryProject, folder: LibraryFolder) => {
-    if (!window.confirm(`Delete the empty folder “${folder.name}” from project “${project.name}”?`)) return
+    if (!await appModal.askConfirm({
+      title: 'מחיקת תיקייה ריקה',
+      message: `למחוק את התיקייה „${folder.name}” מהפרויקט „${project.name}”?`,
+      confirmLabel: 'מחיקה',
+      danger: true,
+    })) return
     try { await mutate(`/api/library/projects/${project.id}/folders/${folder.id}`, 'DELETE'); setLibraryFolder('all') }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not delete folder') }
   }
 
   const openAssetEditor = (type: 'job'|'sequence', id: string, label: string) => {
+    // Release any active metadata/range request before Windows attempts to
+    // move the selected MP4. The backend also retries short-lived locks.
+    document.querySelectorAll('video').forEach(video => video.pause())
     const assignment = assignmentFor(type, id)
     setEditingAsset({ type, id, label })
     setEditProject(assignment?.project_id || '')
@@ -630,7 +709,12 @@ function App() {
   }
 
   const deleteGeneratedAsset = async (type: 'job'|'sequence', id: string, label: string) => {
-    if (!window.confirm(`Delete “${label}”? This permanently deletes the actual video file from disk.`)) return
+    if (!await appModal.askConfirm({
+      title: 'מחיקת נכס',
+      message: `למחוק את „${label}”? פעולה זו מוחקת לצמיתות גם את קובץ הווידאו מהדיסק.`,
+      confirmLabel: 'מחיקה לצמיתות',
+      danger: true,
+    })) return
     try { await mutate(type === 'job' ? `/api/jobs/${id}` : `/api/sequences/${id}`, 'DELETE') }
     catch (e) { setError(e instanceof Error ? e.message : 'Could not delete asset') }
   }
@@ -638,9 +722,11 @@ function App() {
   const rerunJob = async (job: Job) => {
     if (rerunLoading || !['completed', 'failed'].includes(job.status)) return
     const assets = job.source_assets || []
-    const reuseAssets = assets.length > 0 && window.confirm(
-      `לעבודה הזו יש ${assets.length} קבצי מקור.\n\nאישור: לטעון אותם מחדש.\nביטול: לטעון רק את ההגדרות, בלי הקבצים.`
-    )
+    const reuseAssets = assets.length > 0 && await appModal.askConfirm({
+      title: 'טעינת קבצי המקור מחדש',
+      message: `לעבודה הזו יש ${assets.length} קבצי מקור. אישור יטען אותם מחדש; ביטול יטען רק את ההגדרות בלי הקבצים.`,
+      confirmLabel: 'טען קבצים',
+    })
     setError('')
     setRerunLoading(job.id)
     try {
@@ -735,7 +821,12 @@ function App() {
   }
 
   const closeFortnite = async () => {
-    if (gpuBusy || !window.confirm('Close Fortnite to free the GPU for ComfyUI?')) return
+    if (gpuBusy || !await appModal.askConfirm({
+      title: 'סגירת Fortnite',
+      message: 'לסגור את Fortnite כדי לפנות את ה־GPU ל־ComfyUI?',
+      confirmLabel: 'סגור Fortnite',
+      danger: true,
+    })) return
     setGpuBusy(true)
     try {
       const sessionToken = csrf || await loadSession()
@@ -751,7 +842,11 @@ function App() {
   }
 
   const lockComputer = async () => {
-    if (!window.confirm('Lock this Windows PC now?')) return
+    if (!await appModal.askConfirm({
+      title: 'נעילת המחשב',
+      message: 'לנעול עכשיו את מחשב ה־Windows?',
+      confirmLabel: 'נעל מחשב',
+    })) return
     try {
       const sessionToken = csrf || await loadSession()
       if (!sessionToken) throw new Error('The server session is not ready')
@@ -904,6 +999,81 @@ function App() {
     finally { setJoining(false) }
   }
 
+  const toggleBulkMode = () => {
+    if (bulkMode) {
+      setBulkMode(false)
+      setBulkSelected([])
+    } else {
+      setBulkSourceProject(libraryProject === 'all' ? '' : libraryProject)
+      setBulkSourceFolder(!['all', 'unassigned'].includes(libraryProject) && libraryFolder !== 'all' ? libraryFolder : '')
+      setBulkMode(true)
+    }
+  }
+
+  const toggleBulkAsset = (reference: string) => {
+    setBulkSelected(current => current.includes(reference)
+      ? current.filter(item => item !== reference)
+      : [...current, reference])
+  }
+
+  const selectAllBulkVisible = () => {
+    setBulkSelected(current => allBulkVisibleSelected
+      ? current.filter(item => !bulkVisibleKeys.includes(item))
+      : [...new Set([...current, ...bulkVisibleKeys])])
+  }
+
+  const selectedBulkAssets = () => bulkSelected.map(reference => {
+    const [source_type, source_id] = reference.split(':', 2)
+    return { source_type: source_type as 'job'|'sequence', source_id }
+  })
+
+  const moveBulkAssets = async () => {
+    const assets = selectedBulkAssets()
+    if (!assets.length || bulkBusy) return
+    if (bulkHasUnmovableSelection) {
+      setError('העברה לתיקייה אפשרית רק לנכסים שהסתיימו בהצלחה. אפשר למחוק את הכשלים והביטולים בבחירה המרובה.')
+      return
+    }
+    setBulkBusy(true)
+    setError('')
+    try {
+      document.querySelectorAll('video').forEach(video => video.pause())
+      for (const asset of assets) {
+        await bulkMutation(`/api/library/assets/${asset.source_type}/${asset.source_id}/location`, 'PATCH', {
+          project_id: bulkProject || null,
+          folder_id: bulkProject ? bulkFolder || null : null,
+        })
+      }
+      await load()
+      setBulkSelected([])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'העברת הנכסים נכשלה')
+    } finally { setBulkBusy(false) }
+  }
+
+  const deleteBulkAssets = async () => {
+    const assets = selectedBulkAssets()
+    if (!assets.length || bulkBusy) return
+    if (!await appModal.askConfirm({
+      title: 'מחיקת נכסים מרובים',
+      message: `למחוק לצמיתות ${assets.length} נכסים ואת קבצי הווידאו שלהם?`,
+      confirmLabel: 'מחיקה לצמיתות',
+      danger: true,
+    })) return
+    setBulkBusy(true)
+    setError('')
+    try {
+      document.querySelectorAll('video').forEach(video => video.pause())
+      for (const asset of assets) {
+        await bulkMutation(asset.source_type === 'job' ? `/api/jobs/${asset.source_id}` : `/api/sequences/${asset.source_id}`, 'DELETE')
+      }
+      await load()
+      setBulkSelected([])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'מחיקת הנכסים נכשלה')
+    } finally { setBulkBusy(false) }
+  }
+
   const selectedResultLabel = (reference: string) => {
     const [kind, id] = reference.split(':', 2)
     if (kind === 'sequence') return sequences.find(item => item.id === id)?.title || 'וידאו מחובר'
@@ -918,35 +1088,38 @@ function App() {
       const { sequence } = asset
       const reference = `sequence:${sequence.id}`
       const order = selectedResults.indexOf(reference) + 1
-      return <SequenceCard key={reference} sequence={sequence} assignment={assignmentFor('sequence', sequence.id)} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={sequence.status === 'completed' ? () => openAssetEditor('sequence', sequence.id, sequence.title) : undefined} onDelete={() => { void deleteGeneratedAsset('sequence', sequence.id, sequence.title) }} />
+      return <SequenceCard key={reference} sequence={sequence} assignment={assignmentFor('sequence', sequence.id)} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={sequence.status === 'completed' ? () => openAssetEditor('sequence', sequence.id, sequence.title) : undefined} onDelete={() => { void deleteGeneratedAsset('sequence', sequence.id, sequence.title) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
     }
     const { job } = asset
     const reference = `job:${job.id}`
     const order = selectedResults.indexOf(reference) + 1
-    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} />
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
   }
 
-  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode) => {
+  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void) => {
     const collapsed = !!collapsedAssetGroups[key]
     return <section className={`asset-result-container ${level}`} key={key}>
-      <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
-        {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
-        <Folder size={17}/><strong>{title}</strong><span>{assets.length} נכסים</span>
-      </button>
-      {!collapsed && <div className="asset-container-content">{children || assets.map(renderResultAsset)}</div>}
+      <div className="asset-container-head">
+        <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
+          {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
+          <Folder size={17}/><strong>{title}</strong><span>{assets.length} נכסים</span>
+        </button>
+        {onCreateFolder && <button type="button" className="asset-container-add" onClick={onCreateFolder}><FolderPlus size={14}/> תיקייה חדשה</button>}
+      </div>
+      {!collapsed && <div className={`asset-container-content ${children ? 'nested' : 'cards'}`}>{children || assets.map(renderResultAsset)}</div>}
     </section>
   }
 
   const renderProjectResults = (project: LibraryProject, assets: ResultAsset[]) => {
     const rootAssets = assets.filter(asset => { const assignment = assignmentFor(asset.kind, asset.id); return assignment?.project_id === project.id && !assignment.folder_id })
     const folderGroups = project.folders.map(folder => ({ folder, assets: assets.filter(asset => assignmentFor(asset.kind, asset.id)?.folder_id === folder.id) }))
-      .filter(group => group.assets.length || libraryProject === project.id)
+      .filter(group => group.assets.length || libraryProject === project.id || libraryProject === 'all')
     const content = <>
-      {!!rootAssets.length && renderAssetContainer(`root:${project.id}`, 'שורש הפרויקט', rootAssets, 'folder')}
-      {folderGroups.map(group => renderAssetContainer(`folder:${group.folder.id}`, group.folder.name, group.assets, 'folder'))}
+      {!!rootAssets.length && renderAssetContainer(`root:${project.id}`, 'שורש הפרויקט', rootAssets, 'folder', undefined, () => { void createStudioFolder(project.id) })}
+      {folderGroups.map(group => renderAssetContainer(`folder:${group.folder.id}`, group.folder.name, group.assets, 'folder', undefined, () => { void createStudioFolder(project.id) }))}
       {!rootAssets.length && !folderGroups.length && <div className="asset-container-empty">אין נכסים בפרויקט הזה.</div>}
     </>
-    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content)
+    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) })
   }
 
   return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>
@@ -966,7 +1139,7 @@ function App() {
 
     <section className="asset-library-panel">
       <div className="asset-library-head"><div><span className="eyebrow"><Folder size={15}/> Asset library</span><h2>Projects and folders</h2><small dir="ltr">{library.root || 'state/projects'}</small></div><button type="button" onClick={() => { void createStudioProject() }}><FolderPlus size={16}/> New project</button></div>
-      <div className="asset-library-toolbar"><label><span>Show assets</span><select value={libraryProject} onChange={event => { setLibraryProject(event.target.value); setLibraryFolder('all') }}><option value="all">All assets</option><option value="unassigned">Unassigned</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name} ({project.asset_count})</option>)}</select></label>{!['all','unassigned'].includes(libraryProject) && <label><span>Folder</span><select value={libraryFolder} onChange={event => setLibraryFolder(event.target.value)}><option value="all">All folders</option><option value="root">Project root</option>{library.projects.find(project => project.id === libraryProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}</div>
+      <div className="asset-library-toolbar"><label><span>Show assets</span><select value={libraryProject} onChange={event => { setLibraryProject(event.target.value); setLibraryFolder('all'); setBulkSelected([]) }}><option value="all">All assets</option><option value="unassigned">Unassigned</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name} ({project.asset_count})</option>)}</select></label>{!['all','unassigned'].includes(libraryProject) && <label><span>Folder</span><select value={libraryFolder} onChange={event => { setLibraryFolder(event.target.value); setBulkSelected([]) }}><option value="all">All folders</option><option value="root">Project root</option>{library.projects.find(project => project.id === libraryProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}</div>
       {!['all','unassigned'].includes(libraryProject) && (() => { const project=library.projects.find(item=>item.id===libraryProject); return project ? <div className="asset-project-detail"><div className="asset-project-title"><div className="asset-project-label"><b>{project.name}</b><span>{project.asset_count} assets</span></div><div className="asset-project-actions"><button onClick={() => { void createStudioFolder(project.id) }}><FolderPlus size={14}/> Folder</button><button onClick={() => { void renameStudioProject(project) }}><Pencil size={13}/> Rename</button><button className="danger" onClick={() => { void deleteStudioProject(project) }}><Trash2 size={13}/></button></div></div><div className="asset-folder-list">{project.folders.map(folder => <div key={folder.id}><div className="asset-folder-name"><Folder size={14}/><span>{folder.name}</span></div><div className="asset-folder-actions"><button onClick={() => { void renameStudioFolder(project,folder) }}><Pencil size={12}/></button><button onClick={() => { void deleteStudioFolder(project,folder) }}><Trash2 size={12}/></button></div></div>)}{!project.folders.length && <small>No folders yet. Assets can still be stored in the project root.</small>}</div></div> : null })()}
     </section>
 
@@ -1127,19 +1300,33 @@ function App() {
     <section className="queue-section">
       <div className="section-heading"><div><span>התור שלך</span><h2>{active.length || activeSequences.length ? 'היצירה בתנועה' : queued.length || queuedSequences.length ? 'ממתין ליצירה' : 'הכול שקט כרגע'}</h2></div><span className="queue-count">{active.length + queued.length + activeSequences.length + queuedSequences.length}</span></div>
       {!active.length && !queued.length && !activeSequences.length && !queuedSequences.length && <div className="empty"><div><Play size={22} /></div><p>הסרטון הבא שלך מתחיל בפרומפט למעלה</p></div>}
-      {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
-      {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
-      {queuedTasks.map(task => task.kind === 'sequence'
-        ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
-        : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
+      <div className="queue-cards-grid">
+        {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
+        {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
+        {queuedTasks.map(task => task.kind === 'sequence'
+          ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
+          : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
+      </div>
     </section>
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
-      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><span className="selection-hint">בחר לפי סדר לחיבור</span></div>
+      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
       {!!selectedResults.length && <div className="join-dock">
         <div className="join-dock-head"><div><Combine size={18} /><span><strong>{selectedResults.length} קטעים נבחרו</strong><small>זה יהיה סדר החיבור</small></span></div><button type="button" onClick={() => setSelectedResults([])}>נקה</button></div>
         <div className="join-order">{selectedResults.map((reference, index) => <div className="join-chip" key={reference}><b>{index + 1}</b><span>{selectedResultLabel(reference)}</span><button type="button" onClick={() => moveSelectedResult(index, -1)} disabled={index === 0}><ArrowUp size={14} /></button><button type="button" onClick={() => moveSelectedResult(index, 1)} disabled={index === selectedResults.length - 1}><ArrowDown size={14} /></button><button type="button" onClick={() => toggleResult(reference)}><X size={14} /></button></div>)}</div>
         <button type="button" className="join-button" disabled={selectedResults.length < 2 || joining} onClick={() => { void joinSelected() }}>{joining ? <LoaderCircle className="spin" size={17} /> : <Combine size={17} />} {joining ? 'מוסיף לתור…' : 'חבר לסרטון אחד'}</button>
+      </div>}
+      {bulkMode && <div className="bulk-dock">
+        <div className="bulk-dock-head"><div><Check size={18} /><span><strong>{bulkSelected.length} נכסים נבחרו</strong><small>הפעולה תבוצע על כל הנכסים שנבחרו</small></span></div><div className="bulk-dock-head-actions"><button type="button" className="bulk-dock-select-all" disabled={!bulkSourceProject || !bulkCandidates.length} onClick={selectAllBulkVisible}><Check size={14} /> {allBulkVisibleSelected ? 'בטל בחירת הכול' : 'בחר הכול'}</button><button type="button" className="bulk-dock-done" onClick={toggleBulkMode}><Check size={14} /> סיום בחירה</button></div></div>
+        <div className="bulk-dock-controls">
+          <label><span>מפרויקט</span><select value={bulkSourceProject} onChange={event => { setBulkSourceProject(event.target.value); setBulkSourceFolder('') }}><option value="">בחר פרויקט…</option><option value="all">כל הפרויקטים ביחד</option><option value="unassigned">ללא פרויקט</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+          <label><span>מתיקייה</span><select value={bulkSourceFolder} disabled={!bulkSourceProject || ['all', 'unassigned'].includes(bulkSourceProject)} onChange={event => setBulkSourceFolder(event.target.value)}><option value="">כל התיקיות בפרויקט</option><option value="root">שורש הפרויקט</option>{library.projects.find(project => project.id === bulkSourceProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>
+          <label><span>העבר לפרויקט</span><select value={bulkProject} onChange={event => { setBulkProject(event.target.value); setBulkFolder('') }}><option value="">ללא פרויקט · פלט ComfyUI</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+          <label><span>תיקייה</span><select value={bulkFolder} disabled={!bulkProject} onChange={event => setBulkFolder(event.target.value)}><option value="">שורש הפרויקט</option>{library.projects.find(project => project.id === bulkProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>
+          <button type="button" className="bulk-move-button" disabled={!bulkSelected.length || bulkBusy || bulkHasUnmovableSelection} title={bulkHasUnmovableSelection ? 'העברה זמינה רק לנכסים שהסתיימו בהצלחה' : undefined} onClick={() => { void moveBulkAssets() }}>{bulkBusy ? <LoaderCircle className="spin" size={15} /> : <Move size={15} />} העבר</button>
+          <button type="button" className="bulk-delete-button" disabled={!bulkSelected.length || bulkBusy} onClick={() => { void deleteBulkAssets() }}>{bulkBusy ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />} מחק</button>
+        </div>
+        {bulkHasUnmovableSelection && <small className="bulk-dock-note">נכסים שנכשלו או בוטלו ניתנים למחיקה בלבד; הסר אותם מהבחירה כדי להעביר את השאר.</small>}
       </div>}
       <div className="asset-results-tree">
         {(() => {
@@ -1149,7 +1336,7 @@ function App() {
             {(libraryProject === 'all' || libraryProject === 'unassigned') && !!unassigned.length && renderAssetContainer('unassigned', 'ללא פרויקט', unassigned, 'unassigned')}
             {libraryProject !== 'unassigned' && selectedProjects.map(project => {
               const assets = visibleResultAssets.filter(asset => assignmentFor(asset.kind, asset.id)?.project_id === project.id)
-              return assets.length || libraryProject === project.id ? renderProjectResults(project, assets) : null
+              return assets.length || libraryProject === project.id || (libraryProject === 'all' && project.folders.length) ? renderProjectResults(project, assets) : null
             })}
           </>
         })()}
@@ -1181,10 +1368,11 @@ function App() {
     </div>}
     {editingAsset && <div className="dialog-backdrop asset-dialog-backdrop" onMouseDown={() => setEditingAsset(null)}><section className="asset-dialog" role="dialog" aria-modal="true" aria-labelledby="asset-dialog-title" onMouseDown={event => event.stopPropagation()}><div className="asset-dialog-head"><div><span>ארגון קובץ</span><h2 id="asset-dialog-title">העברה או שינוי שם</h2></div><button onClick={() => setEditingAsset(null)} aria-label="סגירה"><X size={17}/></button></div><p>{editingAsset.label}</p><label><span>פרויקט</span><select value={editProject} onChange={event => { setEditProject(event.target.value); setEditFolder('') }}><option value="">ללא פרויקט · חזרה לפלט של ComfyUI</option>{library.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label><span>תיקייה</span><select value={editFolder} disabled={!editProject} onChange={event => setEditFolder(event.target.value)}><option value="">שורש הפרויקט</option>{library.projects.find(project => project.id === editProject)?.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><label><span>שם הקובץ</span><div className="asset-filename"><input value={editFilename} disabled={!editProject} onChange={event => setEditFilename(event.target.value)} placeholder="השארת שם הקובץ הנוכחי"/><b>.mp4</b></div></label><small>העברה או שינוי שם כאן משנים את הקובץ בפועל ושומרים על הקישור ב־Studio.</small><div className="asset-dialog-actions"><button onClick={() => setEditingAsset(null)}>ביטול</button><button className="confirm" onClick={() => { void saveAssetLocation() }}><Move size={15}/> שמירת שינויים</button></div></section></div>}
     </>}
+    <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
   </main>
 }
 
-function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean }) {
+function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
@@ -1221,7 +1409,8 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
     setPromptCopied(true)
     window.setTimeout(() => setPromptCopied(false), 1600)
   }
-  return <article className={`job-card ${job.status} ${selectedOrder ? 'result-selected' : ''}`}>
+  return <article className={`job-card ${job.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
+    {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
     {selectedOrder && <span className="selection-order">{selectedOrder}</span>}
     {job.video_url && <video src={job.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
@@ -1266,7 +1455,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
   </article>
 }
 
-function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage, onDelete, onCancel }: { sequence: Sequence; assignment?: AssetAssignment; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onDelete?: () => void; onCancel?: () => void }) {
+function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage, onDelete, onCancel, bulkMode, bulkSelected, onToggleBulk }: { sequence: Sequence; assignment?: AssetAssignment; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onDelete?: () => void; onCancel?: () => void; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מתחיל', running: 'יוצר רצף', verifying: 'מחבר וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(sequence.status)
   const percent = Math.round(Math.max(0, Math.min(1, sequence.progress || 0)) * 100)
@@ -1278,7 +1467,8 @@ function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage,
     if (navigator.share) await navigator.share({ title: 'H3 Long Video', url })
     else await navigator.clipboard.writeText(url)
   }
-  return <article className={`job-card sequence-card ${sequence.status} ${selectedOrder ? 'result-selected' : ''}`}>
+  return <article className={`job-card sequence-card ${sequence.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
+    {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
     {selectedOrder && <span className="selection-order">{selectedOrder}</span>}
     {sequence.video_url && <video src={sequence.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">

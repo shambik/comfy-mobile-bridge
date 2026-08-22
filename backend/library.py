@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,39 @@ from .db import connect, now_iso
 _INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 _ACTIVE = {"queued", "starting", "running", "verifying"}
+_FILE_LOCK_RETRIES = 10
+
+
+def _is_transient_file_lock(exc: OSError) -> bool:
+    """Return whether Windows reported a file that is temporarily in use."""
+    return getattr(exc, "winerror", None) in {32, 33}
+
+
+def _move_with_retry(source: Path, target: Path) -> None:
+    """Move an asset while tolerating short-lived video-preview/file locks."""
+    for attempt in range(_FILE_LOCK_RETRIES):
+        try:
+            shutil.move(str(source), str(target))
+            return
+        except OSError as exc:
+            if not _is_transient_file_lock(exc) or attempt == _FILE_LOCK_RETRIES - 1:
+                raise
+            # A browser range request or a just-finished encoder normally
+            # releases the handle within a few seconds.  Back off without
+            # masking a real permission or path error.
+            time.sleep(0.25 * (attempt + 1))
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    """Replace/rename an asset while tolerating short-lived file locks."""
+    for attempt in range(_FILE_LOCK_RETRIES):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if not _is_transient_file_lock(exc) or attempt == _FILE_LOCK_RETRIES - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
 
 
 def validate_library_name(value: str, label: str = "Name") -> str:
@@ -241,13 +275,13 @@ def assign_asset(source_type: str, source_id: str, project_id: str | None, folde
             new = _unique_target(target_dir, filename or old.name, old)
             try:
                 if new.resolve() != old:
-                    shutil.move(str(old), str(new))
+                    _move_with_retry(old, new)
                     moved = (old, new)
                     _update_source_path(db, source_type, source_id, old, new)
                 filename = new.name
             except Exception:
                 if moved and moved[1].exists():
-                    shutil.move(str(moved[1]), str(moved[0]))
+                    _move_with_retry(moved[1], moved[0])
                 raise
         timestamp = now_iso()
         try:
@@ -264,7 +298,7 @@ def assign_asset(source_type: str, source_id: str, project_id: str | None, folde
                 db.execute("DELETE FROM asset_assignments WHERE source_type=? AND source_id=?", (source_type, source_id))
         except Exception:
             if moved and moved[1].exists():
-                shutil.move(str(moved[1]), str(moved[0]))
+                _move_with_retry(moved[1], moved[0])
             raise
     if not project_id:
         return None
@@ -303,13 +337,13 @@ def rename_asset(source_type: str, source_id: str, requested_name: str) -> dict[
         if new.exists() and new.resolve() != old.resolve():
             raise FileExistsError("An asset with this filename already exists")
         if new.resolve() != old.resolve():
-            os.replace(old, new)
+            _replace_with_retry(old, new)
             try:
                 _update_source_path(db, source_type, source_id, old, new)
                 db.execute("UPDATE asset_assignments SET filename=?,updated_at=? WHERE source_type=? AND source_id=?",
                            (new.name, now_iso(), source_type, source_id))
             except Exception:
-                os.replace(new, old)
+                _replace_with_retry(new, old)
                 raise
     return next(item for item in list_library()["assignments"]
                 if item["source_type"] == source_type and item["source_id"] == source_id)
@@ -329,7 +363,7 @@ def rename_project(project_id: str, name: str) -> dict[str, Any]:
         old_root, new_root = _project_path(project["name"]), _project_path(name)
         if new_root.exists() and new_root.resolve() != old_root.resolve():
             raise FileExistsError("A filesystem folder with this project name already exists")
-        os.replace(old_root, new_root)
+        _replace_with_retry(old_root, new_root)
         try:
             db.execute("UPDATE asset_projects SET name=?,updated_at=? WHERE id=?", (name, now_iso(), project_id))
             rows = db.execute("SELECT source_type,source_id FROM asset_assignments WHERE project_id=?", (project_id,)).fetchall()
@@ -340,7 +374,7 @@ def rename_project(project_id: str, name: str) -> dict[str, Any]:
                     new = new_root / old.relative_to(old_root)
                     _update_source_path(db, row["source_type"], row["source_id"], old, new)
         except Exception:
-            os.replace(new_root, old_root)
+            _replace_with_retry(new_root, old_root)
             raise
     return next(item for item in list_library()["projects"] if item["id"] == project_id)
 
@@ -356,7 +390,7 @@ def rename_folder(project_id: str, folder_id: str, name: str) -> dict[str, Any]:
         new_root = _location_path(project["name"], name)
         if new_root.exists() and new_root.resolve() != old_root.resolve():
             raise FileExistsError("A filesystem folder with this name already exists")
-        os.replace(old_root, new_root)
+        _replace_with_retry(old_root, new_root)
         try:
             db.execute("UPDATE asset_folders SET name=?,updated_at=? WHERE id=?", (name, now_iso(), folder_id))
             rows = db.execute("SELECT source_type,source_id FROM asset_assignments WHERE folder_id=?", (folder_id,)).fetchall()
@@ -367,7 +401,7 @@ def rename_folder(project_id: str, folder_id: str, name: str) -> dict[str, Any]:
                     new = new_root / old.name
                     _update_source_path(db, row["source_type"], row["source_id"], old, new)
         except Exception:
-            os.replace(new_root, old_root)
+            _replace_with_retry(new_root, old_root)
             raise
     return next(folder for project in list_library()["projects"] if project["id"] == project_id
                 for folder in project["folders"] if folder["id"] == folder_id)
