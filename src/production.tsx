@@ -4,6 +4,7 @@ import {
   Gauge, LoaderCircle, MessageSquare, Pause, Pencil, Play, RefreshCw, RotateCcw, Send, Settings,
   ShieldCheck, Sparkles, Square, Trash2, Upload, UserRound, X,
 } from 'lucide-react'
+import { AppModal, useAppModal } from './app-modal'
 
 type ModelOption = { id: string; name: string; efforts: string[] }
 type Runtime = 'codex' | 'agy'
@@ -79,6 +80,7 @@ function ParticipantIcon({ participant }: { participant: Message['participant'] 
 }
 
 export function ProductionStudio({ csrf }: { csrf: string }) {
+  const appModal = useAppModal()
   const [view, setView] = useState<'room' | 'settings'>('room')
   const [models, setModels] = useState<Record<Runtime, ModelOption[]>>({ codex: [], agy: [] })
   const [modelsFetchedAt, setModelsFetchedAt] = useState('')
@@ -248,7 +250,13 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   }
 
   const decide = async (decision: Decision, action: 'approve' | 'reject') => {
-    const resolution = action === 'reject' ? window.prompt('Tell Codex and AGY what must change:') : window.prompt('Optional instruction for the next stage:', '')
+    const resolution = await appModal.askPrompt({
+      title: action === 'reject' ? 'מה צריך לשנות?' : 'הנחיה לשלב הבא',
+      message: action === 'reject' ? 'כתוב ל־Codex ול־AGY מה צריך לתקן לפני ההמשך.' : 'אפשר להוסיף הנחיה לשלב הבא, או לאשר בלי טקסט.',
+      placeholder: action === 'reject' ? 'מה צריך לשנות…' : 'הנחיה אופציונלית…',
+      confirmLabel: action === 'reject' ? 'שליחת תיקונים' : 'אישור והמשך',
+      required: action === 'reject',
+    })
     if (resolution === null || (action === 'reject' && !resolution.trim())) return
     setBusy(true)
     try {
@@ -293,7 +301,12 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
 
   const deleteSkill = async (skill: Skill, mode: 'unregister' | 'complete') => {
     const text = mode === 'complete' ? `Delete ${skill.name} and its managed files completely?` : `Unregister ${skill.name} but keep its files?`
-    if (!window.confirm(text)) return
+    if (!await appModal.askConfirm({
+      title: mode === 'complete' ? 'מחיקת Skill וקבציו' : 'הסרת Skill מהרשימה',
+      message: text,
+      confirmLabel: mode === 'complete' ? 'מחיקה מלאה' : 'הסרה',
+      danger: mode === 'complete',
+    })) return
     try {
       await mutate(`/api/skills/${skill.id}?mode=${mode}`, 'DELETE')
       setSkills(current => current.filter(item => item.id !== skill.id))
@@ -323,7 +336,12 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   }
 
   const removeReference = async (reference: ReferenceMedia) => {
-    if (!production || !window.confirm(`Delete reference ${reference.name}?`)) return
+    if (!production || !await appModal.askConfirm({
+      title: 'מחיקת רפרנס',
+      message: `למחוק את הרפרנס „${reference.name}”?`,
+      confirmLabel: 'מחיקה',
+      danger: true,
+    })) return
     try { await mutate(`/api/productions/${production.id}/references/${reference.id}`, 'DELETE'); await loadProduction() }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Reference removal failed') }
   }
@@ -348,7 +366,11 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   }
 
   const retryShot = async (shot: Shot) => {
-    if (!production || !window.confirm(`Queue a new attempt for ${shot.title}?`)) return
+    if (!production || !await appModal.askConfirm({
+      title: 'יצירת ניסיון חדש',
+      message: `להכניס לתור ניסיון חדש עבור השוט „${shot.title}”?`,
+      confirmLabel: 'הכנס לתור',
+    })) return
     setBusy(true)
     try { setProduction(await mutate(`/api/productions/${production.id}/shots/${shot.id}/retry`, 'POST', JSON.stringify({ regenerate_downstream: true }))) }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Retry failed') }
@@ -373,7 +395,12 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
 
   const lifecycle = async (action: 'duplicate'|'archive'|'delete') => {
     if (!production) return
-    if (action === 'delete' && !window.confirm(`Delete ${production.title} and its production files?`)) return
+    if (action === 'delete' && !await appModal.askConfirm({
+      title: 'מחיקת הפקה',
+      message: `למחוק את ההפקה „${production.title}” ואת קבצי ההפקה שלה?`,
+      confirmLabel: 'מחיקה לצמיתות',
+      danger: true,
+    })) return
     setBusy(true)
     try {
       if (action === 'duplicate') {
@@ -422,6 +449,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
         </article>)}</div>
       </section>
     </div>
+    <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
   </section>
 
   return <section className="ps-root">
@@ -476,5 +504,6 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       {production.error && <div className="ps-error">{production.error}</div>}
       {editingShot && <div className="ps-modal-backdrop"><section className="ps-panel ps-shot-editor"><div className="ps-panel-title"><Pencil size={18}/><div><h3>Edit shot {editingShot.shot_index}</h3><p>Set the essentials below. Prompt and references are under Advanced.</p></div><button onClick={() => setEditingShot(null)}><X size={16}/></button></div><div className="ps-form-grid"><label><span>Title</span><input value={editingShot.title} onChange={event => setEditingShot(current => current && ({...current,title:event.target.value}))}/></label><label><span>Mode</span><select value={editingShot.mode} onChange={event => { const mode=event.target.value as Shot['mode']; setEditingShot(current => current && ({...current,mode,steps:mode==='reference'?4:6,audio_mode:mode==='reference'?'silent':current.audio_mode})) }}><option value="text">T2V</option><option value="opening">I2V</option><option value="reference" disabled>R2V · future production support</option></select></label></div><details className="ps-advanced-settings"><summary>Prompt (optional)</summary><label><span>Complete prompt</span><textarea value={editingShot.prompt} onChange={event => setEditingShot(current => current && ({...current,prompt:event.target.value}))}/></label></details><div className="ps-form-grid"><label><span>Continuity</span><select value={editingShot.continuity} onChange={event => setEditingShot(current => current && ({...current,continuity:event.target.value as Shot['continuity']}))}><option value="hard_cut">Hard cut / independent</option><option value="sequential">Previous last frame</option></select></label><label><span>Aspect ratio</span><select value={editingShot.aspect_ratio} onChange={event => setEditingShot(current => current && ({...current,aspect_ratio:event.target.value}))}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label><label><span>Duration seconds</span><input type="number" min="0.5" max="15" step="0.5" value={editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,duration:Number(event.target.value),audio_duration:current.audio_duration || Number(event.target.value)}))}/></label><label><span>Megapixels</span><input type="number" min="0.1" max="2" step="0.05" value={editingShot.megapixels} onChange={event => setEditingShot(current => current && ({...current,megapixels:Number(event.target.value)}))}/></label></div><div className="ps-form-grid ps-shot-audio-controls"><label><span>Audio</span><select value={editingShot.audio_mode || 'silent'} onChange={event => setEditingShot(current => current && ({...current,audio_mode:event.target.value as Shot['audio_mode'],audio_source:event.target.value==='silent'?'song':current.audio_source}))}><option value="silent">Silent generation</option><option value="lip_sync" disabled={editingShot.mode === 'reference'}>Lip-sync · song or reference audio</option></select></label>{editingShot.audio_mode === 'lip_sync' && <label><span>Audio source</span><select value={editingShot.audio_source || 'song'} onChange={event => setEditingShot(current => current && ({...current,audio_source:event.target.value as Shot['audio_source']}))}><option value="song">Production song segment</option><option value="reference" disabled={!production.references?.some(reference => reference.kind === 'audio')}>Assigned audio reference</option></select></label>}</div>{editingShot.audio_mode === 'lip_sync' && <div className="ps-form-grid ps-shot-audio-timing"><label><span>Audio start (seconds)</span><input type="number" min="0" max="3600" step="0.1" value={editingShot.audio_start || 0} onChange={event => setEditingShot(current => current && ({...current,audio_start:Number(event.target.value)}))}/></label><label><span>Audio duration</span><input type="number" min="0.5" max="60" step="0.1" value={editingShot.audio_duration || editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,audio_duration:Number(event.target.value)}))}/></label>{editingShot.audio_source === 'reference' && <label><span>Audio reference</span><select value={editingShot.audio_reference_id || ''} onChange={event => setEditingShot(current => current && ({...current,audio_reference_id:event.target.value || null}))}><option value="">Choose audio reference</option>{production.references?.filter(reference => reference.kind === 'audio').map(reference => <option key={reference.id} value={reference.id}>{reference.name}</option>)}</select></label>}</div>}<details className="ps-advanced-settings"><summary>Assigned references (optional)</summary><div className="ps-reference-checks"><span>Assigned source references (used as I2V inputs; R2V is not used in production yet)</span>{production.references?.map(reference => <label key={reference.id}><input type="checkbox" checked={editingShot.reference_ids.includes(reference.id)} onChange={() => setEditingShot(current => current && ({...current,reference_ids:current.reference_ids.includes(reference.id)?current.reference_ids.filter(id=>id!==reference.id):[...current.reference_ids,reference.id]}))}/>{reference.kind}: {reference.name}</label>)}</div></details><div className="ps-create-actions"><button className="ps-secondary" onClick={() => setEditingShot(null)}>Cancel</button><button className="ps-primary" onClick={() => void saveShot()} disabled={busy}>Save shot</button></div></section></div>}
     </>}
+    <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
   </section>
 }
