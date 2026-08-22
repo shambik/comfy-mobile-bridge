@@ -1,3 +1,8 @@
+---
+name: h3-mobile-bridge-codebase
+description: Code map and conventions for backend, UI, workflows, workers, media validation, startup, and tests.
+---
+
 # H3 mobile bridge codebase
 
 ## Trigger
@@ -26,6 +31,26 @@ and keep config.local.json ignored.
 Keep route behavior backward compatible unless the task explicitly changes the
 API. Preserve SQLite and output files. Validate user media before queueing it.
 Use the existing worker rather than starting an unowned process from a route.
+
+## Production agent guardrails
+
+Classify a failure before retrying it. Treat CLI stream disconnects as transport
+noise handled by the CLI's bounded retry/fallback behavior; do not start a new
+creative request for every retry line. Treat missing files, malformed structured
+payloads, and database binding errors as handoff/contract failures: normalize or
+repair the handoff once, preserve the checkpoint, and escalate if it repeats.
+Treat a repeated creative defect as the same defect when its normalized issue key
+matches. Regenerate only when the prompt or input changes; after three repeats of
+the same defect or five total attempts, pause for user direction. Never advance a
+stage without its required executable payload and output files, and always save
+the diagnostic plus checkpoint before retrying or escalating.
+
+For AGY structured output, refresh `agent-context/response.schema.json` on every
+invocation. Keep the schema and prompt identical: `content` is a real structured
+payload and `issues` is an array or null, never JSON-encoded strings. Reject and
+record schema echoes such as `{"type":"string"}`; retry once with a fresh AGY
+conversation, then escalate a repeated signature without treating it as a valid
+analysis or approval.
 
 ## Change and verify
 

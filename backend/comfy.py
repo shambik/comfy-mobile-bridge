@@ -366,6 +366,15 @@ class ComfyClient:
         async with httpx.AsyncClient(timeout=20) as client:
             return (await client.get(COMFY_URL + "/queue")).raise_for_status().json()
 
+    async def delete_queued(self, prompt_ids: list[str]):
+        """Delete pending prompts without interrupting the GPU job."""
+        ids = [str(prompt_id) for prompt_id in prompt_ids if prompt_id]
+        if not ids:
+            return
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(COMFY_URL + "/queue", json={"delete": ids})
+            response.raise_for_status()
+
     @staticmethod
     def _queue_contains_prompt(payload: dict, prompt_id: str) -> bool:
         """Handle ComfyUI's tuple-shaped queue entries and newer dict entries."""

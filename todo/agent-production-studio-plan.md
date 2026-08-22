@@ -50,3 +50,24 @@ Codex/AGY calls, actual ImageGen quality, full ComfyUI GPU generation, and
 mobile Tailscale behavior. These tests were not run while a separate manual
 ComfyUI session was active and the user explicitly requested that it not be
 stopped, restarted, or used by the app.
+
+## TODO: explicit per-production review policy
+
+The current orchestrator always enters the per-shot AGY/Codex review loop,
+even when the user says that quality review should not block the current E2E
+test. The existing `approval_gates` value is persisted but is not currently
+used by the shot-generation runtime to bypass or limit review.
+
+Implement this later as an explicit production setting with three modes:
+
+- `normal`: review every shot and regenerate rejected attempts;
+- `final_only`: accept generated shots, then review only the assembled video;
+- `skip`: accept generated shots without AGY/Codex QC and continue to assembly.
+
+The setting must persist across intervention, resume, and bridge restart. The
+UI should expose it before starting or resuming production, and the chat
+intervention flow should update the persisted setting rather than relying only
+on free-form text. Skipped shots must be recorded as accepted without QC (not
+falsely marked as agent-approved), with the user-requested reason preserved.
+Add tests proving that `final_only` and `skip` do not trigger the per-shot
+review/regeneration loop, while `normal` remains unchanged.

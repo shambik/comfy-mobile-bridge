@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -33,7 +34,8 @@ from .db import (connect, get_job, get_sequence, init_db, list_jobs,
 from .generation import normalize_generation_settings
 from .library import (assign_asset, create_folder, create_project, delete_folder,
                       delete_project, init_library_db, list_library, remove_assignment,
-                      rename_asset, rename_folder, rename_project, validate_location)
+                      rename_asset, rename_folder, rename_project, resolve_asset_path,
+                      validate_location)
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog
 from .production import production_orchestrator
@@ -42,7 +44,7 @@ from .production_db import (add_config_revision, add_event, add_message, add_ref
                             get_agent_settings, get_artifact, get_attempt_for_production,
                             get_production, get_reference, init_production_db, list_events,
                             import_completed_jobs, list_productions, list_references, list_shots,
-                            replace_shot_plan, resolve_decision, update_agent_settings,
+                            normalize_production_generation, replace_shot_plan, resolve_decision, update_agent_settings,
                             update_production, update_shot, update_shot_attempt)
 from .skill_catalog import (discover_skills, get_skill, install_skill_zip,
                             list_skills, register_skill, remove_skill,
@@ -197,6 +199,11 @@ class DecisionBody(BaseModel):
 class ProductionSettingsBody(BaseModel):
     participation_mode: str | None = None
     continuity_mode: str | None = None
+    generation_turbo_profile: str | None = None
+    generation_steps: int | None = None
+    generation_megapixels: float | None = None
+    generation_aspect_ratio: str | None = None
+    generation_megapixel_rules: list[dict[str, Any]] | None = None
     codex_runtime: str | None = None
     codex_model: str | None = None
     codex_effort: str | None = None
@@ -583,12 +590,44 @@ async def productions():
     }
 
 
+def production_with_generation_progress(production: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Attach the currently sampled ComfyUI job to a production response."""
+    if not production:
+        return production
+    current_job_id = production_orchestrator.current_jobs.get(production["id"])
+    if not current_job_id:
+        return production
+    job = get_job(current_job_id, public=False)
+    if not job:
+        return production
+    current_shot = next(
+        (
+            shot for shot in production.get("shots", [])
+            if any(attempt.get("job_id") == current_job_id for attempt in shot.get("attempts", []))
+        ),
+        None,
+    )
+    production["generation_progress"] = {
+        "job_id": current_job_id,
+        "status": job.get("status"),
+        "phase": job.get("phase"),
+        "progress": float(job.get("progress") or 0),
+        "step": int(job.get("step") or 0),
+        "total_steps": int(job.get("total_steps") or 0),
+        "eta_seconds": job.get("eta_seconds"),
+        "shot_id": current_shot.get("id") if current_shot else None,
+        "shot_index": current_shot.get("shot_index") if current_shot else None,
+        "shot_title": current_shot.get("title") if current_shot else None,
+    }
+    return production
+
+
 @app.get("/api/productions/{production_id}")
 async def production_detail(production_id: str):
     production = get_production(production_id, include_messages=True)
     if not production:
         raise HTTPException(404, "Production not found")
-    return production
+    return production_with_generation_progress(production)
 
 
 @app.patch("/api/productions/{production_id}/settings")
@@ -606,6 +645,22 @@ async def update_production_settings_route(
         raise HTTPException(400, "Unsupported participation mode")
     if values.get("continuity_mode") not in {None, "sequential", "hard_cut", "segmented", "hybrid"}:
         raise HTTPException(400, "Unsupported continuity mode")
+    merged = {**production, **values}
+    try:
+        generation_defaults = normalize_production_generation(
+            merged.get("generation_turbo_profile", "v1"),
+            merged.get("generation_steps", 4),
+            merged.get("generation_megapixels", 0.7),
+            merged.get("generation_aspect_ratio", "16:9"),
+            merged.get("generation_megapixel_rules"),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if any(key in values for key in (
+        "generation_turbo_profile", "generation_steps", "generation_megapixels",
+        "generation_aspect_ratio", "generation_megapixel_rules",
+    )):
+        values.update(generation_defaults)
     for key in ("codex_runtime", "agy_runtime"):
         if values.get(key) not in {None, "codex", "agy"}:
             raise HTTPException(400, "Agent runtime must be codex or agy")
@@ -631,7 +686,9 @@ async def update_production_settings_route(
         if any(key in values for key in (f"{seat}_runtime", f"{seat}_model")):
             session_fields[f"{seat}_session_id"] = None
     revision_config = {key: merged[key] for key in (
-        "participation_mode", "continuity_mode", "codex_runtime", "codex_model", "codex_effort",
+        "participation_mode", "continuity_mode", "generation_turbo_profile", "generation_steps",
+        "generation_megapixels", "generation_aspect_ratio", "generation_megapixel_rules",
+        "codex_runtime", "codex_model", "codex_effort",
         "agy_runtime", "agy_model", "agy_effort", "skills",
     )}
     revision = add_config_revision(production_id, revision_config, body.reason.strip())
@@ -715,6 +772,33 @@ async def generate_production_reference(
     return {"reference": reference, "production": get_production(production_id, include_messages=True)}
 
 
+@app.post("/api/productions/{production_id}/references/retry")
+async def retry_production_reference_generation(production_id: str, request: Request):
+    """Resume a failed reference handoff from its persistent checkpoint."""
+    require_csrf(request)
+    production = get_production(production_id, private=True)
+    if not production:
+        raise HTTPException(404, "Production not found")
+    if production["stage"] != "reference_generation":
+        raise HTTPException(409, "Reference generation is not the current production stage")
+    if production["status"] in {"queued", "running", "pausing", "retrying", "stopping"}:
+        raise HTTPException(409, "Reference generation is already running")
+    if production["status"] not in {"awaiting_user", "failed", "paused", "stopped"}:
+        raise HTTPException(409, "Reference generation cannot be retried from the current state")
+    plan_path = PRODUCTIONS / production_id / "references" / "reference_plan.json"
+    if not plan_path.is_file():
+        raise HTTPException(409, "The approved reference plan is missing")
+    update_production(production_id, status="queued", pause_requested=0, stop_requested=0, error=None)
+    add_message(
+        production_id, "user", "both", "control",
+        "Retry reference generation from the last preserved checkpoint.",
+        {"stage": "reference_generation", "fresh_attempt": True},
+    )
+    add_event(production_id, "production.reference_generation_retry_requested", {"stage": "reference_generation"})
+    production_orchestrator.notify()
+    return get_production(production_id, include_messages=True)
+
+
 @app.get("/api/productions/{production_id}/references/{reference_id}/file")
 async def production_reference_file(production_id: str, reference_id: str):
     reference = get_reference(production_id, reference_id, private=True)
@@ -748,7 +832,12 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
     shot = next((item for item in shots if item["id"] == shot_id), None)
     if not production or not shot:
         raise HTTPException(404, "Production shot not found")
-    if production["status"] not in {"draft", "paused", "stopped", "failed", "awaiting_user"}:
+    editable_while_active = (
+        production["status"] in {"queued", "running", "pausing", "retrying", "stopping"}
+        and shot.get("status") == "planned"
+        and not shot.get("attempts")
+    )
+    if production["status"] not in {"draft", "paused", "stopped", "failed", "awaiting_user"} and not editable_while_active:
         raise HTTPException(409, "Pause the production before editing shots")
     values = {key: value for key, value in body.model_dump().items() if value is not None}
     merged = {**shot, **values}
@@ -809,7 +898,8 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
         raise HTTPException(400, str(exc)) from exc
     values.update({"title": str(merged["title"]).strip(), "prompt": str(merged["prompt"]).strip(),
                    "steps": normalized.steps, "megapixels": normalized.megapixels,
-                   "aspect_ratio": normalized.aspect_ratio, "reference_ids": reference_ids,
+                   "aspect_ratio": normalized.aspect_ratio, "turbo_profile": normalized.turbo_profile,
+                   "reference_ids": reference_ids,
                    "audio_mode": merged.get("audio_mode", "silent"),
                    "audio_source": merged.get("audio_source", "song"),
                    "audio_start": float(merged.get("audio_start") or 0),
@@ -820,7 +910,7 @@ async def edit_production_shot(production_id: str, shot_id: str, request: Reques
         values.update({"status": "planned", "accepted_attempt": None})
     update_shot(shot_id, **values)
     add_event(production_id, "shot.updated", {"shot_id": shot_id})
-    return get_production(production_id, include_messages=True)
+    return production_with_generation_progress(get_production(production_id, include_messages=True))
 
 
 @app.post("/api/productions/{production_id}/shots/{shot_id}/retry")
@@ -860,8 +950,15 @@ async def import_jobs_into_production(production_id: str, request: Request, body
     if not body.job_ids or len(body.job_ids) > 50 or len(set(body.job_ids)) != len(body.job_ids):
         raise HTTPException(400, "Choose between 1 and 50 unique jobs")
     jobs = [get_job(job_id, public=False) for job_id in body.job_ids]
-    if any(not job or job["status"] != "completed" or not job.get("output_path") or not Path(job["output_path"]).is_file() for job in jobs):
-        raise HTTPException(409, "Every imported job must be completed and its video must exist")
+    resolved_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        if not job or job["status"] != "completed":
+            raise HTTPException(409, "Every imported job must be completed and its video must exist")
+        path = resolve_asset_path("job", job["id"])
+        if not path:
+            raise HTTPException(409, "Every imported job must be completed and its video must exist")
+        resolved_jobs.append({**job, "output_path": str(path)})
+    jobs = resolved_jobs
     import_completed_jobs(production_id, jobs)
     return get_production(production_id, include_messages=True)
 
@@ -899,6 +996,11 @@ async def duplicate_production(production_id: str, request: Request):
             "codex_runtime": source.get("codex_runtime", "codex"), "codex_model": source["codex_model"],
             "codex_effort": source["codex_effort"], "agy_runtime": source.get("agy_runtime", "agy"),
             "agy_model": source["agy_model"], "agy_effort": source["agy_effort"],
+            "generation_turbo_profile": source.get("generation_turbo_profile", "v1"),
+            "generation_steps": source.get("generation_steps", 4),
+            "generation_megapixels": source.get("generation_megapixels", 0.7),
+            "generation_aspect_ratio": source.get("generation_aspect_ratio", "16:9"),
+            "generation_megapixel_rules": source.get("generation_megapixel_rules"),
             "skills": source["skills"], "approval_gates": source["approval_gates"],
         })
         # Duplicate reusable reference media, never generated attempts/results.
@@ -980,6 +1082,11 @@ async def create_production_route(
     concept: str = Form(""),
     participation_mode: str = Form("interactive"),
     continuity_mode: str = Form("hybrid"),
+    generation_turbo_profile: str = Form("v1"),
+    generation_steps: int = Form(4),
+    generation_megapixels: float = Form(0.7),
+    generation_aspect_ratio: str = Form("16:9"),
+    generation_megapixel_rules_json: str = Form("[]"),
     codex_runtime: str = Form(""),
     codex_model: str = Form(""),
     codex_effort: str = Form(""),
@@ -999,6 +1106,19 @@ async def create_production_route(
         raise HTTPException(400, "Participation mode must be autonomous or interactive")
     if continuity_mode not in {"sequential", "hard_cut", "segmented", "hybrid"}:
         raise HTTPException(400, "Unsupported continuity mode")
+    try:
+        generation_megapixel_rules = json.loads(generation_megapixel_rules_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "Megapixel rules must be a JSON array") from exc
+    if not isinstance(generation_megapixel_rules, list):
+        raise HTTPException(400, "Megapixel rules must be a JSON array")
+    try:
+        generation_defaults = normalize_production_generation(
+            generation_turbo_profile, generation_steps, generation_megapixels,
+            generation_aspect_ratio, generation_megapixel_rules or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     allowed_audio = {
         "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
         "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
@@ -1072,6 +1192,7 @@ async def create_production_route(
             "agy_runtime": selected_agy_runtime,
             "agy_model": selected_agy_model,
             "agy_effort": selected_agy_effort,
+            **generation_defaults,
             "skills": [str(value) for value in selected_skills],
             "approval_gates": [str(value) for value in approval_gates],
         })
@@ -1092,7 +1213,10 @@ async def start_production(production_id: str, request: Request):
     if production["status"] not in {"draft", "paused", "stopped", "failed"}:
         raise HTTPException(409, "Production cannot be started from its current state")
     stage = "song_analysis" if production["status"] == "draft" else production["stage"]
-    update_production(production_id, status="queued", stage=stage, pause_requested=0, stop_requested=0, error=None)
+    update_production(
+        production_id, status="queued", stage=stage, pause_requested=0,
+        stop_requested=0, intervention_requested=0, error=None,
+    )
     add_message(production_id, "user", "both", "control", "Start or resume production.")
     production_orchestrator.notify()
     return get_production(production_id, include_messages=True)
@@ -1119,7 +1243,10 @@ async def resume_production(production_id: str, request: Request):
         raise HTTPException(404, "Production not found")
     if production["status"] not in {"paused", "stopped", "failed"}:
         raise HTTPException(409, "Production is not paused")
-    update_production(production_id, status="queued", pause_requested=0, stop_requested=0, error=None)
+    update_production(
+        production_id, status="queued", pause_requested=0,
+        stop_requested=0, intervention_requested=0, error=None,
+    )
     add_message(production_id, "user", "both", "control", "Resume from the last checkpoint.")
     production_orchestrator.notify()
     return get_production(production_id, include_messages=True)
@@ -1148,9 +1275,48 @@ async def production_intervention(production_id: str, request: Request, body: In
         raise HTTPException(400, "Recipient must be both, codex or agy")
     if not body.content.strip() or len(body.content) > 20_000:
         raise HTTPException(400, "Message is required and must be at most 20,000 characters")
-    if not get_production(production_id, private=True):
+    production = get_production(production_id, private=True)
+    if not production:
         raise HTTPException(404, "Production not found")
-    message = add_message(production_id, "user", body.recipient, "intervention", body.content.strip(), {"priority": "user"})
+    content = body.content.strip()
+    message = add_message(
+        production_id, "user", body.recipient, "intervention", content,
+        {"priority": "user", "interrupt": True},
+    )
+    # The database is set to ``queued`` as soon as an intervention is
+    # requested, but the current orchestrator task may still be unwinding and
+    # its CLI subprocess may still be alive.  Use the in-memory activity check
+    # as well so an intervention always takes the interrupt path.
+    active = production["status"] in {"running", "retrying", "pausing"} or production_orchestrator.has_active_work(production_id)
+    if active:
+        update_production(
+            production_id, status="queued", intervention_requested=1,
+            pause_requested=0, stop_requested=0, error=None,
+        )
+        add_message(
+            production_id, "system", "all", "status",
+            "Intervention received. Stopping the current agent work and preparing to resume from the last safe checkpoint.",
+            {"intervention": True, "recipient": body.recipient, "interrupt": True},
+        )
+        add_event(production_id, "production.intervention_requested", {
+            "recipient": body.recipient,
+            "stage": production.get("stage"),
+            "cancel_generation_requested": bool(production_orchestrator.current_jobs.get(production_id)),
+        })
+        await production_orchestrator.cancel_agents(production_id)
+        # An intervention is an interrupt of the current production operation,
+        # including a ComfyUI shot if one is running. The orchestrator marks the
+        # interrupted attempt separately so resume does not present it as a
+        # generation failure.
+        await production_orchestrator.cancel_generation(production_id)
+        production_orchestrator.notify()
+    else:
+        add_message(
+            production_id, "system", "all", "status",
+            "Intervention saved for the next production resume; no active agent work was running.",
+            {"intervention": True, "recipient": body.recipient},
+        )
+        production_orchestrator.notify()
     return {"message": message, "production": get_production(production_id, include_messages=True)}
 
 
@@ -1215,6 +1381,12 @@ async def production_attempt_artifact(production_id: str, attempt_id: str, field
     if not attempt or not attempt.get(field):
         raise HTTPException(404, "Attempt artifact not found")
     path = Path(attempt[field])
+    if field == "output_path" and attempt.get("job_id"):
+        resolved = resolve_asset_path("job", attempt["job_id"])
+        if resolved:
+            path = resolved
+            if str(path) != str(attempt.get(field)):
+                update_shot_attempt(attempt_id, output_path=str(path))
     if not path.is_file():
         raise HTTPException(410, "Attempt artifact file is missing")
     return FileResponse(path, filename=path.name)
@@ -1703,20 +1875,26 @@ async def join_history(request: Request, body: JoinBody):
                 row = db.execute(
                     "SELECT id,prompt,status,output_path FROM jobs WHERE id=?", (source_id,)
                 ).fetchone()
-                if not row or row["status"] != "completed" or not row["output_path"]:
+                if not row or row["status"] != "completed":
                     raise HTTPException(409, "Every selected job must be completed")
+                path = resolve_asset_path("job", row["id"])
+                if not path:
+                    raise HTTPException(409, "Every selected job must have a video file")
                 sources.append({
-                    "prompt": row["prompt"], "path": row["output_path"],
+                    "prompt": row["prompt"], "path": str(path),
                     "source_job_id": row["id"], "source_sequence_id": None,
                 })
             elif source_type == "sequence":
                 row = db.execute(
                     "SELECT id,title,status,output_path FROM sequences WHERE id=?", (source_id,)
                 ).fetchone()
-                if not row or row["status"] != "completed" or not row["output_path"]:
+                if not row or row["status"] != "completed":
                     raise HTTPException(409, "Every selected sequence must be completed")
+                path = resolve_asset_path("sequence", row["id"])
+                if not path:
+                    raise HTTPException(409, "Every selected sequence must have a video file")
                 sources.append({
-                    "prompt": row["title"], "path": row["output_path"],
+                    "prompt": row["title"], "path": str(path),
                     "source_job_id": None, "source_sequence_id": row["id"],
                 })
             else:
@@ -1779,6 +1957,7 @@ async def delete_job(request: Request, job_id: str):
         ).fetchone()[0]
     if in_active_assembly:
         raise HTTPException(409, "This video is currently used by an active join")
+    output_path = resolve_asset_path("job", job_id)
     input_paths = {
         job.get(key) for key in (
             "input_path", "reference_audio_path", "source_audio_path", "first_frame_path", "last_frame_path",
@@ -1794,8 +1973,8 @@ async def delete_job(request: Request, job_id: str):
             """, (path, path, path, path, path)).fetchone()[0]
             if remaining == 0:
                 Path(path).unlink(missing_ok=True)
-    if job.get("output_path"):
-        Path(job["output_path"]).unlink(missing_ok=True)
+    if output_path:
+        output_path.unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -1808,7 +1987,8 @@ async def delete_sequence(request: Request, sequence_id: str):
     if sequence["status"] in ("queued", "starting", "running", "verifying"):
         raise HTTPException(409, "Cancel the active sequence first")
 
-    paths: set[str] = {sequence["output_path"]} if sequence.get("output_path") else set()
+    sequence_path = resolve_asset_path("sequence", sequence_id)
+    paths: set[str] = {str(sequence_path)} if sequence_path else set()
     with connect() as db:
         in_active_assembly = db.execute(
             """SELECT COUNT(*) FROM sequence_items i JOIN sequences s ON s.id=i.sequence_id
@@ -1818,15 +1998,21 @@ async def delete_sequence(request: Request, sequence_id: str):
     if in_active_assembly:
         raise HTTPException(409, "This sequence is currently used by an active join")
     remove_assignment("sequence", sequence_id)
-    with connect() as db:
-        if sequence["kind"] == "connected":
+    child_rows: list[Any] = []
+    if sequence["kind"] == "connected":
+        with connect() as db:
             child_rows = db.execute(
-                """SELECT output_path,first_frame_path,last_frame_path,input_path,reference_audio_path
+                """SELECT id,output_path,first_frame_path,last_frame_path,input_path,reference_audio_path
                    FROM jobs WHERE sequence_id=?""",
                 (sequence_id,),
             ).fetchall()
-            for row in child_rows:
-                paths.update(path for path in row if path)
+        for row in child_rows:
+            child_path = resolve_asset_path("job", row["id"])
+            if child_path:
+                paths.add(str(child_path))
+            paths.update(path for path in row if path)
+    with connect() as db:
+        if sequence["kind"] == "connected":
             db.execute("DELETE FROM jobs WHERE sequence_id=?", (sequence_id,))
         db.execute("DELETE FROM sequences WHERE id=?", (sequence_id,))
     for path in paths:
@@ -1837,10 +2023,10 @@ async def delete_sequence(request: Request, sequence_id: str):
 @app.get("/api/jobs/{job_id}/video")
 async def video(job_id: str):
     job = get_job(job_id, public=False)
-    if not job or job["status"] != "completed" or not job.get("output_path"):
+    if not job or job["status"] != "completed":
         raise HTTPException(404, "Video not found")
-    path = Path(job["output_path"])
-    if not path.exists():
+    path = resolve_asset_path("job", job_id)
+    if not path:
         raise HTTPException(404, "Video file is missing")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 
@@ -1900,10 +2086,10 @@ async def final_video_artifact():
 @app.get("/api/sequences/{sequence_id}/video")
 async def sequence_video(sequence_id: str):
     sequence = get_sequence(sequence_id, public=False)
-    if not sequence or sequence["status"] != "completed" or not sequence.get("output_path"):
+    if not sequence or sequence["status"] != "completed":
         raise HTTPException(404, "Joined video not found")
-    path = Path(sequence["output_path"])
-    if not path.exists():
+    path = resolve_asset_path("sequence", sequence_id)
+    if not path:
         raise HTTPException(404, "Joined video file is missing")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
 

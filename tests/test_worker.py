@@ -80,6 +80,54 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(worker.comfy_restart_required)
         worker.comfy.shutdown.assert_awaited_once()
 
+    async def test_recovery_prefers_running_prompt_and_deletes_pending_duplicates(self):
+        job_id = "a" * 32
+        workflow = {
+            "92": {
+                "class_type": "SaveVideo",
+                "inputs": {"filename_prefix": f"h3_bridge_{job_id}"},
+            }
+        }
+        worker = QueueWorker()
+        worker.comfy.queue = AsyncMock(return_value={
+            "queue_running": [[1, "running-prompt", workflow, {"client_id": "running-client"}, ["92"]]],
+            "queue_pending": [
+                [2, "pending-prompt-1", workflow, {"client_id": "pending-client-1"}, ["92"]],
+                [3, "pending-prompt-2", workflow, {"client_id": "pending-client-2"}, ["92"]],
+            ],
+        })
+        worker.comfy.delete_queued = AsyncMock()
+
+        selected = await worker._claim_existing_prompt(job_id, "pending-prompt-2")
+
+        self.assertEqual(selected["prompt_id"], "running-prompt")
+        self.assertEqual(selected["client_id"], "running-client")
+        worker.comfy.delete_queued.assert_awaited_once_with([
+            "pending-prompt-1", "pending-prompt-2",
+        ])
+
+    def test_queue_records_support_comfy_savevideo_job_prefix(self):
+        job_id = "b" * 32
+        payload = {
+            "queue_pending": [{
+                "priority": 4,
+                "prompt_id": "dict-prompt",
+                "prompt": {
+                    "92": {
+                        "class_type": "SaveVideo",
+                        "inputs": {"filename_prefix": f"video/h3_bridge_{job_id}_retry"},
+                    }
+                },
+                "extra_data": {"client_id": "dict-client"},
+            }]
+        }
+
+        records = QueueWorker._prompts_for_job(payload, job_id)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["prompt_id"], "dict-prompt")
+        self.assertEqual(records[0]["client_id"], "dict-client")
+
     def test_empty_exception_messages_still_have_a_type(self):
         worker = QueueWorker()
         self.assertEqual(worker._error_text(httpx.ReadTimeout("")), "ReadTimeout")

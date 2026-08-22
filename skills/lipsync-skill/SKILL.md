@@ -26,6 +26,11 @@ Confirm the mode before planning. Do not silently turn a hybrid request into all
 - Use small, physically plausible camera movement inside a shot. Change angle or camera position between shots through the next opening frame, not through a large mid-shot move.
 - Use a normal-human-viewer QC threshold. Reject clear defects affecting identity, action, lip-sync, continuity, story comprehension, or visibly readable text. Do not reject a shot for microscopic texture or an ambiguous tiny mark that a viewer cannot read.
 
+## AGY structured-output guardrail
+
+- Refresh the AGY schema on every call and keep its contract aligned with the prompt: human-readable summary/decision/next action, real structured content, and issues as an array or null.
+- Never treat `{"type":"string"}` or other schema/property descriptors as AGY analysis. Preserve the raw payload, retry once with a fresh conversation, and escalate on repetition; do not approve a shot or start a creative retry from that placeholder.
+
 ## Resolution and duration policy
 
 These are the default local Turbo recommendations and may be overridden only when the user explicitly chooses another setting. Always record both the requested target and the legal dimensions actually sent to ComfyUI.

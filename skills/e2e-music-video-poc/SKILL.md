@@ -16,6 +16,12 @@ Codex and AGY operate as a joint production agency. Codex is the producing/direc
 - Apply a normal human-viewer threshold to text: reject clearly visible gibberish or materially wrong text on cars, signs, billboards, screens, or labels; ignore tiny ambiguous marks that are not readable during normal playback.
 - Do not allow a technical AGY/CLI error to terminate production. Retry the consultation, record the failure, or escalate to Codex’s own visual review while preserving the clip and checkpoint.
 
+## AGY structured-output guardrail
+
+- The bridge writes a fresh `agent-context/response.schema.json` before every AGY call; never reuse an older checkpoint schema.
+- The AGY prompt and schema must agree: `summary`, `decision`, and `next_action` are plain strings; `content` is the actual object/array/string/null task payload; `issues` is an array or null. Do not describe `content` or `issues` as JSON-encoded strings in the AGY prompt.
+- A response containing schema descriptors such as `{"type":"string"}` is not an analysis. Preserve the raw response, retry once without the saved conversation, and escalate if the fresh result repeats the same signature. Never save it as an approval or QC report.
+
 ## Stage 1 — intake and user intent
 
 Collect the song file, lyrics, style/genre, output location, ComfyUI endpoint, available models, and optional clip idea. If anything required is missing, ask for it before generation.
@@ -45,7 +51,7 @@ Codex proposes the treatment, character/location bible, visual language, continu
 
 Then Codex responds to AGY point by point, revises the treatment, and asks AGY for approval. Repeat until the two producers agree. Show the useful exchange to the user at the agreed decision gate and obtain approval before references or generation.
 
-Every shot record must include: id, lyric/section, time range, duration, mode, continuity source, prompt intent, camera movement, action, negative constraints, megapixel/resolution policy, and acceptance criteria.
+Every shot record must include: id, lyric/section, time range, duration, mode, continuity source, prompt intent, camera movement, action, negative constraints, megapixel/resolution policy, and acceptance criteria. It must also record an `opening_frame_strategy`: `reference_composed`, `reference_composed_with_previous_last_frame`, `previous_last_frame`, `corrected_previous_last_frame`, `approved_anchor`, or `none`.
 
 ## Stage 4 — reference development
 
@@ -66,9 +72,19 @@ For each approved shot:
 1. Codex drafts the video prompt from the storyboard and continuity requirements.
 2. AGY critiques the prompt for action clarity, camera physics, character identity, lyric fit, text risk, and transition compatibility.
 3. Codex revises the prompt and asks AGY to confirm it.
-4. Generate the silent shot with the approved I2V/T2V mode and parameters.
+4. Before generation, Codex and AGY explicitly decide the opening-frame inputs for this shot and record the decision in the shot manifest.
+5. Generate the silent shot with the approved I2V/T2V mode and parameters.
 
-For sequential shots, AGY and Codex must choose the next opening image together: previous last frame, a corrected extracted frame, or an approved anchor. Check camera direction and screen geography so cuts do not reverse motion or jump locations without intent.
+Opening-frame rules for the current I2V-only production path:
+
+- Assigned images are planning/creative references, never the actual I2V opening frame. A shot-specific opening frame must be newly composed from the assigned character, location, prop, wardrobe, and lighting references plus the shot prompt. Never pass a selected library/reference image directly as the scene frame.
+- If a shot has assigned scene references and is sequential, generate a new opening frame from those references and provide the previous accepted last frame as continuity context. Use the last frame to preserve identity, unfinished action, screen geography, and camera direction; it must not override the new shot’s location, action, or composition.
+- If a shot has assigned scene references and is a hard cut/independent shot, compose the new opening frame from those references without the previous last frame.
+- If a shot is sequential but has no assigned scene references, use the previous accepted last frame directly only when AGY and Codex agree it is a valid opening image. If the face, action, framing, or geometry is unsuitable, create a corrected frame before I2V.
+- If the previous frame is rear-facing, cropped, obscured, malformed, or otherwise a poor identity anchor, choose `corrected_previous_last_frame` or `reference_composed_with_previous_last_frame`; do not blindly reuse it.
+- R2V remains disabled for production. The generated shot-specific frame is the only image sent to the I2V workflow.
+
+Check camera direction and screen geography so cuts do not reverse motion or jump locations without intent. Save the chosen inputs and the generated opening frame path in the shot checkpoint so the UI can distinguish planning references from the actual scene frame.
 
 ## Stage 6 — per-shot video and frame QC
 
@@ -77,6 +93,7 @@ After every generation, send AGY:
 - the complete MP4;
 - a dense timeline frame set covering the whole clip, plus first/middle/last frames;
 - the previous shot’s final frame and the current opening frame when continuity matters;
+- the opening-frame strategy and the exact input list used to create the current opening frame;
 - the shot prompt, lyric timing, and acceptance criteria.
 
 AGY reports identity, action, lyric fit, camera movement, continuity, visual glitches, and clearly visible text. Codex then independently reviews AGY’s report and the artifacts, agrees or disagrees with reasons, and sends a concrete next-step proposal back to AGY. Only after Codex and AGY agree is the shot approved.

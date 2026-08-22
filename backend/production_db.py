@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from typing import Any
 
@@ -8,6 +9,112 @@ from .db import connect, now_iso
 
 
 ACTIVE_PRODUCTION_STATUSES = ("queued", "running", "pausing", "retrying", "stopping")
+
+DEFAULT_GENERATION_MP_RULES = [
+    {"max_duration": 5, "megapixels": 1.5},
+    {"max_duration": 8, "megapixels": 1.0},
+    {"max_duration": 10, "megapixels": 0.7},
+    {"max_duration": 11, "megapixels": 0.6},
+    {"max_duration": 15, "megapixels": 0.5},
+]
+GENERATION_ASPECT_RATIOS = {"16:9", "1:1", "9:16", "4:3", "3:4"}
+
+
+def normalize_megapixel_rules(rules: Any = None) -> list[dict[str, Any]]:
+    """Validate the duration-to-MP policy stored on a production."""
+    if rules is None or rules == "" or rules == []:
+        source = DEFAULT_GENERATION_MP_RULES
+    elif isinstance(rules, str):
+        try:
+            source = json.loads(rules)
+        except json.JSONDecodeError:
+            raise ValueError("Megapixel rules must be a JSON array") from None
+    else:
+        source = rules
+    if not isinstance(source, list) or not source:
+        raise ValueError("Megapixel rules must be a non-empty array")
+    normalized: list[dict[str, Any]] = []
+    previous_max = 0
+    for rule in source:
+        if not isinstance(rule, dict):
+            raise ValueError("Each megapixel rule must be an object")
+        raw_max = rule.get("max_duration", rule.get("max_seconds"))
+        raw_mp = rule.get("megapixels", rule.get("mp"))
+        try:
+            max_duration_float = float(raw_max)
+        except (TypeError, ValueError):
+            raise ValueError("Each megapixel rule needs a whole-number duration") from None
+        if not math.isfinite(max_duration_float) or not max_duration_float.is_integer():
+            raise ValueError("Megapixel rule durations must be whole numbers")
+        max_duration = int(max_duration_float)
+        if max_duration < 1 or max_duration > 15 or max_duration <= previous_max:
+            raise ValueError("Megapixel rule durations must increase from 1 through 15 seconds")
+        try:
+            megapixels = round(float(raw_mp), 1)
+        except (TypeError, ValueError):
+            raise ValueError("Each megapixel rule needs a numeric MP value") from None
+        if not math.isfinite(megapixels) or not 0.1 <= megapixels <= 2.0:
+            raise ValueError("Megapixel rule MP values must be between 0.1 and 2.0")
+        normalized.append({"max_duration": max_duration, "megapixels": megapixels})
+        previous_max = max_duration
+    if normalized[-1]["max_duration"] != 15:
+        raise ValueError("The last megapixel rule must cover through 15 seconds")
+    return normalized
+
+
+def megapixels_for_duration(duration: Any, rules: list[dict[str, Any]] | None = None) -> float:
+    """Return the first MP rule whose upper duration bound covers a shot."""
+    normalized = normalize_megapixel_rules(rules)
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        value = 5.0
+    for rule in normalized:
+        if value <= rule["max_duration"]:
+            return float(rule["megapixels"])
+    return float(normalized[-1]["megapixels"])
+
+
+def normalize_production_generation(
+    turbo_profile: Any = "v1", steps: Any = 4, megapixels: Any = 0.7,
+    aspect_ratio: Any = "16:9", megapixel_rules: Any = None,
+) -> dict[str, Any]:
+    """Validate project-wide Turbo controls before a shot plan is created.
+
+    Megapixels are deliberately stored as the user's requested value rounded
+    to one decimal place.  The generation workflow calculates the final
+    multiple-of-32 dimensions later; the project record must not display the
+    resulting pixel-product (for example, ``0.692224``) as if it were the
+    user's setting.
+    """
+    profile = str(turbo_profile or "v1").strip().lower()
+    if profile not in {"v1", "v4"}:
+        raise ValueError("Turbo profile must be v1 or v4")
+    if isinstance(steps, bool):
+        raise ValueError("Steps must be a whole number")
+    try:
+        resolved_steps = int(steps)
+    except (TypeError, ValueError):
+        raise ValueError("Steps must be a whole number") from None
+    if resolved_steps < 4 or resolved_steps > (8 if profile == "v4" else 12):
+        maximum = 8 if profile == "v4" else 12
+        raise ValueError(f"Turbo {profile} steps must be between 4 and {maximum}")
+    try:
+        resolved_megapixels = round(float(megapixels), 1)
+    except (TypeError, ValueError):
+        raise ValueError("Megapixels must be a number") from None
+    if not math.isfinite(resolved_megapixels) or not 0.1 <= resolved_megapixels <= 2.0:
+        raise ValueError("Megapixels must be between 0.1 and 2.0")
+    resolved_aspect_ratio = str(aspect_ratio or "16:9").strip()
+    if resolved_aspect_ratio not in GENERATION_ASPECT_RATIOS:
+        raise ValueError("Resolution shape must be one of 16:9, 1:1, 9:16, 4:3 or 3:4")
+    return {
+        "generation_turbo_profile": profile,
+        "generation_steps": resolved_steps,
+        "generation_megapixels": resolved_megapixels,
+        "generation_aspect_ratio": resolved_aspect_ratio,
+        "generation_megapixel_rules": normalize_megapixel_rules(megapixel_rules),
+    }
 
 
 def init_production_db() -> None:
@@ -60,11 +167,17 @@ def init_production_db() -> None:
                 agy_effort TEXT NOT NULL,
                 codex_session_id TEXT,
                 agy_session_id TEXT,
+                generation_turbo_profile TEXT NOT NULL DEFAULT 'v1',
+                generation_steps INTEGER NOT NULL DEFAULT 4,
+                generation_megapixels REAL NOT NULL DEFAULT 0.7,
+                generation_aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+                generation_megapixel_rules_json TEXT NOT NULL DEFAULT '[]',
                 skills_json TEXT NOT NULL DEFAULT '[]',
                 approval_gates_json TEXT NOT NULL DEFAULT '[]',
                 progress REAL NOT NULL DEFAULT 0,
                 pause_requested INTEGER NOT NULL DEFAULT 0,
                 stop_requested INTEGER NOT NULL DEFAULT 0,
+                intervention_requested INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -217,6 +330,18 @@ def init_production_db() -> None:
             db.execute("ALTER TABLE productions ADD COLUMN agy_runtime TEXT NOT NULL DEFAULT 'agy'")
         if "archived" not in columns:
             db.execute("ALTER TABLE productions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        if "generation_turbo_profile" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_turbo_profile TEXT NOT NULL DEFAULT 'v1'")
+        if "generation_steps" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_steps INTEGER NOT NULL DEFAULT 4")
+        if "generation_megapixels" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_megapixels REAL NOT NULL DEFAULT 0.7")
+        if "generation_aspect_ratio" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
+        if "generation_megapixel_rules_json" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_megapixel_rules_json TEXT NOT NULL DEFAULT '[]'")
+        if "intervention_requested" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN intervention_requested INTEGER NOT NULL DEFAULT 0")
         shot_columns = {row[1] for row in db.execute("PRAGMA table_info(production_shots)").fetchall()}
         if "reference_ids_json" not in shot_columns:
             db.execute("ALTER TABLE production_shots ADD COLUMN reference_ids_json TEXT NOT NULL DEFAULT '[]'")
@@ -268,14 +393,50 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _text(value: Any) -> str:
+    """Return a SQLite-safe display value for production text columns.
+
+    Agent CLIs are expected to return a string summary, but some providers
+    occasionally return a structured object or array there.  SQLite cannot
+    bind those Python containers directly.  Preserve the data as readable
+    JSON instead of letting one malformed agent field abort the production.
+    """
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _decode_generation_fields(item: dict[str, Any]) -> dict[str, Any]:
+    """Expose normalized generation controls for both public and private reads."""
+    raw_rules = item.pop("generation_megapixel_rules_json", "[]")
+    try:
+        parsed_rules = normalize_megapixel_rules(raw_rules)
+    except ValueError:
+        # Rows created before the rule table existed retain their old single
+        # MP value rather than unexpectedly changing when they are reopened.
+        parsed_rules = [{
+            "max_duration": 15,
+            "megapixels": round(float(item.get("generation_megapixels", 0.7)), 1),
+        }]
+    item["generation_megapixel_rules"] = parsed_rules
+    item["generation_aspect_ratio"] = item.get("generation_aspect_ratio") or "16:9"
+    return item
+
+
 def _production_dict(row, *, include_messages: bool = False) -> dict[str, Any] | None:
     if not row:
         return None
     item = dict(row)
     item["skills"] = json.loads(item.pop("skills_json") or "[]")
     item["approval_gates"] = json.loads(item.pop("approval_gates_json") or "[]")
+    item = _decode_generation_fields(item)
     item["pause_requested"] = bool(item["pause_requested"])
     item["stop_requested"] = bool(item["stop_requested"])
+    item["intervention_requested"] = bool(item.get("intervention_requested", 0))
     item["archived"] = bool(item.get("archived", 0))
     item.pop("song_path", None)
     if include_messages:
@@ -296,14 +457,20 @@ def create_production(values: dict[str, Any]) -> dict[str, Any]:
             """INSERT INTO productions
                (id,title,pipeline,status,stage,participation_mode,continuity_mode,
                 concept,lyrics,song_path,song_name,codex_runtime,codex_model,codex_effort,
-                agy_runtime,agy_model,agy_effort,skills_json,approval_gates_json,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                agy_runtime,agy_model,agy_effort,generation_turbo_profile,generation_steps,
+                generation_megapixels,generation_aspect_ratio,generation_megapixel_rules_json,
+                skills_json,approval_gates_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 production_id, values["title"], values.get("pipeline", "music_video_v1"),
                 "draft", "intake", values["participation_mode"], values["continuity_mode"],
                 values.get("concept", ""), values["lyrics"], values["song_path"], values["song_name"],
                 values.get("codex_runtime", "codex"), values["codex_model"], values["codex_effort"],
                 values.get("agy_runtime", "agy"), values["agy_model"], values["agy_effort"],
+                values.get("generation_turbo_profile", "v1"), values.get("generation_steps", 4),
+                values.get("generation_megapixels", 0.7),
+                values.get("generation_aspect_ratio", "16:9"),
+                _json(values.get("generation_megapixel_rules", DEFAULT_GENERATION_MP_RULES)),
                 _json(values.get("skills", [])), _json(values.get("approval_gates", [])), now, now,
             ),
         )
@@ -327,7 +494,9 @@ def get_production(production_id: str, *, include_messages: bool = False, privat
         item = dict(row)
         item["skills"] = json.loads(item.pop("skills_json") or "[]")
         item["approval_gates"] = json.loads(item.pop("approval_gates_json") or "[]")
+        item = _decode_generation_fields(item)
         item["archived"] = bool(item.get("archived", 0))
+        item["intervention_requested"] = bool(item.get("intervention_requested", 0))
         return item
     return _production_dict(row, include_messages=include_messages)
 
@@ -339,6 +508,10 @@ def update_production(production_id: str, **values: Any) -> None:
         values["skills_json"] = _json(values.pop("skills"))
     if "approval_gates" in values:
         values["approval_gates_json"] = _json(values.pop("approval_gates"))
+    if "generation_megapixel_rules" in values:
+        values["generation_megapixel_rules_json"] = _json(
+            normalize_megapixel_rules(values.pop("generation_megapixel_rules"))
+        )
     values["updated_at"] = now_iso()
     assignments = ",".join(f"{key}=?" for key in values)
     with connect() as db:
@@ -349,6 +522,14 @@ def add_message(
     production_id: str, participant: str, recipient: str, kind: str,
     content: str, metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    # Keep all values bound to the TEXT columns SQLite-safe.  In particular,
+    # an agent may return a structured ``summary`` even though the contract
+    # asks for text; that value is the seventh SQL parameter (reported by
+    # sqlite3 as parameter 6 because its diagnostic is zero-based).
+    participant = _text(participant)
+    recipient = _text(recipient)
+    kind = _text(kind)
+    content = _text(content)
     message_id = uuid.uuid4().hex
     with connect() as db:
         sequence = int(db.execute(
@@ -382,6 +563,12 @@ def list_messages(production_id: str) -> list[dict[str, Any]]:
 
 
 def add_decision(production_id: str, stage: str, title: str, summary: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    # Agent summaries are contractually text, but a provider may occasionally
+    # return a structured object. Serialize it instead of aborting the stage
+    # with SQLite's zero-based "parameter 4" binding error.
+    stage = _text(stage)
+    title = _text(title)
+    summary = _text(summary)
     decision_id = uuid.uuid4().hex
     created = now_iso()
     with connect() as db:
@@ -450,7 +637,7 @@ def recover_productions() -> None:
         now = now_iso()
         db.execute(
             """UPDATE productions SET status='paused',pause_requested=0,stop_requested=0,
-               error='Recovered after bridge restart',updated_at=?
+               intervention_requested=0,error='Recovered after bridge restart',updated_at=?
                WHERE status IN ('running','pausing','retrying','stopping')""",
             (now,),
         )
