@@ -180,6 +180,7 @@ function App() {
   const [page, setPage] = useState<Page>('studio')
   const [csrf, setCsrf] = useState('')
   const [jobs, setJobs] = useState<Job[]>([])
+  const [jobsTotal, setJobsTotal] = useState(0)
   const [jobsLoading, setJobsLoading] = useState(true)
   const [sequences, setSequences] = useState<Sequence[]>([])
   const [prompt, setPrompt] = useState('')
@@ -254,6 +255,8 @@ function App() {
   const [collapsedAssetGroups, setCollapsedAssetGroups] = useState<Record<string, boolean>>({})
   const loadInFlightRef = useRef(false)
   const comfyLoadInFlightRef = useRef(false)
+  const jobsRevisionRef = useRef('')
+  const [loadedJobsLimit, setLoadedJobsLimit] = useState(32)
 
   const loadSession = async (): Promise<string | null> => {
     try {
@@ -277,15 +280,35 @@ function App() {
     }
   }
 
-  const load = async () => {
+  const applyPublicHealth = (data: Record<string, any>) => {
+    if ('reference_ready' in data) setReferenceReady(Boolean(data.reference_ready))
+    if ('reference_10s_ready' in data) setReference10Ready(Boolean(data.reference_10s_ready))
+    if ('spectrum_ready' in data) setSpectrumReady(Boolean(data.spectrum_ready))
+    if ('clipproj_ready' in data) setClipprojReady(Boolean(data.clipproj_ready))
+    if ('turbo_v4_ready' in data) setTurboV4Ready(Boolean(data.turbo_v4_ready))
+    if ('reference_turbo_ready' in data) setReferenceTurboReady(Boolean(data.reference_turbo_ready))
+    if ('audio_lock_ready' in data) setAudioLockReady(Boolean(data.audio_lock_ready))
+    if ('gpu_conflict' in data) setGpuConflict(Boolean(data.gpu_conflict))
+  }
+
+  const load = async (forceFull = false, requestedLimit = loadedJobsLimit) => {
     if (loadInFlightRef.current) return
     loadInFlightRef.current = true
     try {
-      const response = await fetch('/api/jobs', { cache: 'no-store' })
+      if (!forceFull && jobsRevisionRef.current) {
+        const revisionResponse = await fetch('/api/jobs/revision', { cache: 'no-store' })
+        if (revisionResponse.ok) {
+          const revisionData = await revisionResponse.json()
+          applyPublicHealth(revisionData)
+          if (revisionData.revision === jobsRevisionRef.current) return
+        }
+      }
+      const response = await fetch(`/api/jobs?limit=${requestedLimit}`, { cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
-        setJobs(data.jobs); setSequences(data.sequences || []); setLibrary(data.library || { root: '', projects: [], assignments: [] }); setReferenceReady(data.reference_ready); setReference10Ready(data.reference_10s_ready); setSpectrumReady(data.spectrum_ready); setClipprojReady(data.clipproj_ready); setTurboV4Ready(data.turbo_v4_ready); setReferenceTurboReady(data.reference_turbo_ready); setGpuConflict(Boolean(data.gpu_conflict))
-        setAudioLockReady(Boolean(data.audio_lock_ready))
+        setJobs(data.jobs); setJobsTotal(Number(data.jobs_total || data.jobs?.length || 0)); setSequences(data.sequences || []); setLibrary(data.library || { root: '', projects: [], assignments: [] })
+        jobsRevisionRef.current = data.revision || ''
+        applyPublicHealth(data)
       }
     } catch {
       // The session retry below will recover after a brief bridge restart.
@@ -297,10 +320,14 @@ function App() {
 
   useEffect(() => {
     void loadSession()
-    void load()
-    const timer = window.setInterval(load, 2000)
-    return () => window.clearInterval(timer)
+    void load(true)
   }, [])
+
+  useEffect(() => {
+    if (page !== 'studio') return
+    const timer = window.setInterval(() => { void load(false) }, 2000)
+    return () => window.clearInterval(timer)
+  }, [page])
 
   useEffect(() => {
     if (csrf) return
@@ -574,6 +601,9 @@ function App() {
     ...visibleHistory.map(job => ({ kind: 'job' as const, id: job.id, created_at: job.created_at, job })),
     ...visibleSequenceHistory.map(sequence => ({ kind: 'sequence' as const, id: sequence.id, created_at: sequence.created_at, sequence })),
   ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+  // Mount history progressively so mobile browsers do not create every video
+  // element at once. All records remain loaded for counts and bulk actions.
+  const displayedResultAssets = visibleResultAssets
   // Bulk delete also needs to cover failed and canceled history entries. Only
   // completed entries have a generated file that can be moved to a folder.
   const bulkCandidates = visibleResultAssets.filter(asset => {
@@ -603,7 +633,7 @@ function App() {
       const detail = typeof data.detail === 'string' ? data.detail : raw.trim() || `HTTP ${response.status}`
       throw new Error(detail)
     }
-    await load()
+    await load(true)
     return data
   }
 
@@ -861,7 +891,7 @@ function App() {
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.detail || 'Fortnite could not be closed')
       setGpuConflict(Boolean(data.gpu_conflict))
-      await load()
+      await load(true)
       feedback.notify('success', 'Fortnite closed and GPU status refreshed')
     } catch (e) {
       setMainError('system', e instanceof Error ? e.message : 'Fortnite could not be closed')
@@ -1037,6 +1067,10 @@ function App() {
       setBulkSourceProject(libraryProject === 'all' ? '' : libraryProject)
       setBulkSourceFolder(!['all', 'unassigned'].includes(libraryProject) && libraryFolder !== 'all' ? libraryFolder : '')
       setBulkMode(true)
+      if (jobs.length < jobsTotal) {
+        setLoadedJobsLimit(jobsTotal)
+        void load(true, jobsTotal)
+      }
     }
   }
 
@@ -1074,7 +1108,7 @@ function App() {
           folder_id: bulkProject ? bulkFolder || null : null,
         })
       }
-      await load()
+      await load(true)
       setBulkSelected([])
       feedback.notify('success', `${assets.length} assets moved successfully`)
     } catch (e) {
@@ -1098,7 +1132,7 @@ function App() {
       for (const asset of assets) {
         await bulkMutation(asset.source_type === 'job' ? `/api/jobs/${asset.source_id}` : `/api/sequences/${asset.source_id}`, 'DELETE')
       }
-      await load()
+      await load(true)
       setBulkSelected([])
       feedback.notify('success', `${assets.length} assets deleted`)
     } catch (e) {
@@ -1162,7 +1196,7 @@ function App() {
         <button className={`comfy-status-button ${comfyLoading ? 'checking' : comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyLoading ? 'Checking ComfyUI…' : comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
-        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load() } }} aria-label="רענון"><RefreshCw size={18} /></button>
+        <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load(true) } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
     <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
@@ -1368,17 +1402,18 @@ function App() {
       </div>}
       <div className="asset-results-tree">
         {(() => {
-          const unassigned = visibleResultAssets.filter(asset => !assignmentFor(asset.kind, asset.id))
+          const unassigned = displayedResultAssets.filter(asset => !assignmentFor(asset.kind, asset.id))
           const selectedProjects = libraryProject === 'all' ? library.projects : library.projects.filter(project => project.id === libraryProject)
           return <>
             {(libraryProject === 'all' || libraryProject === 'unassigned') && !!unassigned.length && renderAssetContainer('unassigned', 'ללא פרויקט', unassigned, 'unassigned')}
             {libraryProject !== 'unassigned' && selectedProjects.map(project => {
-              const assets = visibleResultAssets.filter(asset => assignmentFor(asset.kind, asset.id)?.project_id === project.id)
+              const assets = displayedResultAssets.filter(asset => assignmentFor(asset.kind, asset.id)?.project_id === project.id)
               return assets.length || libraryProject === project.id || (libraryProject === 'all' && project.folders.length) ? renderProjectResults(project, assets) : null
             })}
           </>
         })()}
       </div>
+      {!bulkMode && jobs.length < jobsTotal && <button type="button" className="history-load-more" onClick={() => { const next = Math.min(jobsTotal, loadedJobsLimit + 24); setLoadedJobsLimit(next); void load(true, next) }}>Load 24 more · {jobsTotal - jobs.length} remaining</button>}
       {!visibleSequenceHistory.length && !visibleHistory.length && <div className="empty"><div><Folder size={22}/></div><p>No generated videos are stored in this location.</p></div>}
     </section>}
     <footer>H3 עובד מקומית · החיבור זמין רק ברשת הפרטית שלך</footer>
@@ -1458,7 +1493,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
   return <article className={`job-card ${job.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
     {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
     {selectedOrder && <span className="selection-order">{selectedOrder}</span>}
-    {job.video_url && <video src={job.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
+    {job.video_url && <video src={job.video_url} controls preload="none" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[job.status]}</span><span>{job.duration} שנ׳ · {modeLabel(job.mode)}</span></div>
       {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
@@ -1516,7 +1551,7 @@ function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage,
   return <article className={`job-card sequence-card ${sequence.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
     {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
     {selectedOrder && <span className="selection-order">{selectedOrder}</span>}
-    {sequence.video_url && <video src={sequence.video_url} controls preload="metadata" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
+    {sequence.video_url && <video src={sequence.video_url} controls preload="none" playsInline style={{ aspectRatio: `${width}/${height}` }} />}
     <div className="job-body">
       <div className="job-head"><span className="status"><i />{labels[sequence.status]}</span><span>{sequence.kind === 'connected' ? 'רצף פרומפטים' : 'חיבור מההיסטוריה'}</span></div>
       {assignment && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment.project_name}{assignment.folder_name ? ` / ${assignment.folder_name}` : ''}</span><b>{assignment.filename}</b></div>}

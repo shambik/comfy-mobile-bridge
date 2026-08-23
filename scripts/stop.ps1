@@ -7,14 +7,20 @@ if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) { Write-Host 'No brid
 $bridgePid = [int](Get-Content -LiteralPath $pidPath -Raw)
 $bridge = Get-CimInstance Win32_Process -Filter "ProcessId=$bridgePid" -ErrorAction SilentlyContinue
 if ($bridge -and ([string]$bridge.CommandLine -match [regex]::Escape($repo))) {
-    $children = Get-CimInstance Win32_Process | Where-Object {
-        $_.ParentProcessId -eq $bridgePid -and [string]$_.CommandLine -match [regex]::Escape($config.ComfyRoot)
+    $runScript = [regex]::Escape((Join-Path $repo 'run.py'))
+    # A Windows venv python.exe is a launcher and can start the real Python as
+    # a child. Stopping only the PID recorded by start.ps1 leaves that child
+    # serving the old bridge code on port 8787. Stop only processes whose own
+    # command line identifies this repository's run.py; never match or stop
+    # the separately managed ComfyUI main.py process.
+    $bridgeProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+        ([int]$_.ProcessId -eq $bridgePid -or [int]$_.ParentProcessId -eq $bridgePid) -and
+        [string]$_.CommandLine -match $runScript
+    } | Sort-Object { if ([int]$_.ProcessId -eq $bridgePid) { 1 } else { 0 } })
+    foreach ($process in $bridgeProcesses) {
+        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
     }
-    foreach ($child in $children) {
-        Stop-Process -Id ([int]$child.ProcessId) -Force -ErrorAction SilentlyContinue
-    }
-    Stop-Process -Id $bridgePid -Force -ErrorAction SilentlyContinue
-    Write-Host "Stopped bridge process $bridgePid and only its owned ComfyUI children."
+    Write-Host "Stopped $($bridgeProcesses.Count) bridge process(es). ComfyUI was left running."
 } else {
     Write-Host 'PID file did not identify a bridge process; no process was stopped.'
 }

@@ -20,6 +20,15 @@ from .config import (AGENT_HEARTBEAT_SECONDS, AGENT_TIMEOUT_SECONDS, AGY_COMMAND
                      AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, PRODUCTIONS, ROOT)
 
 
+REFERENCE_ASPECT_RATIOS = {
+    "16:9": 16 / 9,
+    "1:1": 1.0,
+    "9:16": 9 / 16,
+    "4:3": 4 / 3,
+    "3:4": 3 / 4,
+}
+
+
 CODEX_FALLBACK_MODELS = [
     {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
     {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
@@ -106,6 +115,10 @@ class AgentExecutionError(RuntimeError):
         self.returncode = returncode
 
 
+class GeneratedImageValidationError(RuntimeError):
+    """A provider returned an image that does not match the requested project shape."""
+
+
 AgentOutputCallback = Callable[[str, str], Awaitable[None]]
 AgentHeartbeatCallback = Callable[[float, float, str, str], Awaitable[None]]
 
@@ -127,6 +140,13 @@ def _event_label(channel: str, line: str) -> str:
     if not isinstance(event, dict):
         return f"{channel or 'CLI'} event"
     event_type = str(event.get("type") or event.get("event") or "event").replace("_", " ")
+    step_update = event.get("step_update")
+    if isinstance(step_update, dict):
+        step_type = str(step_update.get("step_type") or "step").replace("_", " ")
+        state = str(step_update.get("state") or "").lower()
+        tool_name = str(step_update.get("tool_name") or "").replace("_", " ")
+        detail = f"{step_type}{f' {tool_name}' if tool_name else ''}"
+        return f"{event_type} / {detail}{f' ({state})' if state else ''}"
     item = event.get("item") if isinstance(event.get("item"), dict) else event
     item_type = str(item.get("type") or "").replace("_", " ") if isinstance(item, dict) else ""
     return f"{event_type}{f' / {item_type}' if item_type and item_type != event_type else ''}"
@@ -483,28 +503,119 @@ def _normalize_codex_result(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _recover_structured_result_from_error(
+    error: AgentExecutionError, session_id: str | None = None,
+) -> tuple[str, str | None] | None:
+    """Recover a real task result from a non-zero CLI exit when possible.
+
+    AGY can emit a valid final JSON result and still terminate the wrapper with
+    a non-zero status after an internal stream/tool event. The old bridge
+    treated the exit code as authoritative and discarded the result, which
+    turned an approval into a production failure. Only accept the fallback
+    when the output contains a real non-empty string summary; schema
+    placeholders and diagnostic-only output are rejected.
+    """
+    if not error.stdout.strip():
+        return None
+    try:
+        payload, found_session = _extract_result(error.stdout)
+    except RuntimeError:
+        return None
+    normalized = _normalize_codex_result(payload)
+    summary = normalized.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    if isinstance(normalized.get("properties"), dict) and normalized.get("type") == "object":
+        return None
+    return error.stdout, found_session or session_id
+
+
 class AgentProcessManager:
     def __init__(self) -> None:
         self.processes: dict[str, asyncio.subprocess.Process] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        self.activities: dict[str, dict[str, Any]] = {}
 
     def has_active_process(self, production_id: str) -> bool:
         """Return whether this manager still owns an agent subprocess."""
-        return production_id in self.processes
-
-    async def cancel(self, production_id: str) -> bool:
-        """Stop an agent and every process it spawned.
-
-        On Windows the configured Codex command commonly resolves to an npm
-        ``.cmd`` shim.  Terminating that shim alone leaves the child
-        ``node/codex.exe`` process alive with the agent's stdout pipes open;
-        the production task then waits forever and an intervention appears to
-        be ignored.  ``taskkill /T`` is deliberately scoped to this tracked
-        process PID so it cannot affect ComfyUI or another production.
-        """
         process = self.processes.get(production_id)
-        if not process:
-            return False
+        return bool(process and process.returncode is None)
+
+    def update_activity(self, production_id: str, **values: Any) -> None:
+        activity = self.activities.get(production_id)
+        if activity is not None:
+            activity.update(values)
+
+    def get_activity(self, production_id: str) -> dict[str, Any] | None:
+        activity = self.activities.get(production_id)
+        if not activity:
+            return None
+        now = time.monotonic()
+        started_at = float(activity.get("started_at") or now)
+        last_output_at = float(activity.get("last_output_at") or started_at)
+        process = self.processes.get(production_id)
+        process_alive = bool(process and process.returncode is None)
+        state = activity.get("state", "working")
+        last_event = activity.get("last_event") or ""
+        if process and not process_alive:
+            state = "recovering"
+            last_event = last_event or "Agent wrapper exited; collecting its final response"
+        return {
+            "participant": activity.get("participant"),
+            "runtime": activity.get("runtime"),
+            "model": activity.get("model"),
+            "effort": activity.get("effort"),
+            "state": state,
+            "elapsed_seconds": round(max(0.0, now - started_at), 1),
+            "idle_seconds": round(max(0.0, now - last_output_at), 1),
+            "last_event": last_event,
+            "process_alive": process_alive,
+            "pid": process.pid if process else None,
+        }
+
+    @staticmethod
+    async def _stop_reader_tasks(
+        tasks: list[asyncio.Task | None], streams: list[asyncio.StreamReader | None],
+        timeout: float = 1.0,
+    ) -> None:
+        """Release pipe readers without waiting on Windows cancellation.
+
+        A CLI wrapper can exit while one of its descendants still owns an
+        inherited stdout/stderr handle.  On the Proactor event loop a pending
+        ``readline`` may ignore task cancellation for an unbounded period.
+        Even ``asyncio.wait(..., timeout=...)`` proved unsafe here because the
+        pipe transport can remain in a cancelling state after the timeout.
+        The wrapper has already exited at every call site. Do not call the
+        Proactor transport's synchronous ``close()`` here: on affected
+        Windows builds that call itself can block when a descendant inherited
+        the handle. Cancel and detach the readers so cleanup can never hold
+        the production controller hostage.
+        """
+        for task in tasks:
+            if not task:
+                continue
+            if not task.done():
+                task.cancel()
+            # Retrieve a later exception without awaiting task completion.
+            # Cancelled tasks raise CancelledError from result(), which is a
+            # BaseException on supported Python versions.
+            def consume_result(done: asyncio.Task) -> None:
+                try:
+                    done.result()
+                except BaseException:
+                    pass
+            task.add_done_callback(consume_result)
+
+    @staticmethod
+    async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+        """Terminate a CLI wrapper and any child it launched.
+
+        On Windows the Codex command normally goes through an npm ``.cmd``
+        shim. Killing only the shim can leave its Node child holding the
+        stdout/stderr pipe open, which makes an agent task appear to run
+        forever. ``taskkill /T`` is scoped to the tracked PID and therefore
+        cannot touch ComfyUI or another production.
+        """
         pid = process.pid
         if os.name == "nt":
             try:
@@ -517,9 +628,6 @@ class AgentProcessManager:
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError):
-                # Fall through to the asyncio process handle below.  This is
-                # mainly a fallback for restricted Windows environments where
-                # taskkill is unavailable.
                 pass
         else:
             try:
@@ -552,6 +660,21 @@ class AgentProcessManager:
             if process.returncode is None:
                 process.kill()
             await process.wait()
+
+    async def cancel(self, production_id: str) -> bool:
+        """Stop an agent and every process it spawned.
+
+        On Windows the configured Codex command commonly resolves to an npm
+        ``.cmd`` shim.  Terminating that shim alone leaves the child
+        ``node/codex.exe`` process alive with the agent's stdout pipes open;
+        the production task then waits forever and an intervention appears to
+        be ignored.  ``taskkill /T`` is deliberately scoped to this tracked
+        process PID so it cannot affect ComfyUI or another production.
+        """
+        process = self.processes.get(production_id)
+        if not process:
+            return False
+        await self._terminate_process_tree(process)
         return True
 
     async def _run(
@@ -609,6 +732,10 @@ class AgentProcessManager:
                     last_output_at = time.monotonic()
                     last_output_channel = channel
                     last_output_line = line
+                    self.update_activity(
+                        production_id, last_output_at=last_output_at,
+                        last_event=_event_label(channel, line), state="working",
+                    )
                 if on_output:
                     try:
                         await on_output(channel, line)
@@ -630,31 +757,56 @@ class AgentProcessManager:
                     pass
 
         heartbeat_task: asyncio.Task | None = None
+        stdout_task: asyncio.Task | None = None
+        stderr_task: asyncio.Task | None = None
+        process_wait_task: asyncio.Task | None = None
         try:
             if process.stdin is not None:
                 if prompt is not None:
                     process.stdin.write(prompt.encode("utf-8"))
                     await process.stdin.drain()
                 process.stdin.close()
-                try:
-                    await process.stdin.wait_closed()
-                except (BrokenPipeError, ConnectionError):
-                    pass
+                # Do not await ``wait_closed()`` for a subprocess pipe on
+                # Windows. CLI wrappers can exit while a descendant still
+                # owns the inherited handle, and Proactor then waits forever
+                # even though the agent process has already completed. The
+                # prompt was drained above, so closing is sufficient; process
+                # completion and bounded stdout/stderr collection below are
+                # the authoritative lifecycle signals.
             stdout_task = asyncio.create_task(consume(process.stdout, stdout_lines, "stdout"))
             stderr_task = asyncio.create_task(consume(process.stderr, stderr_lines, "stderr"))
+            process_wait_task = asyncio.create_task(process.wait())
             if on_heartbeat:
                 heartbeat_task = asyncio.create_task(heartbeat())
             try:
+                # Wait for the process itself first. A child process can keep
+                # an inherited pipe open after the wrapper exits; waiting on
+                # ``gather(stdout, stderr, process.wait())`` would otherwise
+                # block forever even though the CLI is already gone.
                 await asyncio.wait_for(
-                    asyncio.gather(stdout_task, stderr_task, process.wait()),
-                    timeout=AGENT_TIMEOUT_SECONDS,
+                    asyncio.shield(process_wait_task), timeout=AGENT_TIMEOUT_SECONDS,
                 )
+                finished_readers, pending_readers = await asyncio.wait(
+                    [stdout_task, stderr_task], timeout=5,
+                )
+                if finished_readers:
+                    await asyncio.gather(*finished_readers, return_exceptions=True)
+                if pending_readers:
+                    # The process is finished, so unreadable inherited pipes
+                    # cannot provide more useful agent output. Do not leave
+                    # the production controller stuck waiting for EOF.
+                    self.update_activity(
+                        production_id, state="recovering",
+                        last_event="Agent wrapper exited; collecting its final response",
+                    )
+                    await self._stop_reader_tasks(
+                        [stdout_task, stderr_task], [process.stdout, process.stderr],
+                    )
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                stdout_task.cancel()
-                stderr_task.cancel()
-                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+                await self._terminate_process_tree(process)
+                await self._stop_reader_tasks(
+                    [stdout_task, stderr_task], [process.stdout, process.stderr],
+                )
                 raise
         except asyncio.TimeoutError as exc:
             elapsed = max(0.0, time.monotonic() - started_at)
@@ -665,9 +817,13 @@ class AgentProcessManager:
                 f"last event: {label}; no new CLI output for {round(idle)} seconds"
             ) from exc
         finally:
+            if process_wait_task and not process_wait_task.done():
+                process_wait_task.cancel()
+                process_wait_task.add_done_callback(self._consume_task_result)
             if heartbeat_task:
-                heartbeat_task.cancel()
-                await asyncio.gather(heartbeat_task, return_exceptions=True)
+                if not heartbeat_task.done():
+                    heartbeat_task.cancel()
+                heartbeat_task.add_done_callback(self._consume_task_result)
             self.processes.pop(production_id, None)
         out = "".join(stdout_lines)
         err = "".join(stderr_lines)
@@ -681,6 +837,14 @@ class AgentProcessManager:
                 returncode=process.returncode,
             )
         return out
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task) -> None:
+        """Retrieve a background cleanup result without awaiting it."""
+        try:
+            task.result()
+        except BaseException:
+            pass
 
     async def invoke_codex(
         self, production_id: str, prompt: str, model: str, effort: str,
@@ -708,7 +872,11 @@ class AgentProcessManager:
         command.extend(["--model", model, "-c", f'model_reasoning_effort="{effort}"'])
         for directory in extra_dirs or []:
             resolved = Path(directory).resolve()
-            if resolved.is_dir() and str(resolved) != str(PRODUCTIONS / production_id):
+            # ``codex exec resume`` has a narrower option set than a new
+            # ``codex exec`` invocation and rejects ``--add-dir``. Resumed
+            # sessions already run with the production directory as cwd, so
+            # there is no need to append the extra-directory flag there.
+            if not session_id and resolved.is_dir() and str(resolved) != str(PRODUCTIONS / production_id):
                 command.extend(["--add-dir", str(resolved)])
         for image in images or []:
             command.extend(["--image", str(image)])
@@ -722,9 +890,16 @@ the complete structured payload, and `issues` to be a JSON-encoded string contai
 an array of issue objects. Use null when either has no value. Do not wrap the object
 in Markdown fences or add commentary outside the JSON.
 """
-        raw = await self._run(
-            production_id, command, prompt, PRODUCTIONS / production_id, on_output, on_heartbeat,
-        )
+        recovered_session: str | None = None
+        try:
+            raw = await self._run(
+                production_id, command, prompt, PRODUCTIONS / production_id, on_output, on_heartbeat,
+            )
+        except AgentExecutionError as exc:
+            recovered = _recover_structured_result_from_error(exc, session_id)
+            if not recovered:
+                raise
+            raw, recovered_session = recovered
         try:
             content, found_session = _extract_result(raw)
             content = _normalize_codex_result(content)
@@ -733,7 +908,7 @@ in Markdown fences or add commentary outside the JSON.
                 f"codex CLI returned no valid structured response: {exc}",
                 runtime="codex", command=command, stdout=raw, returncode=0,
             ) from exc
-        return AgentResult("codex", content, raw, found_session or session_id, model, effort)
+        return AgentResult("codex", content, raw, found_session or recovered_session or session_id, model, effort)
 
     async def invoke_agy(
         self, production_id: str, prompt: str, model: str, effort: str,
@@ -766,10 +941,17 @@ in Markdown fences or add commentary outside the JSON.
         if session_id:
             command.extend(["--conversation", session_id])
         request_path.write_text(prompt.rstrip() + "\n\n" + AGY_RESPONSE_CONTRACT + "\n", encoding="utf-8")
-        raw = await self._run(
-            production_id, command, cwd=PRODUCTIONS / production_id,
-            on_output=on_output, on_heartbeat=on_heartbeat,
-        )
+        recovered_session: str | None = None
+        try:
+            raw = await self._run(
+                production_id, command, cwd=PRODUCTIONS / production_id,
+                on_output=on_output, on_heartbeat=on_heartbeat,
+            )
+        except AgentExecutionError as exc:
+            recovered = _recover_structured_result_from_error(exc, session_id)
+            if not recovered:
+                raise
+            raw, recovered_session = recovered
         try:
             content, found_session = _extract_result(raw)
             content = _normalize_codex_result(content)
@@ -778,7 +960,7 @@ in Markdown fences or add commentary outside the JSON.
                 f"agy CLI returned no valid structured response: {exc}",
                 runtime="agy", command=command, stdout=raw, returncode=0,
             ) from exc
-        return AgentResult("agy", content, raw, found_session or session_id, model, effort)
+        return AgentResult("agy", content, raw, found_session or recovered_session or session_id, model, effort)
 
     async def invoke(
         self, runtime: str, participant: str, production_id: str, prompt: str,
@@ -788,36 +970,46 @@ in Markdown fences or add commentary outside the JSON.
         on_heartbeat: AgentHeartbeatCallback | None = None,
         extra_dirs: list[Path] | None = None,
     ) -> AgentResult:
-        if runtime == "codex":
-            result = await self.invoke_codex(
-                production_id, prompt, model, effort, session_id, images, on_output, on_heartbeat, extra_dirs,
-            )
-        elif runtime == "agy":
-            # AGY reads media by path from the production directory. Image
-            # paths are also included explicitly in the task when supplied.
-            if images:
-                prompt += "\n\nAttached image paths:\n" + "\n".join(str(path) for path in images)
-            result = await self.invoke_agy(
-                production_id, prompt, model, effort, session_id, on_output, on_heartbeat, extra_dirs,
-            )
-        else:
-            raise RuntimeError(f"Unsupported agent runtime: {runtime}")
-        result.participant = participant
-        return result
+        started_at = time.monotonic()
+        self.activities[production_id] = {
+            "participant": participant, "runtime": runtime, "model": model,
+            "effort": effort, "state": "starting", "started_at": started_at,
+            "last_output_at": started_at, "last_event": "",
+        }
+        try:
+            if runtime == "codex":
+                result = await self.invoke_codex(
+                    production_id, prompt, model, effort, session_id, images, on_output, on_heartbeat, extra_dirs,
+                )
+            elif runtime == "agy":
+                # AGY reads media by path from the production directory. Image
+                # paths are also included explicitly in the task when supplied.
+                if images:
+                    prompt += "\n\nAttached image paths:\n" + "\n".join(str(path) for path in images)
+                result = await self.invoke_agy(
+                    production_id, prompt, model, effort, session_id, on_output, on_heartbeat, extra_dirs,
+                )
+            else:
+                raise RuntimeError(f"Unsupported agent runtime: {runtime}")
+            result.participant = participant
+            return result
+        finally:
+            self.activities.pop(production_id, None)
 
     async def generate_reference_image(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
         provider: str = "auto", agy_model: str | None = None, agy_effort: str | None = None,
-        source_images: list[Path] | None = None,
+        source_images: list[Path] | None = None, aspect_ratio: str = "16:9",
     ) -> Path:
         """Generate a project-bound still with Codex ImageGen or AGY fallback."""
         if provider not in {"auto", "codex", "agy"}:
             raise ValueError("Image provider must be auto, codex, or agy")
+        aspect_ratio = self._normalize_reference_aspect_ratio(aspect_ratio)
         failures: list[str] = []
         if provider in {"auto", "codex"}:
             try:
                 return await self._generate_reference_image_codex(
-                    production_id, prompt, output_path, model, effort, source_images or [],
+                    production_id, prompt, output_path, model, effort, source_images or [], aspect_ratio,
                 )
             except Exception as exc:
                 if provider == "codex":
@@ -828,7 +1020,7 @@ in Markdown fences or add commentary outside the JSON.
                 return await self._generate_reference_image_agy(
                     production_id, prompt, output_path,
                     agy_model or AGY_DEFAULT_MODEL, agy_effort or AGY_DEFAULT_EFFORT,
-                    source_images or [],
+                    source_images or [], aspect_ratio,
                 )
             except Exception as exc:
                 if provider == "agy":
@@ -837,15 +1029,38 @@ in Markdown fences or add commentary outside the JSON.
         raise RuntimeError("No image provider completed the reference still. " + " | ".join(failures))
 
     @staticmethod
-    def _validate_generated_image(target: Path, provider: str) -> Path:
+    def _normalize_reference_aspect_ratio(aspect_ratio: str | None) -> str:
+        resolved = str(aspect_ratio or "16:9").strip()
+        if resolved not in REFERENCE_ASPECT_RATIOS:
+            raise ValueError(f"Unsupported reference aspect ratio: {resolved}")
+        return resolved
+
+    @classmethod
+    def _validate_generated_image(
+        cls, target: Path, provider: str, aspect_ratio: str = "16:9",
+    ) -> Path:
         if not target.is_file() or target.stat().st_size == 0:
             raise RuntimeError(f"{provider} completed without producing the requested reference image")
+        expected_aspect = REFERENCE_ASPECT_RATIOS[cls._normalize_reference_aspect_ratio(aspect_ratio)]
         try:
             with Image.open(target) as image:
                 image.verify()
+                width, height = image.size
         except (UnidentifiedImageError, OSError) as exc:
             target.unlink(missing_ok=True)
             raise RuntimeError(f"{provider} produced an invalid image file") from exc
+        actual_aspect = width / height if height else 0
+        # Provider image tools can choose a nearby raster size (for example,
+        # 1376x768 for a nominal 16:9 request). Allow that small quantization
+        # difference, but never accept a visibly different shape such as 16:9
+        # when the production requested 1:1.
+        if not height or abs(actual_aspect - expected_aspect) / expected_aspect > 0.02:
+            target.unlink(missing_ok=True)
+            raise GeneratedImageValidationError(
+                f"{provider} returned {width}x{height} ({actual_aspect:.4f}); "
+                f"the production requires {cls._normalize_reference_aspect_ratio(aspect_ratio)} "
+                f"({expected_aspect:.4f})"
+            )
         return target
 
     @staticmethod
@@ -907,7 +1122,7 @@ in Markdown fences or add commentary outside the JSON.
         return sorted(candidates, key=lambda path: path.stat().st_mtime_ns, reverse=True)
 
     @staticmethod
-    def _materialize_png(source: Path, target: Path) -> Path:
+    def _materialize_png(source: Path, target: Path, aspect_ratio: str = "16:9") -> Path:
         """Copy/convert a provider result to the exact requested PNG path."""
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
         try:
@@ -918,30 +1133,30 @@ in Markdown fences or add commentary outside the JSON.
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
-        return AgentProcessManager._validate_generated_image(target, "Image provider")
+        return AgentProcessManager._validate_generated_image(target, "Image provider", aspect_ratio)
 
     def _finalize_generated_image(
         self, target: Path, provider: str, production_root: Path,
-        before: dict[Path, tuple[int, int]], started_at: int,
+        before: dict[Path, tuple[int, int]], started_at: int, aspect_ratio: str = "16:9",
     ) -> Path | None:
         """Find and atomically normalize a provider result, if one exists."""
         if target.is_file() and target.stat().st_size:
             try:
-                return self._materialize_png(target, target)
+                return self._materialize_png(target, target, aspect_ratio)
             except (UnidentifiedImageError, OSError):
                 target.unlink(missing_ok=True)
         for candidate in self._image_candidates(production_root, before, started_at, target):
             try:
                 with Image.open(candidate) as image:
                     image.verify()
-                return self._materialize_png(candidate, target)
+                return self._materialize_png(candidate, target, aspect_ratio)
             except (UnidentifiedImageError, OSError):
                 continue
         return None
 
     async def _generate_reference_image_codex(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
-        source_images: list[Path],
+        source_images: list[Path], aspect_ratio: str = "16:9",
     ) -> Path:
         executable = _command_path(CODEX_COMMAND)
         if not executable:
@@ -965,7 +1180,9 @@ SOURCE REFERENCE IMAGES (preserve their relevant identity, wardrobe, props, and 
 {chr(10).join(str(path) for path in source_images) or '(none)'}
 
 Requirements:
-- Generate a polished 16:9 reference still suitable as MiniMax H3 I2V input.
+- The production-selected aspect ratio is {aspect_ratio}; it is authoritative. Ignore any conflicting
+  aspect ratio mentioned inside the specification and generate a polished {aspect_ratio} reference still
+  suitable as MiniMax H3 I2V input.
 - Do not add visible text, logos, license-plate characters, captions, or watermarks unless the specification
   contains exact required text in quotation marks.
 - Inspect the generated image for obvious anatomy, identity, composition, and text defects.
@@ -975,7 +1192,7 @@ Requirements:
 """.strip()
         command = [
             executable, "exec", "--json", "--sandbox", "workspace-write",
-            "--approve-for-me", "--skip-git-repo-check", "--ephemeral",
+            "--skip-git-repo-check", "--ephemeral",
             "-C", str(production_root), "--model", model,
             "-c", f'model_reasoning_effort="{effort}"',
         ]
@@ -990,7 +1207,9 @@ Requirements:
             # the CLI connection closes. Verify the handoff before discarding
             # that useful result.
             run_error = exc
-        finalized = self._finalize_generated_image(target, "Codex ImageGen", production_root, before, started_at)
+        finalized = self._finalize_generated_image(
+            target, "Codex ImageGen", production_root, before, started_at, aspect_ratio,
+        )
         if finalized:
             return finalized
         if run_error:
@@ -999,7 +1218,7 @@ Requirements:
 
     async def _generate_reference_image_agy(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
-        source_images: list[Path],
+        source_images: list[Path], aspect_ratio: str = "16:9",
     ) -> Path:
         executable = _command_path(AGY_COMMAND)
         if not executable:
@@ -1013,7 +1232,9 @@ Requirements:
         started_at = time.time_ns()
         target.unlink(missing_ok=True)
         task = f"""
-Use your image-generation capability to create exactly one polished 16:9 production reference still.
+Use your image-generation capability to create exactly one polished {aspect_ratio} production reference still.
+The production-selected aspect ratio is authoritative. Ignore any conflicting aspect ratio mentioned inside
+the specification.
 
 SPECIFICATION:
 {prompt}
@@ -1039,7 +1260,9 @@ Requirements:
             await self._run(production_id, command, cwd=PRODUCTIONS / production_id)
         except Exception as exc:
             run_error = exc
-        finalized = self._finalize_generated_image(target, "AGY ImageGen", production_root, before, started_at)
+        finalized = self._finalize_generated_image(
+            target, "AGY ImageGen", production_root, before, started_at, aspect_ratio,
+        )
         if finalized:
             return finalized
         if run_error:

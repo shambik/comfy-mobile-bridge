@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import secrets
@@ -16,13 +17,14 @@ from .db import connect, get_job, next_position, now_iso
 from .generation import normalize_generation_settings
 from .library import resolve_asset_path
 from .media import (assemble_clips, attach_song, extract_last_frame, extract_review_frames,
-                    prepare_audio_segment, probe_audio_metadata)
+                    is_audio_only_media, prepare_agent_audio_carrier, prepare_audio_segment,
+                    probe_audio_metadata)
 from .production_db import (add_artifact, add_decision, add_event, add_message, add_reference,
-                            create_shot_attempt, get_production, list_messages, list_shots,
+                            create_shot_attempt, get_production, list_artifacts, list_messages, list_shots,
                             get_reference, list_references, recover_productions, replace_shot_plan, resolve_decision,
                              normalize_production_generation, megapixels_for_duration,
-                             update_production, update_shot, update_shot_attempt)
-from .skill_catalog import selected_skill_context
+                             update_message_metadata, update_production, update_shot, update_shot_attempt)
+from .skill_catalog import selected_skill_context, selected_skill_summary_context
 
 
 class ReferenceGenerationError(RuntimeError):
@@ -88,11 +90,92 @@ class ProductionOrchestrator:
     async def cancel_agents(self, production_id: str) -> None:
         await process_manager.cancel(production_id)
 
+    async def interrupt_active_work(self, production_id: str) -> dict[str, bool]:
+        """Cancel every owner of the current turn before it is re-queued.
+
+        Killing only the CLI subprocess is insufficient: the production task
+        can remain registered while awaiting a pipe or parser result, which
+        prevents the scheduler from starting the queued intervention.  Stop
+        the subprocess, ComfyUI job, and controller task in that order.
+        """
+        try:
+            agent_cancelled = bool(await asyncio.wait_for(
+                process_manager.cancel(production_id), timeout=5,
+            ))
+        except Exception:
+            agent_cancelled = False
+        try:
+            generation_cancelled = bool(await asyncio.wait_for(
+                self.cancel_generation(production_id), timeout=5,
+            ))
+        except Exception:
+            generation_cancelled = False
+        task = self.production_tasks.get(production_id)
+        controller_cancel_requested = bool(task and not task.done())
+        if task and not task.done():
+            task.cancel()
+            # Never hold the intervention HTTP request open indefinitely. Some
+            # provider calls use worker threads or child-process pipes that do
+            # not acknowledge asyncio cancellation immediately. Keep such a
+            # task registered so the scheduler cannot start a second controller
+            # for this production, then let the scheduler remove it once done.
+            done, _ = await asyncio.wait({task}, timeout=5)
+            controller_cancelled = task in done
+        else:
+            controller_cancelled = bool(task and task.done())
+        if task is not None and task.done():
+            self.production_tasks.pop(production_id, None)
+        self.current_jobs.pop(production_id, None)
+        return {
+            "agent": agent_cancelled,
+            "generation": generation_cancelled,
+            "controller": controller_cancelled,
+            "controller_cancel_requested": controller_cancel_requested,
+        }
+
     async def cancel_generation(self, production_id: str) -> bool:
         job_id = self.current_jobs.get(production_id)
         if not job_id or not self.queue_worker:
             return False
         return bool(await self.queue_worker.cancel(job_id))
+
+    async def comfy_generation_running(self, production_id: str) -> bool:
+        """Return whether this production currently owns a running Comfy prompt.
+
+        A production controller can be active while an agent is thinking,
+        while it is waiting for ComfyUI, or while ComfyUI is actually sampling.
+        Interventions should use the safe-checkpoint path only in the last
+        case.  The in-memory job map identifies this production's prompt and
+        ComfyUI's queue endpoint is the authoritative source for whether that
+        prompt is in ``queue_running`` (rather than merely pending).
+
+        If ComfyUI cannot be queried, return ``False``.  The caller must not
+        tell the user that an intervention was queued behind a generation it
+        could not verify.
+        """
+        job_id = self.current_jobs.get(production_id)
+        if not job_id or not self.queue_worker:
+            return False
+        job = get_job(job_id, public=False)
+        if not job or job.get("status") not in {"starting", "running", "verifying"}:
+            return False
+        prompt_id = str(job.get("prompt_id") or "").strip()
+        if not prompt_id:
+            return False
+        try:
+            payload = await self.queue_worker.comfy.queue()
+        except Exception:
+            return False
+        for item in payload.get("queue_running") or []:
+            if isinstance(item, (list, tuple)) and len(item) > 1:
+                candidate = item[1]
+            elif isinstance(item, dict):
+                candidate = item.get("prompt_id")
+            else:
+                continue
+            if str(candidate) == prompt_id:
+                return True
+        return False
 
     def has_active_work(self, production_id: str) -> bool:
         """Report in-memory work even when the database status is ``queued``.
@@ -139,6 +222,16 @@ class ProductionOrchestrator:
                         # _run_production records failures; consuming the task
                         # exception here prevents noisy unhandled-task warnings.
                         pass
+            # A controller task can disappear outside the normal exception
+            # path (bridge reload, process termination, or an interrupted
+            # asyncio task).  Do this reconciliation before scheduling new
+            # work so a persisted ``running`` row cannot remain stuck forever.
+            recovered = recover_productions(
+                set(self.production_tasks),
+                reason="Production controller lost its active process",
+            )
+            if recovered:
+                self.wake.set()
             while len(self.production_tasks) < PRODUCTION_CONCURRENCY and not self.stopping:
                 production = self._next(set(self.production_tasks))
                 if not production:
@@ -218,8 +311,14 @@ class ProductionOrchestrator:
             (folder / child).mkdir(parents=True, exist_ok=True)
         return folder
 
-    def _base_context(self, production: dict[str, Any], participant: str | None = None) -> str:
-        skills = selected_skill_context(production.get("skills", []))
+    def _base_context(
+        self, production: dict[str, Any], participant: str | None = None,
+        compact_skills: bool = False,
+    ) -> str:
+        skills = (
+            selected_skill_summary_context(production.get("skills", []))
+            if compact_skills else selected_skill_context(production.get("skills", []))
+        )
         references = list_references(production["id"], private=True)
         reference_context = json.dumps([
             {
@@ -238,7 +337,7 @@ class ProductionOrchestrator:
             user_messages.append(message)
         user_messages = user_messages[-20:]
         instructions = "\n".join(
-            f"- {'[USER INTERVENTION — ADDRESS THIS BEFORE CONTINUING] ' if message['kind'] == 'intervention' else ''}"
+            f"- {('[USER INTERVENTION — ADDRESS THIS BEFORE CONTINUING] ' if message.get('metadata', {}).get('execution_status') == 'pending' else '[USER INTERVENTION — APPLIED] ') if message['kind'] == 'intervention' else ''}"
             f"{message['content']}"
             for message in user_messages
         )
@@ -246,7 +345,11 @@ class ProductionOrchestrator:
             "A user intervention is present above. Address the user's requirement or question first, "
             "then continue the production from the saved checkpoint. Do not ignore it or silently continue "
             "the previous plan."
-            if any(message["kind"] == "intervention" for message in user_messages)
+            if any(
+                message["kind"] == "intervention"
+                and message.get("metadata", {}).get("execution_status") == "pending"
+                for message in user_messages
+            )
             else "No pending user intervention applies to this agent."
         )
         return f"""
@@ -300,6 +403,50 @@ Enabled production skills:
                 directories.setdefault(str(resolved).casefold(), resolved)
         return list(directories.values())
 
+    def _prepare_agy_media_handoff(
+        self, production_id: str, media_paths: list[Path] | None,
+    ) -> tuple[list[Path], str]:
+        """Make every app-supplied media path readable by AGY.
+
+        AGY's current ``view_file`` provider fails on audio-only containers.
+        Convert only those inputs to cached MP4 carriers while preserving all
+        videos and images exactly as supplied. The prompt records the mapping
+        so AGY inspects the carrier audio rather than guessing from metadata.
+        """
+        prepared: list[Path] = []
+        mappings: list[str] = []
+        carrier_dir = self._folder(production_id) / "analysis" / "agy-media"
+        for value in media_paths or []:
+            source = Path(value).resolve()
+            if not source.is_file() or not is_audio_only_media(source):
+                prepared.append(source)
+                continue
+            stat = source.stat()
+            fingerprint = hashlib.sha256(
+                f"{source}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+            ).hexdigest()[:16]
+            carrier = carrier_dir / f"{source.stem}_{fingerprint}_audio_carrier.mp4"
+            if not carrier.is_file() or carrier.stat().st_size == 0:
+                metadata = probe_audio_metadata(source)
+                prepare_agent_audio_carrier(source, carrier, metadata["duration_seconds"])
+            prepared.append(carrier.resolve())
+            mappings.append(
+                f"- Original audio: {source}\n  Inspect with view_file using carrier: {carrier.resolve()} "
+                "(the visual track is intentionally black; analyze its audio track)"
+            )
+        note = ""
+        if mappings:
+            note = (
+                "\n\nAGY MEDIA HANDOFF — REQUIRED:\n"
+                + "\n".join(mappings)
+                + "\nDo not call view_file on the original audio-only file. Do not substitute metadata or lyrics for listening."
+            )
+        elif prepared:
+            note = "\n\nAGY MEDIA PATHS — inspect the actual files with view_file:\n" + "\n".join(
+                f"- {path}" for path in prepared
+            )
+        return prepared, note
+
     @staticmethod
     def _current_job_video(job_id: str | None, recorded_path: str | None = None) -> Path | None:
         """Resolve a generated job by stable ID, repairing legacy stale paths."""
@@ -323,26 +470,40 @@ Enabled production skills:
             update_shot_attempt(attempt["id"], output_path=str(path))
         return path
 
+    @staticmethod
+    def _latest_artifact_path(production_id: str, kind: str) -> Path | None:
+        """Return the newest existing artifact file of a given kind."""
+        for artifact in reversed(list_artifacts(production_id, private=True)):
+            if artifact.get("kind") != kind:
+                continue
+            path = Path(str(artifact.get("path") or ""))
+            if path.is_file():
+                return path
+        return None
+
     async def _codex(
         self, production: dict[str, Any], request: str, images: list[Path] | None = None,
         media_paths: list[Path] | None = None,
+        fresh_session: bool = False, compact_context: bool = False,
     ) -> AgentResult:
         runtime = production.get("codex_runtime") or "codex"
         images = self._reference_image_paths(production) if images is None else images
+        prepared_media = list(media_paths or [])
+        if runtime == "agy":
+            prepared_media, media_handoff = await asyncio.to_thread(
+                self._prepare_agy_media_handoff, production["id"], media_paths,
+            )
+            request = request + media_handoff
+        task_preview = self._agent_task_preview(production, request)
         trace = self._agent_trace_callback(production, "codex", runtime)
-        heartbeat = self._agent_heartbeat_callback(production, "codex", runtime)
-        saved_session = production.get("codex_session_id")
-        session_note = "resuming saved Codex session" if saved_session else "starting a new Codex session"
-        add_message(
-            production["id"], "codex", "all", "agent_trace",
-            f"CODEX started via {runtime.upper()} CLI ({production['codex_model']} · {production['codex_effort']}; {session_note}).",
-            {"live": True, "runtime": runtime, "model": production["codex_model"], "effort": production["codex_effort"], "stream": "system"},
-        )
+        heartbeat = self._agent_heartbeat_callback(production, "codex", runtime, task_preview)
+        saved_session = None if fresh_session else production.get("codex_session_id")
+        self._record_agent_task_started(production, "codex", runtime, task_preview)
         try:
             result = await process_manager.invoke(
-                runtime, "codex", production["id"], self._base_context(production, "codex") + "\n\nTASK:\n" + request,
+                runtime, "codex", production["id"], self._base_context(production, "codex", compact_context) + "\n\nTASK:\n" + request,
                 production["codex_model"], production["codex_effort"], saved_session, images,
-                trace, heartbeat, self._agent_dirs([*(images or []), *(media_paths or [])]),
+                trace, heartbeat, self._agent_dirs([*(images or []), *prepared_media]),
             )
         except Exception as exc:
             if self._control_pending(production["id"]):
@@ -354,33 +515,34 @@ Enabled production skills:
             )
             self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_codex", exc)
             raise
-        update_production(production["id"], codex_session_id=result.session_id)
+        if not fresh_session:
+            update_production(production["id"], codex_session_id=result.session_id)
         add_message(production["id"], "codex", "all", "agent", result.content.get("summary", ""), {
             "model": result.model, "effort": result.effort, "session_id": result.session_id,
             "runtime": runtime,
             "decision": result.content.get("decision"), "next_action": result.content.get("next_action"),
             "content": result.content.get("content"), "issues": result.content.get("issues", []),
         })
-        self._record_agent_reply(production, result)
         return result
 
     async def _agy(
         self, production: dict[str, Any], request: str, images: list[Path] | None = None,
         media_paths: list[Path] | None = None,
+        fresh_session: bool = False, compact_context: bool = False,
     ) -> AgentResult:
         runtime = production.get("agy_runtime") or "agy"
         images = self._reference_image_paths(production) if images is None else images
-        trace = self._agent_trace_callback(production, "agy", runtime)
-        heartbeat = self._agent_heartbeat_callback(production, "agy", runtime)
-        saved_session = production.get("agy_session_id")
-        session_note = "resuming saved AGY session" if saved_session else "starting a new AGY session"
-        add_message(
-            production["id"], "agy", "all", "agent_trace",
-            f"AGY started via {runtime.upper()} CLI ({production['agy_model']} · {production['agy_effort']}; {session_note}).",
-            {"live": True, "runtime": runtime, "model": production["agy_model"], "effort": production["agy_effort"], "stream": "system"},
+        prepared_media, media_handoff = await asyncio.to_thread(
+            self._prepare_agy_media_handoff, production["id"], media_paths,
         )
+        request = request + media_handoff
+        task_preview = self._agent_task_preview(production, request)
+        trace = self._agent_trace_callback(production, "agy", runtime)
+        heartbeat = self._agent_heartbeat_callback(production, "agy", runtime, task_preview)
+        saved_session = None if fresh_session else production.get("agy_session_id")
+        self._record_agent_task_started(production, "agy", runtime, task_preview)
         try:
-            base_prompt = self._base_context(production, "agy") + "\n\nTASK:\n"
+            base_prompt = self._base_context(production, "agy", compact_context) + "\n\nTASK:\n"
             retry_request = request + """
 
 CORRECTION AFTER A REJECTED RESPONSE:
@@ -391,7 +553,7 @@ Your previous turn did not produce the requested task result. Perform the task n
                 result = await process_manager.invoke(
                     runtime, "agy", production["id"], base_prompt + request,
                     production["agy_model"], production["agy_effort"], saved_session, images,
-                    trace, heartbeat, self._agent_dirs([*(images or []), *(media_paths or [])]),
+                    trace, heartbeat, self._agent_dirs([*(images or []), *prepared_media]),
                 )
             except Exception as exc:
                 if runtime != "agy" or not self._agy_contract_failure(exc):
@@ -406,7 +568,7 @@ Your previous turn did not produce the requested task result. Perform the task n
                 result = await process_manager.invoke(
                     runtime, "agy", production["id"], base_prompt + retry_request,
                     production["agy_model"], production["agy_effort"], None, images,
-                    trace, heartbeat, self._agent_dirs([*(images or []), *(media_paths or [])]),
+                    trace, heartbeat, self._agent_dirs([*(images or []), *prepared_media]),
                 )
             if runtime == "agy" and self._agy_placeholder(result):
                 if fresh_retry_used:
@@ -423,7 +585,7 @@ Your previous turn did not produce the requested task result. Perform the task n
                 result = await process_manager.invoke(
                     runtime, "agy", production["id"], base_prompt + retry_request,
                     production["agy_model"], production["agy_effort"], None, images,
-                    trace, heartbeat, self._agent_dirs([*(images or []), *(media_paths or [])]),
+                    trace, heartbeat, self._agent_dirs([*(images or []), *prepared_media]),
                 )
                 if self._agy_placeholder(result):
                     raise RuntimeError(
@@ -439,33 +601,48 @@ Your previous turn did not produce the requested task result. Perform the task n
             )
             self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_agy", exc)
             raise
-        update_production(production["id"], agy_session_id=result.session_id)
+        if not fresh_session:
+            update_production(production["id"], agy_session_id=result.session_id)
         add_message(production["id"], "agy", "all", "agent", result.content.get("summary", ""), {
             "model": result.model, "effort": result.effort, "session_id": result.session_id,
             "runtime": runtime,
             "decision": result.content.get("decision"), "next_action": result.content.get("next_action"),
             "content": result.content.get("content"), "issues": result.content.get("issues", []),
         })
-        self._record_agent_reply(production, result)
         return result
 
     async def _media_agent(
         self, production: dict[str, Any], request: str, media_paths: list[Path] | None = None,
+        fresh_session: bool = False, compact_context: bool = False,
     ) -> AgentResult:
         """Use a seat backed by AGY for real audio/video inspection."""
         if (production.get("agy_runtime") or "agy") == "agy":
-            return await self._agy(production, request, media_paths=media_paths)
+            return await self._agy(
+                production, request, media_paths=media_paths,
+                fresh_session=fresh_session, compact_context=compact_context,
+            )
         if (production.get("codex_runtime") or "codex") == "agy":
-            return await self._codex(production, request, media_paths=media_paths)
+            return await self._codex(
+                production, request, media_paths=media_paths,
+                fresh_session=fresh_session, compact_context=compact_context,
+            )
         raise RuntimeError("Music-video production requires at least one producer using the AGY runtime")
 
     async def _other_agent(
         self, production: dict[str, Any], media_result: AgentResult, request: str,
         images: list[Path] | None = None,
         media_paths: list[Path] | None = None,
+        fresh_session: bool = False, compact_context: bool = False,
     ) -> AgentResult:
-        return await (self._codex(production, request, images, media_paths) if media_result.participant == "agy"
-                      else self._agy(production, request, images, media_paths))
+        return await (
+            self._codex(
+                production, request, images, media_paths,
+                fresh_session=fresh_session, compact_context=compact_context,
+            ) if media_result.participant == "agy" else self._agy(
+                production, request, images, media_paths,
+                fresh_session=fresh_session, compact_context=compact_context,
+            )
+        )
 
     @staticmethod
     def _trace_value(value: Any, limit: int = 900) -> str:
@@ -513,6 +690,23 @@ Your previous turn did not produce the requested task result. Perform the task n
             if key in item:
                 collect(item.get(key))
         return " ".join(chunks)
+
+    @classmethod
+    def _stream_result_contains_task_response(cls, result: dict[str, Any]) -> bool:
+        """Return true when an error envelope also contains a valid task result.
+
+        AGY can emit a transport/tool error status around the response payload
+        that the orchestrator actually needs.  Treating that envelope as a
+        user-facing failure is misleading and can make the activity banner
+        replay an error even though the structured result was accepted.
+        """
+        for key in ("response", "result", "output", "output_text", "text", "content"):
+            if key not in result:
+                continue
+            decoded = _decode_structured_value(result.get(key))
+            if isinstance(decoded, dict) and isinstance(decoded.get("summary"), str) and decoded["summary"].strip():
+                return True
+        return False
 
     @classmethod
     def _format_agent_trace(cls, participant: str, runtime: str, channel: str, line: str) -> tuple[str, str] | None:
@@ -569,6 +763,8 @@ Your previous turn did not produce the requested task result. Perform the task n
         if isinstance(result, dict) and result.get("status"):
             status = str(result.get("status")).lower()
             if status in {"error", "failed"}:
+                if cls._stream_result_contains_task_response(result):
+                    return None
                 return f"{seat} ({cli}) reported an error: {cls._trace_value(result.get('error') or result.get('message') or 'unknown error')}", "error"
 
         if event_type in {"error", "turn.failed", "session.error", "thread.error"}:
@@ -592,6 +788,29 @@ Your previous turn did not produce the requested task result. Perform the task n
             or item_type in {"reasoning", "analysis", "thinking", "agent_message", "message", "assistant_message"}
         ):
             return None
+        step_update = event.get("step_update")
+        if isinstance(step_update, dict):
+            step_type = str(step_update.get("step_type") or "").casefold()
+            state = str(step_update.get("state") or "").upper()
+            duration = step_update.get("duration_seconds")
+            duration_text = (
+                f" in {float(duration):.1f}s" if isinstance(duration, (int, float)) else ""
+            )
+            if step_type == "tool":
+                tool_info = step_update.get("tool_info") if isinstance(step_update.get("tool_info"), dict) else {}
+                tool_name = str(step_update.get("tool_name") or tool_info.get("name") or "production tool")
+                parameters = tool_info.get("parameters") if isinstance(tool_info.get("parameters"), dict) else {}
+                target = parameters.get("AbsolutePath") or parameters.get("path") or parameters.get("url")
+                target_text = f": {cls._trace_value(target, 320)}" if target else ""
+                verb = "started" if state == "ACTIVE" else "completed" if state == "DONE" else state.lower() or "updated"
+                return f"{seat} ({cli}) {verb} {tool_name}{target_text}{duration_text}.", "tool_activity"
+            if step_type == "agent_response" and state == "DONE":
+                usage = step_update.get("usage") if isinstance(step_update.get("usage"), dict) else {}
+                output_tokens = usage.get("output_tokens")
+                token_text = f" · {output_tokens} output tokens" if isinstance(output_tokens, int) else ""
+                return f"{seat} ({cli}) completed a provider response{duration_text}{token_text}; validating the result contract.", "agent_update"
+            if step_type in {"checkpoint", "user_input"}:
+                return None
         if event_type in {"step_update", "progress", "status"}:
             detail = cls._trace_value(event.get("message") or event.get("step") or event.get("status"))
             if not detail or detail.casefold() in {"progress", "reported progress", "working", "in progress", "status", "update", "step update"}:
@@ -634,51 +853,94 @@ Your previous turn did not produce the requested task result. Perform the task n
 
     def _agent_heartbeat_callback(
         self, production: dict[str, Any], participant: str, runtime: str,
+        task_preview: str,
     ) -> AgentHeartbeatCallback:
-        """Report meaningful liveness while a CLI turn has not completed.
-
-        The CLI may emit only ``init``/``progress`` and then stay silent while
-        it works. These updates keep the production card honest without
-        exposing raw output or hidden chain-of-thought.
-        """
-        last_signature = ""
-        stage = str(production.get("stage") or "agent work").replace("_", " ")
+        """Report provider silence truthfully without fabricating reasoning."""
+        last_reported_minute = -1
 
         async def emit(elapsed: float, idle: float, channel: str, line: str) -> None:
-            nonlocal last_signature
-            formatted = self._format_agent_trace(participant, runtime, channel, line)
-            last_event = formatted[0] if formatted else "no new CLI event received"
-            content = (
-                f"{participant.upper()} is still working on {stage} · "
-                f"elapsed {self._format_elapsed(elapsed)} · "
-                f"last activity: {last_event} · quiet for {self._format_elapsed(idle)}"
+            nonlocal last_reported_minute
+            process_manager.update_activity(
+                production["id"], elapsed=elapsed, idle=idle,
+                channel=channel, line=line,
             )
-            if content == last_signature:
+            # Some providers emit only anonymous protocol progress until the
+            # final response. Make that absence explicit once after 30 seconds
+            # and then at most once per elapsed minute. This is controller
+            # telemetry, not invented agent reasoning.
+            elapsed_minute = int(elapsed // 60)
+            if idle < 30 or elapsed_minute == last_reported_minute:
                 return
-            last_signature = content
+            last_reported_minute = elapsed_minute
             add_message(
-                production["id"], participant, "all", "agent_trace", content,
+                production["id"], participant, "all", "agent_trace",
+                f"{participant.upper()} is still processing: {task_preview} "
+                f"The provider has emitted no descriptive live text for {self._format_elapsed(idle)}.",
                 {
-                    "live": True, "heartbeat": True, "runtime": runtime,
+                    "live": True, "runtime": runtime,
                     "model": production.get(f"{participant}_model", ""),
                     "effort": production.get(f"{participant}_effort", ""),
-                    "stream": "heartbeat", "event_type": "heartbeat",
-                    "elapsed_seconds": round(elapsed, 1), "idle_seconds": round(idle, 1),
-                    "timeout_seconds": AGENT_TIMEOUT_SECONDS,
+                    "stream": "controller", "event_type": "provider_wait",
                 },
             )
 
         return emit
+
+    @classmethod
+    def _agent_task_preview(cls, production: dict[str, Any], request: str) -> str:
+        """Create a concise, factual label for the task sent to an agent."""
+        for raw_line in request.splitlines():
+            line = " ".join(raw_line.strip().lstrip("#-* ").split())
+            if not line or line in {"TASK:", "TASK"}:
+                continue
+            if line.startswith(("{", "[")):
+                break
+            return cls._trace_value(line, 260)
+        stage = str(production.get("stage") or "production").replace("_", " ")
+        return f"the current {stage} task."
+
+    @staticmethod
+    def _record_agent_task_started(
+        production: dict[str, Any], participant: str, runtime: str, task_preview: str,
+    ) -> None:
+        """Persist the exact controller milestone shown in live-print mode."""
+        add_message(
+            production["id"], participant, "all", "agent_trace",
+            f"{participant.upper()} received the current task: {task_preview}",
+            {
+                "live": True, "runtime": runtime,
+                "model": production.get(f"{participant}_model", ""),
+                "effort": production.get(f"{participant}_effort", ""),
+                "stream": "controller", "event_type": "task_started",
+            },
+        )
 
     def _agent_trace_callback(self, production: dict[str, Any], participant: str, runtime: str) -> AgentOutputCallback:
         last_signature = ""
 
         async def emit(channel: str, line: str) -> None:
             nonlocal last_signature
+            # Preserve the exact provider stream for diagnosis even when an
+            # event is intentionally filtered from the user-facing council.
+            raw_log = self._folder(production["id"]) / "logs" / "agent-cli-events.jsonl"
+            try:
+                with raw_log.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "at": now_iso(), "participant": participant,
+                        "runtime": runtime, "channel": channel,
+                        "line": line.rstrip("\r\n"),
+                    }, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
             formatted = self._format_agent_trace(participant, runtime, channel, line)
             if not formatted:
                 return
             content, event_type = formatted
+            # Completed structured cards are authoritative. Only actual
+            # intermediate reasoning summaries, tool actions, and explicit
+            # progress updates belong in the optional live stream.
+            if event_type not in {"reasoning_summary", "tool_activity", "agent_update"}:
+                return
             signature = f"{channel}:{content}"
             if signature == last_signature:
                 return
@@ -773,36 +1035,56 @@ Your previous turn did not produce the requested task result. Perform the task n
         })
         return path
 
-    @staticmethod
-    def _limited_audio_analysis(audio_metadata: dict[str, Any], exc: Exception) -> dict[str, Any]:
-        """Return a valid analysis package when the media seat cannot inspect audio."""
-        return {
-            "summary": "AGY audio inspection failed; continuing with backend audio preflight.",
-            "decision": "continue",
-            "next_action": "Continue with limited audio analysis and treat BPM, sections, and lyric timing as estimated.",
-            "confidence": None,
-            "requires_user": False,
-            "content": {
-                "analysis_status": "limited",
-                "analysis_source": "backend_audio_preflight",
-                "audio_metadata": audio_metadata,
-                "bpm": None,
-                "bpm_confidence": 0,
-                "meter": None,
-                "sections": [],
-                "energy_curve": [],
-                "vocal_entrances": [],
-                "instrumental_breaks": [],
-                "lyric_timeline": [],
-                "analysis_limitation": "The AGY CLI terminated while inspecting the binary audio file. Backend metadata is valid, but musical timing still needs a successful media-agent pass.",
-                "agent_error": str(exc)[:1600],
-            },
-            "issues": [{
-                "type": "agent_audio_inspection",
-                "severity": "warning",
-                "message": str(exc)[:1600],
-            }],
+    @classmethod
+    def _validated_audio_analysis(
+        cls, result: AgentResult, carrier: Path, expected_duration: float | None = None,
+        minimum_lyric_entries: int = 1,
+    ) -> dict[str, Any]:
+        """Require proof that AGY decoded the real media before planning."""
+        content = cls._content_dict(result)
+        inspection = content.get("media_inspection")
+        if not isinstance(inspection, dict) or inspection.get("decoded_audio") is not True:
+            raise RuntimeError("AGY did not confirm that it decoded the actual song audio")
+        inspected_value = str(inspection.get("inspected_path") or "")
+        inspected_path = str(Path(inspected_value).resolve()).replace("/", "\\").lower()
+        expected_path = str(carrier.resolve()).replace("/", "\\").lower()
+        if inspected_path != expected_path:
+            raise RuntimeError("AGY did not confirm the exact audio carrier it inspected")
+        # AGY occasionally uses concise but semantically equivalent field
+        # names despite the requested contract. Normalize valid analysis data
+        # instead of paying for and waiting on a second full media pass.
+        aliases = {
+            "duration_seconds": ("duration", "audio_duration_seconds"),
+            "bpm": ("estimated_bpm", "tempo_bpm"),
+            "lyric_timeline": ("lyrics_timeline", "lyric_map"),
+            "vocal_entrances": ("vocal_onsets", "first_vocal_onsets"),
         }
+        for canonical, candidates in aliases.items():
+            if content.get(canonical) not in (None, "", []):
+                continue
+            for candidate in candidates:
+                if content.get(candidate) not in (None, "", []):
+                    content[canonical] = content[candidate]
+                    break
+        required = ("duration_seconds", "bpm", "sections", "vocal_entrances", "lyric_timeline")
+        missing = [key for key in required if content.get(key) in (None, "", [])]
+        if missing:
+            raise RuntimeError("AGY audio analysis is incomplete: " + ", ".join(missing))
+        try:
+            reported_duration = float(content["duration_seconds"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("AGY returned an invalid song duration") from exc
+        if expected_duration is not None and abs(reported_duration - expected_duration) > max(1.0, expected_duration * 0.01):
+            raise RuntimeError(
+                f"AGY reported {reported_duration:.2f}s but the decoded source is {expected_duration:.2f}s"
+            )
+        timeline = content.get("lyric_timeline")
+        if not isinstance(timeline, list) or len(timeline) < minimum_lyric_entries:
+            count = len(timeline) if isinstance(timeline, list) else 0
+            raise RuntimeError(
+                f"AGY returned only {count} lyric timings; at least {minimum_lyric_entries} are required"
+            )
+        return content
 
     @staticmethod
     def _content_dict(result: AgentResult) -> dict[str, Any]:
@@ -847,6 +1129,7 @@ Your previous turn did not produce the requested task result. Perform the task n
     async def _generate_reference_stills(
         self, production: dict[str, Any], package: dict[str, Any], provider: str = "auto",
     ) -> list[dict[str, Any]]:
+        aspect_ratio = str(production.get("generation_aspect_ratio") or "16:9")
         specs = self._find_reference_specs(package)
         if not specs:
             raise RuntimeError("The approved reference package contains no executable references array")
@@ -884,13 +1167,15 @@ Your previous turn did not produce the requested task result. Perform the task n
                     if provider == "auto":
                         await process_manager.generate_reference_image(
                             production["id"], image_prompt, path, image_model, image_effort,
+                            aspect_ratio=aspect_ratio,
                             source_images=list(source_images),
                         )
                     else:
                         await process_manager.generate_reference_image(
                             production["id"], image_prompt, path, image_model, image_effort,
                             provider=provider, agy_model=production["agy_model"],
-                            agy_effort=production["agy_effort"], source_images=list(source_images),
+                            agy_effort=production["agy_effort"], aspect_ratio=aspect_ratio,
+                            source_images=list(source_images),
                         )
                     refreshed = get_production(production["id"], private=True) or production
                     agy = await self._agy(refreshed, f"""
@@ -899,6 +1184,7 @@ composition for I2V, obvious anatomy/glitches, and only clearly readable gibberi
 vehicle badges or license plates. Do not reject tiny, blurred, incidental, or unreadable background marks.
 Reference name: {name}
 Intended prompt: {image_prompt}
+Required production aspect ratio: {aspect_ratio}
 Image path: {path}
 Return APPROVE or REVISE and concrete corrections.
 """, [path])
@@ -950,7 +1236,8 @@ AGY review: {json.dumps(agy.content, ensure_ascii=False)}
             shutil.copy2(accepted_path, comfy_path)
             reference = add_reference(
                 production["id"], "image", name, str(accepted_path), str(comfy_path), comfy_name,
-                json.dumps({"prompt": image_prompt, "review": review_summary}, ensure_ascii=False),
+                json.dumps({"prompt": image_prompt, "review": review_summary,
+                            "aspect_ratio": aspect_ratio, "generated": True}, ensure_ascii=False),
             )
             generated.append(reference)
             source_images.append(accepted_path)
@@ -1033,6 +1320,7 @@ Shot prompt:
         await process_manager.generate_reference_image(
             production["id"], scene_prompt, scene_path, image_model, image_effort,
             provider="auto", agy_model=production.get("agy_model"), agy_effort=production.get("agy_effort"),
+            aspect_ratio=str(shot.get("aspect_ratio") or production.get("generation_aspect_ratio") or "16:9"),
             source_images=generation_sources,
         )
         input_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1282,26 +1570,6 @@ Shot prompt:
                     break
         return cls._trace_value(" ".join(parts), 1200)
 
-    def _record_agent_reply(self, production: dict[str, Any], result: AgentResult) -> None:
-        preview = self._agent_reply_preview(result)
-        if not preview:
-            return
-        participant = result.participant
-        add_message(
-            production["id"], participant, "all", "agent_trace",
-            f"{participant.upper()} reply: {preview}",
-            {
-                "live": True,
-                "runtime": production.get(f"{participant}_runtime", participant),
-                "model": result.model,
-                "effort": result.effort,
-                "stream": "response",
-                "event_type": "agent_response",
-                "decision": result.content.get("decision"),
-                "next_action": result.content.get("next_action"),
-            },
-        )
-
     def _queue_job(self, shot: dict[str, Any], opening_frame: Path | None) -> str:
         if not self.queue_worker:
             raise RuntimeError("The production orchestrator is not connected to the ComfyUI queue")
@@ -1537,7 +1805,7 @@ Judge real motion (no sliding/backwards car movement or frozen walking), anatomy
 identity/location continuity when required, camera direction and cut compatibility. Check visible text only when
 it is plainly readable to a normal viewer on a car, plate, sign, billboard, or garment; do not reject tiny or
 incidental texture. Return APPROVE or REGENERATE and precise defects.
-""", media_paths=[video, *frames])
+""", media_paths=[video, *frames], fresh_session=True, compact_context=True)
         production = get_production(production["id"], private=True) or production
         codex = await self._other_agent(production, agy, f"""
 Act as the equal co-producer and review the attached sampled frames together with AGY's full-video analysis.
@@ -1546,61 +1814,580 @@ AGY review: {json.dumps(agy.content, ensure_ascii=False)}
 Approve only if the actual shot is usable in the music video. If regeneration is needed, produce a corrected
 complete video prompt in content.corrected_prompt and identify the same concrete defects. Do not over-police
 text that a normal viewer cannot read.
-        """, images=frames, media_paths=[video, *frames])
+        """, images=frames, media_paths=[video, *frames], fresh_session=True, compact_context=True)
         return agy, codex
+
+    @staticmethod
+    def _intervention_requests_audio_analysis(content: str) -> bool:
+        text = content.casefold()
+        return bool(re.search(
+            r"\b(analy[sz]e|inspect|listen|hear|map|transcribe|tim(?:e|ing)|bpm|beat|audio|sound|song|music|wav|mp3|lyrics?)\b",
+            text,
+        ) and re.search(r"\b(audio|sound|song|music|wav|mp3|bpm|beat|lyrics?)\b", text))
+
+    async def _analyze_song_audio(
+        self, production: dict[str, Any], *, requested_by: str = "production pipeline",
+    ) -> AgentResult:
+        """Run verified AGY analysis against the production's actual song audio."""
+        production_id = production["id"]
+        add_message(
+            production_id, "system", "all", "status",
+            f"AGY is analyzing the actual song audio ({requested_by}).",
+            {"media_analysis": True, "requested_by": requested_by},
+        )
+        source_song = Path(production["song_path"])
+        try:
+            audio_metadata = await asyncio.to_thread(probe_audio_metadata, source_song)
+        except (RuntimeError, OSError) as exc:
+            audio_metadata = {"preflight_error": str(exc)}
+        analysis_dir = self._folder(production_id) / "analysis"
+        preflight_path = analysis_dir / "audio_preflight.json"
+        preflight_path.write_text(
+            json.dumps({
+                "song_path": production["song_path"],
+                "metadata": audio_metadata,
+                "source": "backend.ffprobe",
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        carrier_path = analysis_dir / "agy_audio_carrier.mp4"
+        expected_duration = float(audio_metadata.get("duration_seconds") or 0)
+        await asyncio.to_thread(
+            prepare_agent_audio_carrier, source_song, carrier_path, expected_duration or None,
+        )
+        lyric_lines = [
+            line.strip() for line in str(production.get("lyrics") or "").splitlines()
+            if line.strip() and not line.strip().startswith("[")
+        ]
+        minimum_lyric_entries = max(1, min(12, len(lyric_lines)))
+        analysis_request = f"""
+Use view_file on this exact MP4 and analyze the actual song in its audio track:
+{carrier_path}
+The visual track is intentionally black and irrelevant. Do not infer musical timing from the lyrics,
+filename, or FFprobe metadata. Return duration_seconds, BPM and confidence, meter, genre, beat/bar grid,
+sections, energy curve, vocal entrances, breaths, instrumental breaks, transitions, timestamped lyric
+map, phrase-safe cut points, first audible onset for each lip-sync window, and visual opportunities.
+Mark only genuinely uncertain words or boundaries as estimated. Put the full analysis in content.
+The lyric_timeline must cover every supplied lyrical line in order, including ad-libs, with start and end
+timestamps; do not return only a few examples. At least {minimum_lyric_entries} entries are required.
+content must include this proof object exactly:
+"media_inspection": {{"decoded_audio": true, "inspected_path": "{carrier_path}"}}
+The bridge already performed this basic audio preflight:
+{json.dumps(audio_metadata, ensure_ascii=False)}
+The preflight report is saved at {preflight_path}; use it only to cross-check duration and stream facts.
+If view_file cannot decode the carrier, return a blocking failure. Never substitute metadata-only or
+lyrics-only estimates for actual media analysis. Do not run shell commands or ask for command permission.
+"""
+        failures: list[str] = []
+        analysis: AgentResult | None = None
+        for attempt in range(1, 3):
+            try:
+                candidate = await self._media_agent(
+                    production, analysis_request, media_paths=[carrier_path],
+                    fresh_session=True, compact_context=True,
+                )
+                normalized_analysis = self._validated_audio_analysis(
+                    candidate, carrier_path, expected_duration or None, minimum_lyric_entries,
+                )
+                # Persist the canonical contract even when AGY used an accepted
+                # alias such as `duration`. Downstream stages should never need
+                # to understand provider-specific field names.
+                candidate.content["content"] = normalized_analysis
+                analysis = candidate
+                break
+            except Exception as exc:
+                failures.append(str(exc))
+                self._record_agent_failure(production_id, f"song_analysis_attempt_{attempt}", exc)
+        if analysis is None:
+            raise RuntimeError(
+                "AGY could not inspect the actual song audio after two fresh attempts: "
+                + " | ".join(failures)
+            )
+        (analysis_dir / "song_analysis.json").write_text(
+            json.dumps(analysis.content, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        add_message(
+            production_id, "system", "all", "status",
+            "AGY completed verified song analysis from the decoded audio; the report was saved and will be used by the production.",
+            {"media_analysis": True, "verified": True, "artifact": "analysis/song_analysis.json"},
+        )
+        return analysis
+
+    @staticmethod
+    def _intervention_action_contract() -> str:
+        return """
+The production council is interactive. Understand and answer the user's actual message; do not merely
+acknowledge it and do not assume the previous pipeline stage must continue unchanged.
+
+Put the conversational result in content using this application contract:
+{
+  "reply": "the useful response the user should read",
+  "shared_understanding": "what you believe the user wants",
+  "actions": [
+    {"type": "analyze_song_audio"},
+    {"type": "update_shot", "shot_index": 2, "changes": {"duration": 5, "megapixels": 1.0}},
+    {"type": "regenerate_shot", "shot_index": 2, "prompt": "complete corrected prompt", "regenerate_downstream": true},
+    {"type": "update_production_config", "changes": {"generation_turbo_profile": "v4"}},
+    {"type": "add_production_note", "note": "a durable creative instruction"},
+    {"type": "ask_user", "question": "one necessary clarification"},
+    {"type": "pause"},
+    {"type": "resume"}
+  ],
+  "resume_policy": "resume | pause | await_user | preserve"
+}
+Use only the listed action types. Actions are optional: use [] when the user asked a question that can be
+answered directly. Never claim an action happened merely because you proposed it; the controller will return
+execution results. Use ask_user only when a missing answer materially changes the work. In interactive mode,
+prefer a clear question over inventing the user's creative choice. In autonomous mode, make reversible creative
+decisions when safe and do not pause for a recoverable creative or quality issue. If a shot needs another image,
+use regenerate_shot so the controller queues it automatically; never tell the user to click a Retry or
+Regenerate button. In autonomous mode, prefer resume after applying the user's guidance. preserve means
+answer/apply the request but keep the production in the state it had before the message. resume explicitly
+continues the saved pipeline checkpoint after successful action execution.
+""".strip()
+
+    def _intervention_request(
+        self, production: dict[str, Any], instruction: str, recipient: str,
+        peer_result: AgentResult | None = None,
+    ) -> str:
+        shots = [{
+            key: shot.get(key) for key in (
+                "shot_index", "title", "status", "mode", "continuity", "audio_mode",
+                "audio_start", "audio_duration", "duration", "megapixels", "aspect_ratio",
+                "steps", "engine", "turbo_profile", "reference_ids",
+            )
+        } for shot in list_shots(production["id"], private=True)]
+        peer = json.dumps(peer_result.content, ensure_ascii=False) if peer_result else "(not yet consulted)"
+        return f"""
+Handle this live user message as an interactive co-producer using your saved production conversation.
+Address the message itself before considering the saved pipeline stage.
+
+USER MESSAGE (recipient: {recipient}):
+{instruction}
+
+CURRENT CHECKPOINT:
+- stage: {production.get('stage')}
+- status before this conversation: {production.get('status')}
+- participation mode: {production.get('participation_mode')}
+- shots: {json.dumps(shots, ensure_ascii=False)}
+
+OTHER PRODUCER'S CONSULTATION:
+{peer}
+
+{self._intervention_action_contract()}
+""".strip()
+
+    @classmethod
+    def _intervention_plan(cls, result: AgentResult) -> dict[str, Any]:
+        content = cls._content_dict(result)
+        actions = content.get("actions", [])
+        if not isinstance(actions, list):
+            actions = []
+        policy = str(content.get("resume_policy") or "").strip().lower()
+        if policy not in {"resume", "pause", "await_user", "preserve"}:
+            policy = ""
+        return {
+            "reply": str(content.get("reply") or result.content.get("summary") or "").strip(),
+            "actions": [item for item in actions if isinstance(item, dict)],
+            "resume_policy": policy,
+            "requires_user": bool(result.content.get("requires_user")),
+            "issues": result.content.get("issues", []) if isinstance(result.content.get("issues"), list) else [],
+        }
+
+    @staticmethod
+    def _validated_intervention_shot_changes(
+        production: dict[str, Any], shot: dict[str, Any], changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        allowed = {
+            "title", "prompt", "mode", "continuity", "audio_mode", "audio_source",
+            "audio_start", "audio_duration", "duration", "megapixels", "aspect_ratio",
+            "steps", "engine", "turbo_profile", "reference_ids",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError("Unsupported shot fields: " + ", ".join(sorted(unknown)))
+        normalized = dict(changes)
+        if "mode" in normalized and normalized["mode"] not in {"text", "opening"}:
+            raise ValueError("Production interventions currently support only T2V or I2V shots")
+        if "continuity" in normalized and normalized["continuity"] not in {"hard_cut", "sequential"}:
+            raise ValueError("Shot continuity must be hard_cut or sequential")
+        if "audio_mode" in normalized and normalized["audio_mode"] not in {"silent", "lip_sync"}:
+            raise ValueError("Shot audio mode must be silent or lip_sync")
+        if "audio_source" in normalized and normalized["audio_source"] not in {"song", "reference"}:
+            raise ValueError("Shot audio source must be song or reference")
+        if "aspect_ratio" in normalized and normalized["aspect_ratio"] not in {"16:9", "1:1", "9:16", "4:3", "3:4"}:
+            raise ValueError("Unsupported shot aspect ratio")
+        if "turbo_profile" in normalized and normalized["turbo_profile"] not in {"v1", "v4"}:
+            raise ValueError("Turbo profile must be v1 or v4")
+        if "duration" in normalized:
+            duration = float(normalized["duration"])
+            if not duration.is_integer() or not 1 <= duration <= 15:
+                raise ValueError("Shot duration must be a whole number from 1 through 15 seconds")
+            normalized["duration"] = int(duration)
+        if "megapixels" in normalized:
+            megapixels = round(float(normalized["megapixels"]), 1)
+            if not 0.1 <= megapixels <= 2.0:
+                raise ValueError("Shot megapixels must be between 0.1 and 2.0")
+            normalized["megapixels"] = megapixels
+        profile = str(normalized.get("turbo_profile") or shot.get("turbo_profile") or "v1")
+        if "steps" in normalized:
+            steps = int(normalized["steps"])
+            maximum = 8 if profile == "v4" else 12
+            if not 4 <= steps <= maximum:
+                raise ValueError(f"Turbo {profile} steps must be between 4 and {maximum}")
+            normalized["steps"] = steps
+        for key in ("audio_start", "audio_duration"):
+            if key in normalized and normalized[key] is not None:
+                normalized[key] = float(normalized[key])
+                if normalized[key] < 0:
+                    raise ValueError(f"{key} cannot be negative")
+        if "reference_ids" in normalized:
+            if not isinstance(normalized["reference_ids"], list):
+                raise ValueError("reference_ids must be an array")
+            known = {item["id"] for item in list_references(production["id"], private=True)}
+            invalid = set(map(str, normalized["reference_ids"])) - known
+            if invalid:
+                raise ValueError("Unknown production references: " + ", ".join(sorted(invalid)))
+            normalized["reference_ids"] = list(map(str, normalized["reference_ids"]))
+        return normalized
+
+    async def _execute_intervention_actions(
+        self, production: dict[str, Any], actions: list[dict[str, Any]], message_id: str,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Execute only the bridge capabilities agents are allowed to request."""
+        results: list[dict[str, Any]] = []
+        policy_override: str | None = None
+        for position, action in enumerate(actions, start=1):
+            action_type = str(action.get("type") or "").strip().lower()
+            try:
+                if action_type == "analyze_song_audio":
+                    analysis = await self._analyze_song_audio(
+                        production, requested_by=f"interactive request {message_id}",
+                    )
+                    content = self._content_dict(analysis)
+                    results.append({
+                        "type": action_type, "status": "completed",
+                        "artifact": "analysis/song_analysis.json",
+                        "duration_seconds": content.get("duration_seconds"),
+                        "bpm": content.get("bpm"), "sections": content.get("sections"),
+                        "lyric_timeline": content.get("lyric_timeline"),
+                    })
+                elif action_type == "update_shot":
+                    shot_index = int(action.get("shot_index"))
+                    shot = next((item for item in list_shots(production["id"], private=True)
+                                 if int(item["shot_index"]) == shot_index), None)
+                    if not shot:
+                        raise ValueError(f"Shot {shot_index} does not exist")
+                    if shot.get("status") in {"generating", "reviewing", "completed"}:
+                        raise ValueError(f"Shot {shot_index} is already {shot.get('status')} and cannot be edited here")
+                    changes = action.get("changes")
+                    if not isinstance(changes, dict) or not changes:
+                        raise ValueError("update_shot requires a non-empty changes object")
+                    normalized = self._validated_intervention_shot_changes(production, shot, changes)
+                    update_shot(shot["id"], **normalized)
+                    results.append({"type": action_type, "status": "completed",
+                                    "shot_index": shot_index, "changes": normalized})
+                elif action_type == "regenerate_shot":
+                    shot_index = int(action.get("shot_index"))
+                    shot = next((item for item in list_shots(production["id"], private=True)
+                                 if int(item["shot_index"]) == shot_index), None)
+                    if not shot:
+                        raise ValueError(f"Shot {shot_index} does not exist")
+                    prompt = action.get("prompt")
+                    if prompt is not None and not str(prompt).strip():
+                        raise ValueError("regenerate_shot prompt cannot be empty")
+                    if prompt is not None:
+                        update_shot(shot["id"], prompt=str(prompt).strip())
+                    for attempt in shot.get("attempts", []):
+                        if attempt.get("status") in {"queued", "generating", "reviewing"}:
+                            update_shot_attempt(
+                                attempt["id"], status="interrupted",
+                                error="Superseded by an autonomous regeneration request",
+                            )
+                    update_shot(shot["id"], status="planned", accepted_attempt=None)
+                    downstream = bool(action.get("regenerate_downstream", True))
+                    affected = [shot_index]
+                    if downstream:
+                        for later in list_shots(production["id"], private=True):
+                            if later["shot_index"] > shot_index and later["continuity"] == "sequential":
+                                update_shot(later["id"], status="planned", accepted_attempt=None)
+                                affected.append(int(later["shot_index"]))
+                    update_production(
+                        production["id"], status="running", stage="shot_generation",
+                        progress=0.65, error=None,
+                    )
+                    results.append({
+                        "type": action_type, "status": "completed",
+                        "shot_index": shot_index, "affected_shots": affected,
+                        "prompt_updated": prompt is not None,
+                    })
+                elif action_type == "update_production_config":
+                    changes = action.get("changes")
+                    if not isinstance(changes, dict) or not changes:
+                        raise ValueError("update_production_config requires a non-empty changes object")
+                    allowed = {
+                        "generation_turbo_profile", "generation_steps", "generation_megapixels",
+                        "generation_aspect_ratio", "generation_megapixel_rules",
+                        "continuity_mode", "participation_mode",
+                    }
+                    unknown = set(changes) - allowed
+                    if unknown:
+                        raise ValueError("Unsupported production settings: " + ", ".join(sorted(unknown)))
+                    current = get_production(production["id"], private=True) or production
+                    generation = normalize_production_generation(
+                        changes.get("generation_turbo_profile", current["generation_turbo_profile"]),
+                        changes.get("generation_steps", current["generation_steps"]),
+                        changes.get("generation_megapixels", current["generation_megapixels"]),
+                        changes.get("generation_aspect_ratio", current["generation_aspect_ratio"]),
+                        changes.get("generation_megapixel_rules", current["generation_megapixel_rules"]),
+                    )
+                    if "continuity_mode" in changes:
+                        if changes["continuity_mode"] not in {"hybrid", "sequential", "hard_cut", "segmented"}:
+                            raise ValueError("Unsupported continuity mode")
+                        generation["continuity_mode"] = changes["continuity_mode"]
+                    if "participation_mode" in changes:
+                        if changes["participation_mode"] not in {"autonomous", "interactive"}:
+                            raise ValueError("Participation mode must be autonomous or interactive")
+                        generation["participation_mode"] = changes["participation_mode"]
+                    update_production(production["id"], **generation)
+                    results.append({"type": action_type, "status": "completed", "changes": generation})
+                elif action_type == "add_production_note":
+                    note = str(action.get("note") or "").strip()
+                    if not note:
+                        raise ValueError("add_production_note requires note text")
+                    add_message(
+                        production["id"], "system", "all", "status",
+                        f"Production instruction recorded: {note}",
+                        {"intervention": True, "durable_instruction": True, "source_message_id": message_id},
+                    )
+                    results.append({"type": action_type, "status": "completed", "note": note})
+                elif action_type == "ask_user":
+                    question = str(action.get("question") or "").strip()
+                    if not question:
+                        raise ValueError("ask_user requires a question")
+                    policy_override = "await_user"
+                    results.append({"type": action_type, "status": "completed", "question": question})
+                elif action_type in {"pause", "resume"}:
+                    policy_override = action_type
+                    results.append({"type": action_type, "status": "completed"})
+                else:
+                    raise ValueError(f"Unsupported intervention action {position}: {action_type or '(missing type)'}")
+            except Exception as exc:
+                results.append({"type": action_type or "invalid", "status": "failed", "error": str(exc)})
+        return results, policy_override
+
+    async def _intervention_council_turn(
+        self, production: dict[str, Any], instruction: str, recipient: str,
+    ) -> AgentResult:
+        if recipient == "agy":
+            return await self._agy(
+                production, self._intervention_request(production, instruction, recipient),
+                fresh_session=False, compact_context=True,
+            )
+        if recipient == "codex":
+            return await self._codex(
+                production, self._intervention_request(production, instruction, recipient),
+                fresh_session=False, compact_context=True,
+            )
+        agy = await self._agy(
+            production, self._intervention_request(production, instruction, recipient),
+            fresh_session=False, compact_context=True,
+        )
+        refreshed = get_production(production["id"], private=True) or production
+        return await self._codex(
+            refreshed, self._intervention_request(refreshed, instruction, recipient, agy),
+            fresh_session=False, compact_context=True,
+        )
+
+    async def _intervention_followup(
+        self, production: dict[str, Any], instruction: str, recipient: str,
+        action_results: list[dict[str, Any]],
+    ) -> AgentResult:
+        request = f"""
+The controller executed the approved actions for the user's live message.
+USER MESSAGE:
+{instruction}
+ACTION RESULTS:
+{json.dumps(action_results, ensure_ascii=False)}
+
+Interpret the real results, answer the user clearly, and decide whether the saved production should resume,
+pause, await the user, or preserve its previous state. Do not repeat successful actions. Return content with
+reply, actions: [], and resume_policy. If a result failed, explain it and do not claim success.
+When the production is autonomous, do not return pause or await_user for a recoverable issue: keep the
+production moving, record the warning, and let the controller retry or choose the safest reversible path.
+""".strip()
+        if recipient == "agy":
+            return await self._agy(production, request, fresh_session=False, compact_context=True)
+        if recipient == "codex":
+            return await self._codex(production, request, fresh_session=False, compact_context=True)
+        agy = await self._agy(production, request, fresh_session=False, compact_context=True)
+        refreshed = get_production(production["id"], private=True) or production
+        return await self._codex(
+            refreshed,
+            request + "\n\nAGY'S INTERPRETATION:\n" + json.dumps(agy.content, ensure_ascii=False),
+            fresh_session=False, compact_context=True,
+        )
+
+    async def _apply_pending_interventions(self, production: dict[str, Any]) -> dict[str, Any]:
+        """Run a persistent conversational turn, then execute the council's validated actions."""
+        pending = [
+            message for message in list_messages(production["id"])
+            if message.get("participant") == "user"
+            and message.get("kind") == "intervention"
+            and message.get("metadata", {}).get("execution_status") == "pending"
+        ]
+        for message in pending:
+            recipient = str(message.get("recipient") or "both").lower()
+            instruction = str(message.get("content") or "").strip()
+            update_message_metadata(message["id"], execution_status="executing")
+            add_message(
+                production["id"], "system", "all", "status",
+                f"Executing user intervention before resuming {production['stage']}: {instruction}",
+                {"intervention": True, "intervention_id": message["id"], "execution_status": "executing"},
+            )
+            try:
+                council_result = await self._intervention_council_turn(
+                    production, instruction, recipient,
+                )
+                plan = self._intervention_plan(council_result)
+                action_results, action_policy = await self._execute_intervention_actions(
+                    production, plan["actions"], message["id"],
+                )
+                final_result = council_result
+                if action_results:
+                    refreshed = get_production(production["id"], private=True) or production
+                    final_result = await self._intervention_followup(
+                        refreshed, instruction, recipient, action_results,
+                    )
+                final_plan = self._intervention_plan(final_result)
+                blocking_issues = [
+                    issue for issue in final_plan["issues"]
+                    if isinstance(issue, dict)
+                    and str(issue.get("severity") or "").casefold() in {"blocking", "critical", "error"}
+                ]
+                failed_actions = [item for item in action_results if item.get("status") == "failed"]
+                previous_status = str(message.get("metadata", {}).get("previous_status") or "running")
+                policy = action_policy or final_plan["resume_policy"] or plan["resume_policy"]
+                current = get_production(production["id"], private=True) or production
+                autonomous = current.get("participation_mode") == "autonomous"
+                if autonomous and previous_status not in {"draft", "completed", "stopped"}:
+                    # Autonomous productions treat a user intervention as
+                    # guidance, not as a new approval gate. The agents may
+                    # report a recoverable issue or ask for clarification,
+                    # but the controller must keep the saved pipeline moving.
+                    target_status = "running"
+                    result_state = (
+                        "continued_with_warning"
+                        if failed_actions or blocking_issues or final_plan["requires_user"]
+                        or policy in {"pause", "await_user"}
+                        else "applied"
+                    )
+                elif failed_actions or blocking_issues:
+                    target_status = "paused"
+                    result_state = "blocked"
+                elif final_plan["requires_user"] or policy == "await_user":
+                    target_status = "awaiting_user"
+                    result_state = "awaiting_user"
+                elif policy == "pause":
+                    target_status = "paused"
+                    result_state = "applied"
+                elif policy == "resume":
+                    target_status = "running"
+                    result_state = "applied"
+                elif previous_status in {"running", "queued", "retrying", "pausing"}:
+                    target_status = "running"
+                    result_state = "applied"
+                else:
+                    target_status = previous_status if previous_status in {
+                        "draft", "paused", "stopped", "failed", "awaiting_user", "completed",
+                    } else "paused"
+                    result_state = "applied"
+                update_message_metadata(
+                    message["id"], execution_status="completed",
+                    execution_result=result_state, action_results=action_results,
+                )
+                add_event(production["id"], "production.intervention_executed", {
+                    "message_id": message["id"], "recipient": recipient,
+                    "actions": [item.get("type") for item in action_results],
+                    "blocking_issues": len(blocking_issues), "target_status": target_status,
+                    "autonomous": autonomous,
+                })
+                if target_status != current.get("status"):
+                    update_production(production["id"], status=target_status, error=None)
+                if autonomous and (failed_actions or blocking_issues or final_plan["requires_user"]
+                                   or policy in {"pause", "await_user"}):
+                    details = []
+                    if failed_actions:
+                        details.append(f"{len(failed_actions)} requested action(s) failed")
+                    if blocking_issues:
+                        details.append(f"{len(blocking_issues)} blocking review issue(s) were reported")
+                    if final_plan["requires_user"] or policy in {"pause", "await_user"}:
+                        details.append("the agents requested a pause or clarification")
+                    add_message(
+                        production["id"], "system", "all", "status",
+                        "Autonomous mode accepted your intervention and is continuing. "
+                        + "; ".join(details)
+                        + ". The controller will use the saved checkpoint and retry or choose a safe next step automatically.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "autonomous_continue": True,
+                         "action_results": action_results},
+                    )
+                elif failed_actions or blocking_issues:
+                    add_message(
+                        production["id"], "system", "all", "status",
+                        "The agents handled your message, but a requested action or review found a blocking issue. "
+                        "The production is paused at the safe checkpoint.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "resume_blocked": True,
+                         "action_results": action_results},
+                    )
+                elif target_status == "awaiting_user":
+                    add_message(
+                        production["id"], "system", "user", "status",
+                        "The agents answered and are waiting for your next message before continuing.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "awaiting_user": True},
+                    )
+                elif target_status == "running":
+                    add_message(
+                        production["id"], "system", "all", "status",
+                        "Autonomous mode applied your intervention and is continuing from the saved checkpoint."
+                        if autonomous
+                        else "The agents handled your message and applied the validated actions. Resuming the saved checkpoint.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "autonomous_continue": autonomous,
+                         "action_results": action_results},
+                    )
+                else:
+                    add_message(
+                        production["id"], "system", "all", "status",
+                        f"The agents handled your message. The production remains {target_status} as requested.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "action_results": action_results},
+                    )
+            except Exception as exc:
+                update_message_metadata(message["id"], execution_status="failed", execution_error=str(exc)[:2000])
+                add_message(
+                    production["id"], "system", "user", "error",
+                    f"The user intervention failed before the production resumed: {exc}",
+                    {"intervention": True, "intervention_id": message["id"], "execution_status": "failed"},
+                )
+                raise
+            production = get_production(production["id"], private=True) or production
+        return production
 
     async def _run_stage(self, production_id: str) -> None:
         production = get_production(production_id, private=True)
         if not production:
             return
         self._folder(production_id)
+        production = await self._apply_pending_interventions(production)
+        if production.get("status") != "running":
+            return
         stage = production["stage"]
 
         if stage == "song_analysis":
-            add_message(production_id, "system", "all", "status", "AGY is analyzing the song and lyric timing.")
-            try:
-                audio_metadata = await asyncio.to_thread(probe_audio_metadata, Path(production["song_path"]))
-            except (RuntimeError, OSError) as exc:
-                audio_metadata = {"preflight_error": str(exc)}
-            analysis_dir = self._folder(production_id) / "analysis"
-            preflight_path = analysis_dir / "audio_preflight.json"
-            preflight_path.write_text(
-                json.dumps({
-                    "song_path": production["song_path"],
-                    "metadata": audio_metadata,
-                    "source": "backend.ffprobe",
-                }, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            analysis_request = f"""
-Analyze the actual song file and lyrics. Return duration, BPM and confidence, meter, genre, sections,
-energy curve, vocal entrances, instrumental breaks, transitions, estimated timestamped lyric map,
-and concrete visual opportunities. Mark uncertain timing as estimated. Put the full analysis in content.
-The bridge already performed this basic audio preflight:
-{json.dumps(audio_metadata, ensure_ascii=False)}
-The preflight report is also saved at {preflight_path}. Use a native media/audio capability only if it
-can actually decode the file. Do not use view_file on the binary MP3; if native audio inspection is not
-available, use the preflight report and lyrics, mark BPM/sections/lyric timing as estimated, and still
-return the required structured response. Do not run shell commands or ask for command permission.
-Put the full analysis in content.
-"""
-            try:
-                analysis = await self._media_agent(production, analysis_request)
-            except Exception as exc:
-                diagnostic_path = self._record_agent_failure(production_id, "song_analysis", exc)
-                add_message(
-                    production_id, "system", "all", "status",
-                    "AGY could not complete song inspection; the backend audio preflight was preserved and the production will continue with limited analysis.",
-                    {"fallback": True, "diagnostic_path": str(diagnostic_path), "reason": str(exc)[:1600]},
-                )
-                fallback = self._limited_audio_analysis(audio_metadata, exc)
-                analysis = AgentResult(
-                    "agy", fallback, "backend audio preflight fallback", None,
-                    production.get("agy_model", ""), production.get("agy_effort", ""),
-                )
-            (self._folder(production_id) / "analysis" / "song_analysis.json").write_text(
-                json.dumps(analysis.content, ensure_ascii=False, indent=2), encoding="utf-8",
-            )
+            await self._analyze_song_audio(production)
             update_production(production_id, stage="treatment_consultation", progress=0.2)
             self._checkpoint(production_id)
             if self._control_requested(production_id):
@@ -1667,11 +2454,13 @@ Revised treatment: {json.dumps(final.content, ensure_ascii=False)}
         if stage == "reference_development":
             treatment_path = self._folder(production_id) / "treatment" / "joint_treatment.json"
             treatment = treatment_path.read_text(encoding="utf-8") if treatment_path.exists() else "{}"
+            aspect_ratio = str(production.get("generation_aspect_ratio") or "16:9")
             codex = await self._codex(production, f"""
 Create detailed original reference briefs for every recurring character, location, vehicle, prop, wardrobe
 and continuity anchor in this treatment: {treatment}
 The top-level content object MUST include a `references` array. Every item must include `name`, `kind`,
-`description`, and a complete `image_prompt` for a polished 16:9 still. Avoid visible text unless the exact
+`description`, and a complete `image_prompt` for a polished {aspect_ratio} still. The production-selected
+aspect ratio is authoritative for every reference; do not substitute another ratio. Avoid visible text unless the exact
 text is narratively required. The production context lists optional user-provided reference files. Preserve
 their identity, wardrobe, location, and prop details; do not recreate a user-supplied reference as a duplicate.
 Create new reference briefs only for categories the user did not provide. Mark user files as source references
@@ -2031,16 +2820,21 @@ Final package: {json.dumps(final.content, ensure_ascii=False)}
                     raise RuntimeError(f"{shot['title']} has no accepted clip")
                 clips.append(clip)
             assembly_dir = self._folder(production_id) / "assembly"
-            silent = assembly_dir / "silent_master.mp4"
-            final_video = assembly_dir / "final_with_song.mp4"
+            prior_finals = [
+                artifact for artifact in list_artifacts(production_id, private=True)
+                if artifact.get("kind") == "final_video"
+            ]
+            revision = len(prior_finals) + 1
+            silent = assembly_dir / f"silent_master_v{revision:03d}.mp4"
+            final_video = assembly_dir / f"final_with_song_v{revision:03d}.mp4"
             if len(clips) == 1:
                 shutil.copy2(clips[0], silent)
             else:
                 await asyncio.to_thread(assemble_clips, clips, silent)
             production = get_production(production_id, private=True) or production
             await asyncio.to_thread(attach_song, silent, Path(production["song_path"]), final_video)
-            add_artifact(production_id, "silent_master", str(silent), {"clips": len(clips)})
-            add_artifact(production_id, "final_video", str(final_video), {"clips": len(clips)})
+            add_artifact(production_id, "silent_master", str(silent), {"clips": len(clips), "revision": revision})
+            add_artifact(production_id, "final_video", str(final_video), {"clips": len(clips), "revision": revision})
             update_production(production_id, status="queued", stage="final_review", progress=0.94)
             add_message(production_id, "system", "all", "status", "All accepted shots were assembled and the original song was attached.")
             self._checkpoint(production_id)
@@ -2049,15 +2843,26 @@ Final package: {json.dumps(final.content, ensure_ascii=False)}
 
         if stage == "final_review":
             production = get_production(production_id, private=True) or production
-            final_video = self._folder(production_id) / "assembly" / "final_with_song.mp4"
+            final_video = self._latest_artifact_path(production_id, "final_video")
+            if not final_video:
+                raise RuntimeError("The final assembly artifact is missing")
             frames = await asyncio.to_thread(
                 extract_review_frames, final_video, self._folder(production_id) / "assembly" / "review_frames", 0.5, 80,
             )
+            # Final review is a focused artifact-inspection task. Reusing the
+            # long-lived production conversation made AGY load hundreds of
+            # prior steps (and more than 120k input tokens), then repeatedly
+            # inspect the request file instead of finishing the review. Keep a
+            # representative frame set and use fresh, compact review turns;
+            # the complete MP4 remains explicitly available to AGY by path.
+            if len(frames) > 12:
+                stride = max(1, len(frames) // 12)
+                frames = frames[::stride][:12]
             agy = await self._media_agent(production, f"""
 Inspect the complete final music video with its original song at {final_video}. Review synchronization,
 story/lyric alignment, pacing, cuts, continuity, motion, visible text, audio presence, and overall watchability.
 Return APPROVE or NEEDS_FIXES with timestamps and concrete changes. Do not reject for tiny imperceptible text.
-""", media_paths=[final_video, *frames])
+""", media_paths=[final_video, *frames], fresh_session=True, compact_context=True)
             if self._control_requested(production_id):
                 return
             production = get_production(production_id, private=True) or production
@@ -2065,7 +2870,7 @@ Return APPROVE or NEEDS_FIXES with timestamps and concrete changes. Do not rejec
 Review the attached frames and AGY's complete audio/video report as equal co-producer. Decide whether the
 final film is ready to show the user and list only concrete fixes if not.
 AGY report: {json.dumps(agy.content, ensure_ascii=False)}
-""", images=frames)
+""", images=frames, fresh_session=True, compact_context=True)
             decision = add_decision(
                 production_id, "final_review", "Final music video",
                 codex.content.get("summary", "The final video has completed joint review."),
@@ -2092,13 +2897,13 @@ Current shots: {json.dumps(shots, ensure_ascii=False)}
             if self._control_requested(production_id):
                 return
             production = get_production(production_id, private=True) or production
-            final_video = self._folder(production_id) / "assembly" / "final_with_song.mp4"
+            final_video = self._latest_artifact_path(production_id, "final_video")
             review_dir = self._folder(production_id) / "assembly" / "review_frames"
             review_frames = sorted(
                 path for path in review_dir.glob("*")
                 if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
             )
-            if final_video.is_file() and not review_frames:
+            if final_video and final_video.is_file() and not review_frames:
                 review_frames = await asyncio.to_thread(
                     extract_review_frames, final_video, review_dir, 0.5, 24,
                 )
@@ -2114,6 +2919,8 @@ Current shots: {json.dumps(shots, ensure_ascii=False)}
                 path for path in review_media
                 if not (str(path.resolve()) in seen_media or seen_media.add(str(path.resolve())))
             ]
+            if not final_video:
+                raise RuntimeError("The final assembly artifact is missing")
             agy = await self._agy(production, f"""
 Review Codex's repair plan against the actual final video and the user's rejection. The complete final video
 is at {final_video}. Representative review frames are attached from {review_dir}. Inspect the actual media,
