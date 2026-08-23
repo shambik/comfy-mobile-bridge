@@ -331,20 +331,77 @@ def row_dict(row):
     return item
 
 
-def list_jobs(include_sequence_children: bool = False):
-    child_filter = "" if include_sequence_children else "WHERE sequence_id IS NULL"
+def list_jobs(
+    include_sequence_children: bool = False,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    statuses: set[str] | None = None,
+):
+    filters: list[str] = []
+    params: list[object] = []
+    if not include_sequence_children:
+        filters.append("sequence_id IS NULL")
+    if statuses:
+        filters.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(sorted(statuses))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = " LIMIT ? OFFSET ?"
+        params.append(max(1, min(int(limit), 500)))
+        params.append(max(0, int(offset)))
     with connect() as db:
         rows = db.execute(f"""
           SELECT * FROM jobs
-          {child_filter}
+          {where_clause}
           ORDER BY
             CASE status WHEN 'running' THEN 0 WHEN 'starting' THEN 0 WHEN 'verifying' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
             CASE WHEN status = 'queued' THEN position END ASC,
             CASE WHEN status NOT IN ('queued','starting','running','verifying')
                  THEN COALESCE(finished_at, created_at) END DESC,
             created_at DESC
-        """).fetchall()
+          {limit_clause}
+        """, tuple(params)).fetchall()
     return [row_dict(r) for r in rows]
+
+
+def count_jobs(*, include_sequence_children: bool = False, statuses: set[str] | None = None) -> int:
+    filters: list[str] = []
+    params: list[object] = []
+    if not include_sequence_children:
+        filters.append("sequence_id IS NULL")
+    if statuses:
+        filters.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(sorted(statuses))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    with connect() as db:
+        row = db.execute(f"SELECT COUNT(*) FROM jobs {where_clause}", tuple(params)).fetchone()
+    return int(row[0] if row else 0)
+
+
+def jobs_revision() -> str:
+    """Return a cheap revision for job, sequence, and library catalog changes.
+
+    The Studio uses this before downloading the full generation history.  It
+    avoids repeatedly transferring and parsing every old generation while
+    still detecting queue progress and asset-organization changes.
+    """
+    tables = ("jobs", "sequences", "asset_projects", "asset_folders", "asset_assignments")
+    parts: list[str] = []
+    with connect() as db:
+        for table in tables:
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+            ).fetchone()
+            if not exists:
+                parts.append(f"{table}:0:")
+                continue
+            count, updated = db.execute(
+                f"SELECT COUNT(*), COALESCE(MAX(updated_at),'') FROM {table}"
+            ).fetchone()
+            parts.append(f"{table}:{count}:{updated}")
+    return "|".join(parts)
 
 
 def get_job(job_id: str, public=True):

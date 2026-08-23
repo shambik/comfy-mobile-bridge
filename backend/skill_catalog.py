@@ -180,3 +180,24 @@ def selected_skill_context(skill_ids: list[str], limit: int = 80_000) -> str:
         chunks.append(f"\n## Enabled skill: {skill['name']}\n{excerpt}")
         used += len(excerpt)
     return "\n".join(chunks)
+
+
+def selected_skill_summary_context(skill_ids: list[str]) -> str:
+    """Return a compact manifest for focused agent turns.
+
+    Shot QC already receives explicit acceptance criteria in its task. Sending
+    every complete SKILL.md again can add tens of thousands of tokens and,
+    when combined with a resumed provider conversation, substantially delay a
+    simple video review. The manifest keeps the selected skills authoritative
+    without duplicating their full bodies on every independent QC call.
+    """
+    chunks: list[str] = []
+    for skill_id in skill_ids:
+        skill = get_skill(skill_id)
+        if not skill or not skill["enabled"] or not skill["valid"]:
+            continue
+        chunks.append(
+            f"- {skill['name']}: {skill.get('description') or 'Enabled production skill.'} "
+            f"Source: {Path(skill['path']) / 'SKILL.md'}"
+        )
+    return "\n".join(chunks)

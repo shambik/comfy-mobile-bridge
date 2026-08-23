@@ -127,6 +127,65 @@ def probe_audio_metadata(path: Path) -> dict:
     }
 
 
+def is_audio_only_media(path: Path) -> bool:
+    """Return True when a media file has audio but no video stream."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe or not path.is_file():
+        return False
+    result = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-show_entries", "stream=codec_type",
+            "-of", "json", str(path),
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode:
+        return False
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return False
+    kinds = {str(stream.get("codec_type")) for stream in streams if isinstance(stream, dict)}
+    return "audio" in kinds and "video" not in kinds
+
+
+def prepare_agent_audio_carrier(source: Path, target: Path, duration_seconds: float | None = None) -> Path:
+    """Wrap source audio in a tiny MP4 so multimodal agents can inspect it.
+
+    The current AGY ``view_file`` transport terminates provider turns for
+    audio-only WAV/MP3 files, while the same provider successfully decodes the
+    audio track of an MP4.  Keep the original song untouched and create a
+    deterministic black, one-frame-per-second visual carrier exclusively for
+    analysis.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to prepare the AGY audio carrier")
+    if not source.is_file():
+        raise RuntimeError(f"Song source is missing: {source}")
+    duration = float(duration_seconds or probe_audio_metadata(source)["duration_seconds"])
+    if duration <= 0:
+        raise RuntimeError("The source song has no valid duration")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    result = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=640x360:r=1",
+            "-i", str(source), "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+            "-t", f"{duration:.6f}", "-movflags", "+faststart", "-f", "mp4", str(temporary),
+        ],
+        capture_output=True, text=True, timeout=900,
+    )
+    if result.returncode or not temporary.exists() or temporary.stat().st_size == 0:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("Could not prepare the AGY audio carrier: " + result.stderr[-1200:])
+    temporary.replace(target)
+    return target
+
+
 def attach_song(video: Path, song: Path, output: Path) -> dict:
     """Mux the original song over a silent assembled master."""
     ffmpeg = shutil.which("ffmpeg")

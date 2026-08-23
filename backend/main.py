@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -29,7 +29,7 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
-from .db import (connect, get_job, get_sequence, init_db, list_jobs,
+from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
 from .generation import normalize_generation_settings
 from .library import (assign_asset, create_folder, create_project, delete_folder,
@@ -37,7 +37,7 @@ from .library import (assign_asset, create_folder, create_project, delete_folder
                       rename_asset, rename_folder, rename_project, resolve_asset_path,
                       validate_location)
 from .security import COOKIE, new_token, require_csrf
-from .agents import agent_health, model_catalog
+from .agents import agent_health, model_catalog, process_manager
 from .production import production_orchestrator
 from .production_db import (add_config_revision, add_event, add_message, add_reference,
                             create_production, create_shot_attempt, delete_reference, ensure_agent_settings,
@@ -399,8 +399,36 @@ async def lock_system(request: Request):
 
 
 @app.get("/api/jobs")
-async def jobs():
-    return {"jobs": list_jobs(), "sequences": list_sequences(), "library": list_library(), **public_health()}
+async def jobs(
+    limit: int | None = None,
+    offset: int = 0,
+    status: str | None = None,
+    include_library: bool = True,
+    include_sequences: bool = True,
+):
+    allowed_statuses = {"queued", "starting", "running", "verifying", "completed", "failed", "canceled"}
+    requested_statuses = {
+        value.strip() for value in (status or "").split(",") if value.strip()
+    }
+    if requested_statuses - allowed_statuses:
+        raise HTTPException(400, "Unsupported job status filter")
+    payload: dict[str, Any] = {
+        "jobs": list_jobs(limit=limit, offset=offset, statuses=requested_statuses or None),
+        "jobs_total": count_jobs(statuses=requested_statuses or None),
+        "revision": jobs_revision(),
+        **public_health(),
+    }
+    if include_sequences:
+        payload["sequences"] = list_sequences()
+    if include_library:
+        payload["library"] = list_library()
+    return payload
+
+
+@app.get("/api/jobs/revision")
+async def job_catalog_revision():
+    """Lightweight polling endpoint used between full Studio refreshes."""
+    return {"revision": jobs_revision(), **public_health()}
 
 
 @app.get("/api/library")
@@ -594,6 +622,12 @@ def production_with_generation_progress(production: dict[str, Any] | None) -> di
     """Attach the currently sampled ComfyUI job to a production response."""
     if not production:
         return production
+    # Do not let a persisted ``running`` status imply that an agent is still
+    # alive.  The in-memory orchestrator/process manager is the source of
+    # truth for controller activity; this also lets the room show recovery
+    # instead of replaying the last stale agent message.
+    production["controller_active"] = production_orchestrator.has_active_work(production["id"])
+    production["agent_activity"] = process_manager.get_activity(production["id"])
     current_job_id = production_orchestrator.current_jobs.get(production["id"])
     if not current_job_id:
         return production
@@ -624,18 +658,27 @@ def production_with_generation_progress(production: dict[str, Any] | None) -> di
 
 @app.get("/api/productions/{production_id}")
 async def production_detail(
-    production_id: str, message_limit: int = 200, message_before: int | None = None,
+    production_id: str, message_limit: int = 60, message_before: int | None = None,
+    include_resolved_decisions: bool = False,
 ):
     # The production room only needs the recent council window for its first
     # render. Older messages can be requested explicitly without making every
     # refresh transfer the complete agent transcript.
-    safe_limit = max(50, min(message_limit, 500))
+    safe_limit = max(20, min(message_limit, 500))
     production = get_production(
         production_id, include_messages=True, message_limit=safe_limit,
         message_before=message_before,
     )
     if not production:
         raise HTTPException(404, "Production not found")
+    if not include_resolved_decisions:
+        # The room only renders actionable review cards. Historical resolved
+        # decision payloads can be very large and are already represented in
+        # the council transcript/export, so do not resend them every refresh.
+        production["decisions"] = [
+            decision for decision in production.get("decisions", [])
+            if decision.get("status") == "pending"
+        ]
     return production_with_generation_progress(production)
 
 
@@ -819,6 +862,35 @@ async def production_reference_file(production_id: str, reference_id: str):
     return FileResponse(path, filename=reference["name"])
 
 
+def _production_reference_thumbnail(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        image.thumbnail((420, 315), Image.Resampling.LANCZOS)
+        temporary = destination.with_suffix(".tmp.jpg")
+        image.save(temporary, format="JPEG", quality=78, optimize=True)
+        temporary.replace(destination)
+
+
+@app.get("/api/productions/{production_id}/references/{reference_id}/thumbnail")
+async def production_reference_thumbnail(production_id: str, reference_id: str):
+    reference = get_reference(production_id, reference_id, private=True)
+    if not reference or reference.get("kind") != "image":
+        raise HTTPException(404, "Image reference not found")
+    source = Path(reference["path"])
+    if not source.is_file():
+        raise HTTPException(410, "Reference file is missing")
+    destination = PRODUCTIONS / production_id / ".thumbnails" / f"{reference_id}.jpg"
+    if not destination.is_file() or destination.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        try:
+            await asyncio.to_thread(_production_reference_thumbnail, source, destination)
+        except (OSError, UnidentifiedImageError) as exc:
+            raise HTTPException(422, "Reference thumbnail could not be created") from exc
+    return FileResponse(destination, media_type="image/jpeg")
+
+
 @app.delete("/api/productions/{production_id}/references/{reference_id}")
 async def delete_production_reference(production_id: str, reference_id: str, request: Request):
     require_csrf(request)
@@ -930,6 +1002,11 @@ async def retry_production_shot(production_id: str, shot_id: str, request: Reque
     shot = next((item for item in shots if item["id"] == shot_id), None)
     if not production or not shot:
         raise HTTPException(404, "Production shot not found")
+    if production.get("participation_mode") == "autonomous":
+        raise HTTPException(
+            409,
+            "Autonomous productions regenerate shots automatically after review; no manual retry is required.",
+        )
     if production["status"] in {"queued", "running", "pausing", "retrying", "stopping"}:
         raise HTTPException(409, "Pause or stop the production before retrying a shot")
     updates: dict[str, object] = {"status": "planned", "accepted_attempt": None}
@@ -1288,42 +1365,140 @@ async def production_intervention(production_id: str, request: Request, body: In
     if not production:
         raise HTTPException(404, "Production not found")
     content = body.content.strip()
+    autonomous = production.get("participation_mode") == "autonomous"
     message = add_message(
         production_id, "user", body.recipient, "intervention", content,
-        {"priority": "user", "interrupt": True},
+        {"priority": "user", "interrupt": True, "execution_status": "pending",
+         "previous_status": production["status"]},
     )
-    # The database is set to ``queued`` as soon as an intervention is
-    # requested, but the current orchestrator task may still be unwinding and
-    # its CLI subprocess may still be alive.  Use the in-memory activity check
-    # as well so an intervention always takes the interrupt path.
+    # Stop every in-memory owner before re-queuing. Killing only the CLI child
+    # leaves a controller task registered and prevents the scheduler from ever
+    # applying the intervention.
     active = production["status"] in {"running", "retrying", "pausing"} or production_orchestrator.has_active_work(production_id)
-    if active:
+    if active and not autonomous:
         update_production(
-            production_id, status="queued", intervention_requested=1,
+            production_id, status="pausing", intervention_requested=1,
             pause_requested=0, stop_requested=0, error=None,
         )
         add_message(
             production_id, "system", "all", "status",
-            "Intervention received. Stopping the current agent work and preparing to resume from the last safe checkpoint.",
-            {"intervention": True, "recipient": body.recipient, "interrupt": True},
+            "Autonomous intervention received. Replacing the current turn at the next safe checkpoint and continuing automatically."
+            if autonomous
+            else "Intervention received. Stopping the current agent work and preparing to resume from the last safe checkpoint.",
+            {"intervention": True, "recipient": body.recipient, "interrupt": True,
+             "autonomous": autonomous, "auto_continue": autonomous},
         )
         add_event(production_id, "production.intervention_requested", {
             "recipient": body.recipient,
             "stage": production.get("stage"),
             "cancel_generation_requested": bool(production_orchestrator.current_jobs.get(production_id)),
         })
-        await production_orchestrator.cancel_agents(production_id)
-        # An intervention is an interrupt of the current production operation,
-        # including a ComfyUI shot if one is running. The orchestrator marks the
-        # interrupted attempt separately so resume does not present it as a
-        # generation failure.
-        await production_orchestrator.cancel_generation(production_id)
-        production_orchestrator.notify()
-    else:
+        cancelled: dict[str, Any] = {
+            "agent": False, "generation": False, "controller": False,
+            "controller_cancel_requested": False,
+        }
+        try:
+            # Keep cancellation alive even if the phone closes the request or
+            # temporarily loses its Tailscale connection mid-intervention.
+            cancellation = asyncio.create_task(
+                production_orchestrator.interrupt_active_work(production_id),
+            )
+            cancelled = await asyncio.shield(cancellation)
+        except BaseException as exc:
+            # Persist the handoff even if cancellation itself is interrupted by
+            # a provider, client disconnect, or bridge shutdown. The existing
+            # controller remains registered until it exits, so queuing here
+            # cannot create concurrent production controllers.
+            cancelled["handoff_error"] = type(exc).__name__
+        finally:
+            update_production(
+                production_id, status="queued", intervention_requested=0,
+                pause_requested=0, stop_requested=0, error=None,
+            )
         add_message(
             production_id, "system", "all", "status",
-            "Intervention saved for the next production resume; no active agent work was running.",
-            {"intervention": True, "recipient": body.recipient},
+            "Autonomous intervention applied. The saved agent sessions will continue from the checkpoint automatically."
+            if autonomous
+            else "Intervention applied. Current work stopped; the production is queued to resume from the last safe checkpoint with the saved agent sessions.",
+            {"intervention": True, "recipient": body.recipient,
+             "resumed_from_checkpoint": True, "cancelled": cancelled,
+             "autonomous": autonomous, "auto_continue": autonomous},
+        )
+        add_event(production_id, "production.intervention_applied", cancelled)
+        production_orchestrator.notify()
+    elif active:
+        # Autonomous work is allowed to finish only when this production owns
+        # a prompt that ComfyUI confirms is actively sampling.  A controller
+        # can otherwise be busy with an agent turn while ComfyUI is idle or
+        # stopped; leaving the intervention flagged in that state made the UI
+        # look active forever and prevented the saved conversation from being
+        # applied.
+        comfy_generation_running = await production_orchestrator.comfy_generation_running(production_id)
+        if comfy_generation_running:
+            update_production(
+                production_id, status="running", intervention_requested=1,
+                pause_requested=0, stop_requested=0, error=None,
+            )
+            add_message(
+                production_id, "system", "all", "status",
+                "Autonomous intervention queued for the next safe checkpoint because ComfyUI is actively generating. The current generation will finish and the agents will apply your guidance automatically.",
+                {"intervention": True, "recipient": body.recipient, "queued_at_safe_checkpoint": True,
+                 "comfy_generation_running": True, "autonomous": True, "auto_continue": True},
+            )
+            add_event(production_id, "production.intervention_queued", {
+                "recipient": body.recipient, "stage": production.get("stage"),
+                "cancel_generation_requested": False, "comfy_generation_running": True,
+                "autonomous": True,
+            })
+            production_orchestrator.notify()
+        else:
+            # There is no active Comfy generation to protect.  Cancel only the
+            # current agent/controller turn, then immediately hand the saved
+            # checkpoint back to the scheduler.  This is an agent intervention,
+            # not a Comfy queue wait.
+            cancelled: dict[str, Any] = {
+                "agent": False, "generation": False, "controller": False,
+                "controller_cancel_requested": False,
+            }
+            if production_orchestrator.has_active_work(production_id):
+                try:
+                    cancellation = asyncio.create_task(
+                        production_orchestrator.interrupt_active_work(production_id),
+                    )
+                    cancelled = await asyncio.shield(cancellation)
+                except BaseException as exc:
+                    cancelled["handoff_error"] = type(exc).__name__
+            update_production(
+                production_id, status="queued", intervention_requested=0,
+                pause_requested=0, stop_requested=0, error=None,
+            )
+            add_message(
+                production_id, "system", "all", "status",
+                "Autonomous intervention is being applied immediately because ComfyUI is not actively generating. No ComfyUI checkpoint queue was created; the saved agent sessions will continue with your guidance.",
+                {"intervention": True, "recipient": body.recipient,
+                 "applied_immediately": True, "comfy_generation_running": False,
+                 "cancelled": cancelled, "autonomous": True, "auto_continue": True},
+            )
+            add_event(production_id, "production.intervention_applied_immediately", {
+                "recipient": body.recipient, "stage": production.get("stage"),
+                "cancel_generation_requested": False, "comfy_generation_running": False,
+                "cancelled": cancelled, "autonomous": True,
+            })
+            production_orchestrator.notify()
+    else:
+        # Conversation is itself executable work. A paused/failed/awaiting-user
+        # production must not require a separate Resume click merely to let the
+        # addressed agents answer or apply the request. The intervention turn
+        # restores/preserves the prior state according to the agents' explicit
+        # resume policy once it has finished.
+        update_production(
+            production_id, status="queued", intervention_requested=0,
+            pause_requested=0, stop_requested=0, error=None,
+        )
+        add_message(
+            production_id, "system", "all", "status",
+            "Your message was queued for the addressed agent session. No separate Resume action is required.",
+            {"intervention": True, "recipient": body.recipient, "conversation_queued": True},
         )
         production_orchestrator.notify()
     return {"message": message, "production": get_production(production_id, include_messages=True)}

@@ -565,6 +565,29 @@ def add_message(
             "kind": kind, "content": content, "metadata": metadata or {}, "created_at": created}
 
 
+def update_message_metadata(message_id: str, **changes: Any) -> dict[str, Any] | None:
+    """Persist execution state for a production message without rewriting it."""
+    with connect() as db:
+        row = db.execute(
+            "SELECT metadata_json FROM production_messages WHERE id=?", (message_id,),
+        ).fetchone()
+        if not row:
+            return None
+        metadata = json.loads(row["metadata_json"] or "{}")
+        metadata.update(changes)
+        db.execute(
+            "UPDATE production_messages SET metadata_json=? WHERE id=?",
+            (_json(metadata), message_id),
+        )
+        updated = db.execute(
+            "SELECT * FROM production_messages WHERE id=?", (message_id,),
+        ).fetchone()
+    item = dict(updated)
+    item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+    item.pop("production_id", None)
+    return item
+
+
 def count_messages(production_id: str) -> int:
     with connect() as db:
         return int(db.execute(
@@ -666,20 +689,64 @@ def list_events(production_id: str, after: int = 0, limit: int = 200) -> list[di
              "payload": json.loads(row["payload_json"] or "{}"), "created_at": row["created_at"]} for row in rows]
 
 
-def recover_productions() -> None:
+def recover_productions(
+    exclude_ids: set[str] | None = None,
+    *,
+    reason: str = "Recovered after bridge restart",
+) -> list[str]:
+    """Pause productions whose controller is no longer active.
+
+    A production is persisted as ``running`` before its asyncio controller
+    task starts.  If the bridge or that task disappears, the old status used
+    to remain forever and the room kept showing the last agent message as if
+    work were still happening.  The orchestrator passes its live production
+    IDs here so an active task is never mistaken for an orphan.
+
+    Returning the recovered IDs makes this useful both during startup and as
+    a lightweight watchdog from the scheduler loop.
+    """
+    excluded = {str(value) for value in (exclude_ids or set()) if value}
+    status_clause = "status IN ('running','pausing','retrying','stopping')"
+    select_params: tuple[str, ...] = ()
+    if excluded:
+        placeholders = ",".join("?" for _ in excluded)
+        status_clause += f" AND id NOT IN ({placeholders})"
+        select_params = tuple(excluded)
+
     with connect() as db:
         rows = db.execute(
-            "SELECT id FROM productions WHERE status IN ('running','pausing','retrying','stopping')"
+            f"SELECT id,intervention_requested FROM productions WHERE {status_clause}", select_params,
         ).fetchall()
         now = now_iso()
-        db.execute(
-            """UPDATE productions SET status='paused',pause_requested=0,stop_requested=0,
-               intervention_requested=0,error='Recovered after bridge restart',updated_at=?
-               WHERE status IN ('running','pausing','retrying','stopping')""",
-            (now,),
-        )
+        for row in rows:
+            resume_intervention = bool(row["intervention_requested"])
+            db.execute(
+                """UPDATE productions SET status=?,pause_requested=0,stop_requested=0,
+                   intervention_requested=0,error=?,updated_at=? WHERE id=?""",
+                ("queued" if resume_intervention else "paused", None if resume_intervention else reason,
+                 now, row["id"]),
+            )
+    recovered = [str(row["id"]) for row in rows]
     for row in rows:
-        add_event(row["id"], "production.recovered", {"status": "paused"})
+        production_id = str(row["id"])
+        resume_intervention = bool(row["intervention_requested"])
+        target_status = "queued" if resume_intervention else "paused"
+        add_event(production_id, "production.recovered", {
+            "status": target_status, "reason": reason,
+            "pending_intervention": resume_intervention,
+        })
+        add_message(
+            production_id,
+            "system",
+            "all",
+            "status",
+            (f"{reason}. The pending intervention was preserved and queued from the safe checkpoint."
+             if resume_intervention else
+             f"{reason}. The checkpoint was preserved; resume to continue safely."),
+            {"recovered": True, "reason": reason,
+             "pending_intervention": resume_intervention},
+        )
+    return recovered
 
 
 def replace_shot_plan(production_id: str, shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -869,6 +936,8 @@ def get_reference(production_id: str, reference_id: str, *, private: bool = Fals
         item.pop("path", None)
         item.pop("comfy_path", None)
         item["url"] = f"/api/productions/{production_id}/references/{reference_id}/file"
+        if item.get("kind") == "image":
+            item["thumbnail_url"] = f"/api/productions/{production_id}/references/{reference_id}/thumbnail"
     item.pop("production_id", None)
     return item
 
