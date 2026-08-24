@@ -147,6 +147,387 @@ async function jsonResponse(response: Response) {
   return data
 }
 
+
+function CouncilSeatsEditor({
+  seats,
+  onChange,
+  catalogs,
+  skills,
+}: {
+  seats: AgentSeat[]
+  onChange: (seats: AgentSeat[]) => void
+  catalogs: Record<Runtime, ModelOption[]>
+  skills: Skill[]
+}) {
+  const addSeat = (tier: 'specialist' | 'supervisor') => {
+    const nextIndex = seats.length
+    const runtime: Runtime = tier === 'supervisor' ? 'agy' : 'codex'
+    const available = catalogs[runtime] || []
+    const defaultModel = available[0]?.id || (runtime === 'agy' ? 'gemini-3.1-pro-high' : 'gpt-5.6-sol')
+    const defaultEffort = available[0]?.efforts?.[0] || 'high'
+    const newSeat: AgentSeat = {
+      id: `seat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      seat_index: nextIndex,
+      label: tier === 'supervisor' ? `Supervisor ${nextIndex + 1}` : `Specialist ${nextIndex + 1}`,
+      tier,
+      runtime,
+      model: defaultModel,
+      effort: defaultEffort,
+      can_image: true,
+      can_video: tier === 'supervisor',
+      can_audio: tier === 'supervisor',
+      role_skill_id: tier === 'supervisor' ? 'executive-producer' : 'visual-director',
+      role_prompt: '',
+    }
+    onChange([...seats, newSeat])
+  }
+
+  const updateSeat = (index: number, patch: Partial<AgentSeat>) => {
+    const updated = seats.map((seat, i) => {
+      if (i !== index) return seat
+      const next = { ...seat, ...patch }
+      if (patch.runtime && patch.runtime !== seat.runtime) {
+        const available = catalogs[patch.runtime] || []
+        if (available.length > 0) {
+          next.model = available[0].id
+          next.effort = available[0].efforts[0] || 'high'
+        }
+      }
+      if (patch.role_skill_id !== undefined && patch.role_skill_id !== seat.role_skill_id) {
+        const role = String(patch.role_skill_id).toLowerCase()
+        if (role.includes('audio')) {
+          next.can_audio = true
+        } else if (role.includes('qc') || role.includes('continuity') || role.includes('visual')) {
+          next.can_image = true
+        } else if (role.includes('director') || role.includes('producer') || role.includes('post-production')) {
+          next.can_image = true
+          next.can_video = true
+        }
+      }
+      return next
+    })
+    onChange(updated)
+  }
+
+  const removeSeat = (index: number) => {
+    const filtered = seats.filter((_, i) => i !== index).map((s, i) => ({ ...s, seat_index: i }))
+    onChange(filtered)
+  }
+
+  const loadPreset = (preset: 'default_pair' | 'full_council' | 'solo') => {
+    const codexModel = catalogs.codex?.[0]?.id || 'gpt-5.6-sol'
+    const agyModel = catalogs.agy?.[0]?.id || 'gemini-3.1-pro-high'
+    if (preset === 'default_pair') {
+      onChange([
+        {
+          id: 'seat-codex',
+          seat_index: 0,
+          label: 'Codex Specialist',
+          tier: 'specialist',
+          runtime: 'codex',
+          model: codexModel,
+          effort: 'high',
+          can_image: true,
+          can_video: false,
+          can_audio: false,
+          role_skill_id: 'visual-director',
+          role_prompt: '',
+        },
+        {
+          id: 'seat-agy',
+          seat_index: 1,
+          label: 'AGY Supervisor & Media',
+          tier: 'supervisor',
+          runtime: 'agy',
+          model: agyModel,
+          effort: 'high',
+          can_image: true,
+          can_video: true,
+          can_audio: true,
+          role_skill_id: 'executive-producer',
+          role_prompt: '',
+        },
+      ])
+    } else if (preset === 'full_council') {
+      onChange([
+        {
+          id: 'seat-audio',
+          seat_index: 0,
+          label: 'Audio Analyst',
+          tier: 'specialist',
+          runtime: 'agy',
+          model: agyModel,
+          effort: 'high',
+          can_image: false,
+          can_video: false,
+          can_audio: true,
+          role_skill_id: 'audio-analyst',
+          role_prompt: '',
+        },
+        {
+          id: 'seat-visual',
+          seat_index: 1,
+          label: 'Visual Director',
+          tier: 'specialist',
+          runtime: 'codex',
+          model: codexModel,
+          effort: 'high',
+          can_image: true,
+          can_video: false,
+          can_audio: false,
+          role_skill_id: 'visual-director',
+          role_prompt: '',
+        },
+        {
+          id: 'seat-prompts',
+          seat_index: 2,
+          label: 'Prompt Engineer',
+          tier: 'specialist',
+          runtime: 'codex',
+          model: codexModel,
+          effort: 'high',
+          can_image: true,
+          can_video: false,
+          can_audio: false,
+          role_skill_id: 'prompt-engineer',
+          role_prompt: '',
+        },
+        {
+          id: 'seat-qc',
+          seat_index: 3,
+          label: 'Technical QC',
+          tier: 'specialist',
+          runtime: 'agy',
+          model: agyModel,
+          effort: 'high',
+          can_image: true,
+          can_video: true,
+          can_audio: false,
+          role_skill_id: 'technical-qc',
+          role_prompt: '',
+        },
+        {
+          id: 'seat-exec',
+          seat_index: 4,
+          label: 'Executive Producer',
+          tier: 'supervisor',
+          runtime: 'agy',
+          model: agyModel,
+          effort: 'high',
+          can_image: true,
+          can_video: true,
+          can_audio: true,
+          role_skill_id: 'executive-producer',
+          role_prompt: '',
+        },
+      ])
+    } else if (preset === 'solo') {
+      onChange([
+        {
+          id: 'seat-solo',
+          seat_index: 0,
+          label: 'Solo Director & Producer',
+          tier: 'specialist',
+          runtime: 'agy',
+          model: agyModel,
+          effort: 'high',
+          can_image: true,
+          can_video: true,
+          can_audio: true,
+          role_skill_id: null,
+          role_prompt: '',
+        },
+      ])
+    }
+  }
+
+  const roleSkills = skills.filter(s => s.valid)
+
+  return (
+    <div className="ps-council-config">
+      <div className="ps-council-header">
+        <div className="ps-field-title">
+          <Bot size={16} />
+          <span>Production Council Seats ({seats.length})</span>
+        </div>
+        <div className="ps-council-presets">
+          <span className="ps-preset-label">Templates:</span>
+          <button type="button" className="ps-preset-btn" onClick={() => loadPreset('default_pair')}>
+            Default Pair
+          </button>
+          <button type="button" className="ps-preset-btn" onClick={() => loadPreset('full_council')}>
+            Full Council (5 Seats)
+          </button>
+          <button type="button" className="ps-preset-btn" onClick={() => loadPreset('solo')}>
+            Solo
+          </button>
+        </div>
+      </div>
+
+      <p className="ps-council-intro">
+        Configure the agent seats, tiers (Specialist vs Supervisor), runtime, model, capabilities, and assigned roles.
+      </p>
+
+      <div className="ps-seats-list">
+        {seats.map((seat, index) => {
+          const modelsList = catalogs[seat.runtime] || []
+          const selectedModel = modelsList.find(m => m.id === seat.model)
+          const effortOptions = selectedModel?.efforts?.length ? selectedModel.efforts : ['low', 'medium', 'high']
+
+          return (
+            <article key={seat.id || index} className={`ps-seat-card ${seat.tier}`}>
+              <div className="ps-seat-card-top">
+                <div className="ps-seat-title-group">
+                  <span className={`ps-tier-badge ${seat.tier}`}>
+                    {seat.tier === 'supervisor' ? 'Supervisor' : 'Specialist'}
+                  </span>
+                  <input
+                    className="ps-seat-label-input"
+                    value={seat.label}
+                    placeholder="Seat label / Name"
+                    onChange={e => updateSeat(index, { label: e.target.value })}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="ps-seat-remove-btn"
+                  title="Remove agent seat"
+                  onClick={() => removeSeat(index)}
+                  disabled={seats.length <= 1}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              <div className="ps-seat-grid">
+                <label>
+                  <span>Tier</span>
+                  <select
+                    value={seat.tier}
+                    onChange={e => updateSeat(index, { tier: e.target.value as 'specialist' | 'supervisor' })}
+                  >
+                    <option value="specialist">Specialist (Domain Work)</option>
+                    <option value="supervisor">Supervisor (Review & Lead)</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Assigned Role / Skill</span>
+                  <select
+                    value={seat.role_skill_id || ''}
+                    onChange={e => updateSeat(index, { role_skill_id: e.target.value || null })}
+                  >
+                    <option value="">Custom / Freeform Role</option>
+                    {roleSkills.map(skill => (
+                      <option key={skill.id} value={skill.name}>
+                        {skill.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Runtime</span>
+                  <select
+                    value={seat.runtime}
+                    onChange={e => updateSeat(index, { runtime: e.target.value as Runtime })}
+                  >
+                    <option value="codex">Codex CLI</option>
+                    <option value="agy">AGY CLI</option>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Model</span>
+                  <select
+                    value={seat.model}
+                    onChange={e => updateSeat(index, { model: e.target.value })}
+                  >
+                    {!modelsList.some(m => m.id === seat.model) && seat.model && (
+                      <option value={seat.model}>{seat.model}</option>
+                    )}
+                    {modelsList.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Thinking Level</span>
+                  <select
+                    value={seat.effort}
+                    onChange={e => updateSeat(index, { effort: e.target.value })}
+                  >
+                    {!effortOptions.includes(seat.effort) && (
+                      <option value={seat.effort}>{effortLabels[seat.effort] || seat.effort}</option>
+                    )}
+                    {effortOptions.map(eff => (
+                      <option key={eff} value={eff}>
+                        {effortLabels[eff] || eff}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="ps-seat-caps-row">
+                <span className="ps-caps-title">Media Capabilities:</span>
+                <label className="ps-cap-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={seat.can_image}
+                    onChange={e => updateSeat(index, { can_image: e.target.checked })}
+                  />
+                  <span>Images</span>
+                </label>
+                <label className="ps-cap-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={seat.can_video}
+                    onChange={e => updateSeat(index, { can_video: e.target.checked })}
+                  />
+                  <span>Video</span>
+                </label>
+                <label className="ps-cap-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={seat.can_audio}
+                    onChange={e => updateSeat(index, { can_audio: e.target.checked })}
+                  />
+                  <span>Audio</span>
+                </label>
+              </div>
+
+              <div className="ps-seat-prompt-row">
+                <label>
+                  <span>Custom Role Prompt / Instructions (optional)</span>
+                  <input
+                    className="ps-seat-role-prompt"
+                    value={seat.role_prompt || ''}
+                    placeholder="e.g. Focus on camera continuity and realistic lighting"
+                    onChange={e => updateSeat(index, { role_prompt: e.target.value })}
+                  />
+                </label>
+              </div>
+            </article>
+          )
+        })}
+      </div>
+
+      <div className="ps-seat-add-buttons">
+        <button type="button" className="ps-secondary" onClick={() => addSeat('specialist')}>
+          + Add Specialist Seat
+        </button>
+        <button type="button" className="ps-secondary" onClick={() => addSeat('supervisor')}>
+          + Add Supervisor Seat
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function AgentSelect({ label, catalogs, runtime, model, effort, onRuntime, onModel, onEffort, runtimeLocked = false, showRuntime = false }: {
   label: string; catalogs: Record<Runtime, ModelOption[]>; runtime: Runtime; model: string; effort: string;
   onRuntime: (value: Runtime) => void; onModel: (value: string) => void; onEffort: (value: string) => void; runtimeLocked?: boolean; showRuntime?: boolean
@@ -835,9 +1216,13 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const saveSettings = async () => {
     setBusy(true)
     try {
-      const updated = await mutate('/api/settings/agents', 'PATCH', JSON.stringify(settings))
+      const payload = {
+        ...settings,
+        default_seats: settings.default_seats || seats,
+      }
+      const updated = await mutate('/api/settings/agents', 'PATCH', JSON.stringify(payload))
       setSettings(updated)
-      feedback.notify('success', 'Agent defaults saved')
+      feedback.notify('success', 'Agent defaults & council seats saved')
     } catch (reason) { setSectionError('settings', reason instanceof Error ? reason.message : 'Settings failed') }
     finally { setBusy(false) }
   }
@@ -1082,11 +1467,9 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     <header className="ps-page-head"><button className="ps-icon" onClick={() => setView('room')}><ChevronLeft size={19} /></button><div><span>Production Studio</span><h2>Agent & skill settings</h2></div><button className="ps-icon" onClick={() => void refreshModels()} disabled={modelsRefreshing}><RefreshCw className={modelsRefreshing ? 'spin' : ''} size={18} /></button></header>
     <SectionError message={sectionErrors.settings} onDismiss={() => clearSectionError('settings')} />
     <div className="ps-settings-grid">
-      <section className="ps-panel"><div className="ps-panel-title"><Bot size={18} /><div><h3>Agent defaults</h3><p>Used by new productions. Active projects keep their frozen configuration.</p></div></div>
-        <div className="ps-agent-grid">
-          <AgentSelect label="CODEX" catalogs={models} runtime={settings.codex_runtime} model={settings.codex_model} effort={settings.codex_effort} onRuntime={value => setSettings(current => ({ ...current, codex_runtime: value }))} onModel={value => setSettings(current => ({ ...current, codex_model: value }))} onEffort={value => setSettings(current => ({ ...current, codex_effort: value }))} />
-          <AgentSelect label="AGY" catalogs={models} runtime="agy" model={settings.agy_model} effort={settings.agy_effort} runtimeLocked onRuntime={() => {}} onModel={value => setSettings(current => ({ ...current, agy_model: value }))} onEffort={value => setSettings(current => ({ ...current, agy_effort: value }))} />
-        </div><div className="ps-model-status"><span>{agentCatalogLoading ? 'Loading agent catalogs…' : `Models queried from the installed CLIs${modelsFetchedAt ? ` · ${modelsFetchedAt}` : ''}`}</span><button className="ps-secondary" onClick={() => void refreshModels()} disabled={modelsRefreshing}>{modelsRefreshing ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh models</button></div><button className="ps-primary" onClick={() => void saveSettings()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save defaults</button>
+      <section className="ps-panel"><div className="ps-panel-title"><Bot size={18} /><div><h3>Default Council Seats & Agent Roles</h3><p>Configure the default team of specialist and supervisor agents for new productions.</p></div></div>
+        <CouncilSeatsEditor seats={settings.default_seats || seats} onChange={updatedSeats => { setSettings(current => ({ ...current, default_seats: updatedSeats })); setSeats(updatedSeats) }} catalogs={models} skills={skills} />
+        <div className="ps-model-status"><span>{agentCatalogLoading ? 'Loading agent catalogs…' : `Models queried from the installed CLIs${modelsFetchedAt ? ` · ${modelsFetchedAt}` : ''}`}</span><button className="ps-secondary" onClick={() => void refreshModels()} disabled={modelsRefreshing}>{modelsRefreshing ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} Refresh models</button></div><button className="ps-primary" onClick={() => void saveSettings()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save defaults</button>
       </section>
       <section className="ps-panel ps-skills-panel"><div className="ps-panel-title"><Sparkles size={18} /><div><h3>Production skills</h3><p>Enabled skills become available to new productions.</p></div></div>
         <SectionError message={sectionErrors.skills} className="ps-section-error" onDismiss={() => clearSectionError('skills')} />
@@ -1128,9 +1511,9 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
          <MegapixelRulesEditor rules={generationMegapixelRules} onChange={setGenerationMegapixelRules} />
          <small>Turbo v4 supports 4–8 steps. MP remains the requested value; it is not replaced by the rounded pixel product shown after dimension calculation.</small>
        </div>
-      <details className="ps-advanced-settings"><summary>Advanced settings (optional)</summary>
-      <div className="ps-agent-grid"><AgentSelect label="CODEX" catalogs={models} runtime={codexRuntime} model={codexModel} effort={codexEffort} onRuntime={setCodexRuntime} onModel={setCodexModel} onEffort={setCodexEffort} /><AgentSelect label="AGY" catalogs={models} runtime="agy" model={agyModel} effort={agyEffort} runtimeLocked onRuntime={() => {}} onModel={setAgyModel} onEffort={setAgyEffort} /></div>
-      <div className="ps-project-skills"><div className="ps-field-title"><Sparkles size={15} /><span>Enabled skills</span></div><div>{skills.filter(item => item.valid && item.enabled).map(skill => <label key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={() => setSelectedSkills(current => current.includes(skill.id) ? current.filter(id => id !== skill.id) : [...current, skill.id])} />{skill.name}</label>)}</div></div>
+      <details className="ps-advanced-settings" open><summary>Production Council & Skill Assignment</summary>
+      <CouncilSeatsEditor seats={seats} onChange={setSeats} catalogs={models} skills={skills} />
+      <div className="ps-project-skills"><div className="ps-field-title"><Sparkles size={15} /><span>Enabled skills & capabilities in project</span></div><div>{skills.filter(item => item.valid).map(skill => <label key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={() => setSelectedSkills(current => current.includes(skill.id) ? current.filter(id => id !== skill.id) : [...current, skill.id])} />{skill.name}</label>)}</div></div>
       </details>
       <div className="ps-create-actions">{newProject && production && <button className="ps-secondary" onClick={() => setNewProject(false)}>Cancel</button>}<button className="ps-primary" onClick={() => void create()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />} Create production</button></div>
     </section> : <>
