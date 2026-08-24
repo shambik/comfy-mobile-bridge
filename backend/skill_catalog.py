@@ -65,11 +65,9 @@ def discover_skills() -> list[dict[str, Any]]:
     for root, source, managed in roots:
         if not root.exists():
             continue
-        for skill_file in root.rglob("SKILL.md"):
-            path = skill_file.parent
-            if (path / "roles").is_dir() and any((path / "roles").iterdir()):
-                continue
-            upsert_skill(path, source, managed)
+        for path in root.iterdir():
+            if path.is_dir() and (path / "SKILL.md").exists():
+                upsert_skill(path, source, managed)
     return list_skills()
 
 

@@ -147,27 +147,6 @@ def init_production_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS agent_seats (
-                id TEXT PRIMARY KEY,
-                production_id TEXT NOT NULL,
-                seat_index INTEGER NOT NULL,
-                label TEXT NOT NULL,
-                tier TEXT NOT NULL DEFAULT 'specialist',
-                runtime TEXT NOT NULL,
-                model TEXT NOT NULL,
-                effort TEXT NOT NULL,
-                can_image INTEGER NOT NULL DEFAULT 1,
-                can_video INTEGER NOT NULL DEFAULT 0,
-                can_audio INTEGER NOT NULL DEFAULT 0,
-                session_id TEXT,
-                role_skill_id TEXT,
-                role_prompt TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(production_id, seat_index),
-                FOREIGN KEY(production_id) REFERENCES productions(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS productions (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -336,15 +315,11 @@ def init_production_db() -> None:
             """
         )
         settings_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_settings)").fetchall()}
-        if "default_seats_json" not in settings_columns:
-            db.execute("ALTER TABLE agent_settings ADD COLUMN default_seats_json TEXT NOT NULL DEFAULT '[]'")
         if "codex_runtime" not in settings_columns:
             db.execute("ALTER TABLE agent_settings ADD COLUMN codex_runtime TEXT NOT NULL DEFAULT 'codex'")
         if "agy_runtime" not in settings_columns:
             db.execute("ALTER TABLE agent_settings ADD COLUMN agy_runtime TEXT NOT NULL DEFAULT 'agy'")
         columns = {row[1] for row in db.execute("PRAGMA table_info(productions)").fetchall()}
-        if "seats_json" not in columns:
-            db.execute("ALTER TABLE productions ADD COLUMN seats_json TEXT NOT NULL DEFAULT '[]'")
         if "codex_session_id" not in columns:
             db.execute("ALTER TABLE productions ADD COLUMN codex_session_id TEXT")
         if "agy_session_id" not in columns:
@@ -381,10 +356,6 @@ def init_production_db() -> None:
         if "audio_reference_id" not in shot_columns:
             db.execute("ALTER TABLE production_shots ADD COLUMN audio_reference_id TEXT")
 
-        attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(production_shot_attempts)").fetchall()}
-        if "reviews_json" not in attempt_columns:
-            db.execute("ALTER TABLE production_shot_attempts ADD COLUMN reviews_json TEXT NOT NULL DEFAULT '[]'")
-
 
 def ensure_agent_settings(defaults: dict[str, str]) -> None:
     with connect() as db:
@@ -404,18 +375,12 @@ def ensure_agent_settings(defaults: dict[str, str]) -> None:
 def get_agent_settings() -> dict[str, Any]:
     with connect() as db:
         row = db.execute("SELECT * FROM agent_settings WHERE id=1").fetchone()
-    if not row:
-        return {}
-    item = dict(row)
-    item["default_seats"] = json.loads(item.pop("default_seats_json", "[]") or "[]")
-    return item
+    return dict(row) if row else {}
 
 
-def update_agent_settings(**values: Any) -> dict[str, Any]:
+def update_agent_settings(**values: str) -> dict[str, Any]:
     allowed = {"codex_runtime", "codex_model", "codex_effort", "agy_runtime", "agy_model", "agy_effort"}
     clean = {key: str(value).strip() for key, value in values.items() if key in allowed and str(value).strip()}
-    if values.get("default_seats") is not None:
-        clean["default_seats_json"] = _json(values["default_seats"])
     if clean:
         clean["updated_at"] = now_iso()
         assignments = ",".join(f"{key}=?" for key in clean)
@@ -471,7 +436,6 @@ def _production_dict(
     item = dict(row)
     item["skills"] = json.loads(item.pop("skills_json") or "[]")
     item["approval_gates"] = json.loads(item.pop("approval_gates_json") or "[]")
-    item["seats"] = json.loads(item.pop("seats_json", "[]") or "[]")
     item = _decode_generation_fields(item)
     item["pause_requested"] = bool(item["pause_requested"])
     item["stop_requested"] = bool(item["stop_requested"])
@@ -506,8 +470,8 @@ def create_production(values: dict[str, Any]) -> dict[str, Any]:
                 concept,lyrics,song_path,song_name,codex_runtime,codex_model,codex_effort,
                 agy_runtime,agy_model,agy_effort,generation_turbo_profile,generation_steps,
                 generation_megapixels,generation_aspect_ratio,generation_megapixel_rules_json,
-                skills_json,approval_gates_json,seats_json,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                skills_json,approval_gates_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 production_id, values["title"], values.get("pipeline", "music_video_v1"),
                 "draft", "intake", values["participation_mode"], values["continuity_mode"],
@@ -518,8 +482,7 @@ def create_production(values: dict[str, Any]) -> dict[str, Any]:
                 values.get("generation_megapixels", 0.7),
                 values.get("generation_aspect_ratio", "16:9"),
                 _json(values.get("generation_megapixel_rules", DEFAULT_GENERATION_MP_RULES)),
-                _json(values.get("skills", [])), _json(values.get("approval_gates", [])),
-                _json(values.get("seats", [])), now, now,
+                _json(values.get("skills", [])), _json(values.get("approval_gates", [])), now, now,
             ),
         )
     add_event(production_id, "production.created", {"stage": "intake"})
@@ -545,7 +508,6 @@ def get_production(
         item = dict(row)
         item["skills"] = json.loads(item.pop("skills_json") or "[]")
         item["approval_gates"] = json.loads(item.pop("approval_gates_json") or "[]")
-        item["seats"] = json.loads(item.pop("seats_json", "[]") or "[]")
         item = _decode_generation_fields(item)
         item["archived"] = bool(item.get("archived", 0))
         item["intervention_requested"] = bool(item.get("intervention_requested", 0))
@@ -563,8 +525,6 @@ def update_production(production_id: str, **values: Any) -> None:
         values["skills_json"] = _json(values.pop("skills"))
     if "approval_gates" in values:
         values["approval_gates_json"] = _json(values.pop("approval_gates"))
-    if "seats" in values:
-        values["seats_json"] = _json(values.pop("seats"))
     if "generation_megapixel_rules" in values:
         values["generation_megapixel_rules_json"] = _json(
             normalize_megapixel_rules(values.pop("generation_megapixel_rules"))

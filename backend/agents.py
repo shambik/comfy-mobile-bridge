@@ -29,16 +29,6 @@ REFERENCE_ASPECT_RATIOS = {
 }
 
 
-
-AGY_FALLBACK_MODELS = [
-    {"id": "gemini-3.1-pro-high", "name": "Gemini 3.1 Pro (High)", "efforts": ["low", "medium", "high", "max"], "default_effort": "high"},
-    {"id": "gemini-3.1-pro-low", "name": "Gemini 3.1 Pro (Low)", "efforts": ["low", "medium", "high"], "default_effort": "low"},
-    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "efforts": ["low", "medium", "high"], "default_effort": "medium"},
-    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "efforts": ["low", "medium", "high"], "default_effort": "medium"},
-    {"id": "claude-3-7-sonnet", "name": "Claude 3.7 Sonnet", "efforts": ["low", "medium", "high"], "default_effort": "high"},
-    {"id": "gpt-4o", "name": "GPT-4o", "efforts": ["low", "medium", "high"], "default_effort": "medium"},
-]
-
 CODEX_FALLBACK_MODELS = [
     {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
     {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
@@ -96,24 +86,6 @@ class AgentResult:
     session_id: str | None
     model: str
     effort: str
-
-
-@dataclass
-class AgentSeat:
-    id: str
-    production_id: str
-    seat_index: int
-    label: str
-    tier: str
-    runtime: str
-    model: str
-    effort: str
-    can_image: bool
-    can_video: bool
-    can_audio: bool
-    session_id: str | None
-    role_skill_id: str | None
-    role_prompt: str
 
 
 class AgentExecutionError(RuntimeError):
@@ -305,29 +277,28 @@ def discover_codex_models(timeout: int = 30) -> list[dict[str, Any]]:
     return [{**item, "source": "fallback"} for item in CODEX_FALLBACK_MODELS]
 
 
-def discover_agy_models(timeout: int = 4) -> list[dict[str, Any]]:
+def discover_agy_models(timeout: int = 20) -> list[dict[str, Any]]:
     executable = _command_path(AGY_COMMAND)
-    if executable:
-        try:
-            result = subprocess.run(
-                [executable, "models"], capture_output=True, text=True,
-                timeout=timeout, encoding="utf-8", errors="replace",
-            )
-            models = []
-            for line in result.stdout.splitlines():
-                if not line.strip() or ("\t" not in line and "  " not in line):
-                    continue
-                parts = line.split("\t", 1) if "\t" in line else line.split(None, 1)
-                model_id = parts[0].strip()
-                display = parts[1].strip() if len(parts) > 1 else model_id
-                efforts = ["low", "medium", "high", "max"]
-                encoded = next((value for value in ("low", "medium", "high", "max") if model_id.endswith("-" + value)), None)
-                models.append({"id": model_id, "name": display or model_id, "efforts": [encoded] if encoded else efforts, "default_effort": "high", "source": "agy-cli"})
-            if models:
-                return models
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return [{**item, "source": "fallback"} for item in AGY_FALLBACK_MODELS]
+    if not executable:
+        return []
+    try:
+        result = subprocess.run(
+            [executable, "models"], capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    models = []
+    for line in result.stdout.splitlines():
+        if not line.strip() or "\t" not in line:
+            continue
+        model_id, display = line.split("\t", 1)
+        model_id = model_id.strip()
+        display = display.strip()
+        efforts = ["low", "medium", "high"]
+        encoded = next((value for value in ("low", "medium", "high") if model_id.endswith("-" + value)), None)
+        models.append({"id": model_id, "name": display or model_id, "efforts": [encoded] if encoded else efforts, "source": "agy-cli"})
+    return models
 
 
 def model_catalog(force_refresh: bool = False) -> dict[str, Any]:
@@ -1024,24 +995,6 @@ in Markdown fences or add commentary outside the JSON.
             return result
         finally:
             self.activities.pop(production_id, None)
-
-    async def invoke_seat(
-        self,
-        seat: AgentSeat,
-        production_id: str,
-        prompt: str,
-        images: list[Path] | None = None,
-        media_paths: list[Path] | None = None,
-        on_output: AgentOutputCallback | None = None,
-        on_heartbeat: AgentHeartbeatCallback | None = None,
-        extra_dirs: list[Path] | None = None,
-    ) -> AgentResult:
-        """Route to the correct CLI based on seat.runtime."""
-        return await self.invoke(
-            seat.runtime, seat.label, production_id, prompt,
-            seat.model, seat.effort, seat.session_id,
-            images, on_output, on_heartbeat, extra_dirs,
-        )
 
     async def generate_reference_image(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
