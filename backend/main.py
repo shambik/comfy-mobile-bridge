@@ -173,6 +173,7 @@ class AgentSettingsBody(BaseModel):
     agy_runtime: str = "agy"
     agy_model: str
     agy_effort: str
+    default_seats: list[dict[str, Any]] | None = None
 
 
 class SkillBody(BaseModel):
@@ -1181,6 +1182,7 @@ async def create_production_route(
     agy_effort: str = Form(""),
     skills_json: str = Form("[]"),
     approval_gates_json: str = Form("[]"),
+    seats_json: str = Form("[]"),
     reference_files: list[UploadFile] = File(default=[]),
 ):
     require_csrf(request)
@@ -1221,10 +1223,11 @@ async def create_production_route(
     try:
         selected_skills = json.loads(skills_json)
         approval_gates = json.loads(approval_gates_json)
+        selected_seats = json.loads(seats_json)
     except json.JSONDecodeError as exc:
-        raise HTTPException(400, "Skills and approval gates must be JSON arrays") from exc
-    if not isinstance(selected_skills, list) or not isinstance(approval_gates, list):
-        raise HTTPException(400, "Skills and approval gates must be arrays")
+        raise HTTPException(400, "Skills, approval gates, and seats must be JSON arrays") from exc
+    if not isinstance(selected_skills, list) or not isinstance(approval_gates, list) or not isinstance(selected_seats, list):
+        raise HTTPException(400, "Skills, approval gates, and seats must be arrays")
     for skill_id in selected_skills:
         skill = get_skill(str(skill_id))
         if not skill or not skill["enabled"] or not skill["valid"]:
@@ -1281,6 +1284,7 @@ async def create_production_route(
             **generation_defaults,
             "skills": [str(value) for value in selected_skills],
             "approval_gates": [str(value) for value in approval_gates],
+            "seats": selected_seats,
         })
         for reference_file in reference_files:
             await _store_production_reference_upload(production_id, reference_file)

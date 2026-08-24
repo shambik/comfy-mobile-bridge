@@ -88,6 +88,24 @@ class AgentResult:
     effort: str
 
 
+@dataclass
+class AgentSeat:
+    id: str
+    production_id: str
+    seat_index: int
+    label: str
+    tier: str
+    runtime: str
+    model: str
+    effort: str
+    can_image: bool
+    can_video: bool
+    can_audio: bool
+    session_id: str | None
+    role_skill_id: str | None
+    role_prompt: str
+
+
 class AgentExecutionError(RuntimeError):
     """A CLI agent failed or did not return the required structured result.
 
@@ -995,6 +1013,24 @@ in Markdown fences or add commentary outside the JSON.
             return result
         finally:
             self.activities.pop(production_id, None)
+
+    async def invoke_seat(
+        self,
+        seat: AgentSeat,
+        production_id: str,
+        prompt: str,
+        images: list[Path] | None = None,
+        media_paths: list[Path] | None = None,
+        on_output: AgentOutputCallback | None = None,
+        on_heartbeat: AgentHeartbeatCallback | None = None,
+        extra_dirs: list[Path] | None = None,
+    ) -> AgentResult:
+        """Route to the correct CLI based on seat.runtime."""
+        return await self.invoke(
+            seat.runtime, seat.label, production_id, prompt,
+            seat.model, seat.effort, seat.session_id,
+            images, on_output, on_heartbeat, extra_dirs,
+        )
 
     async def generate_reference_image(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
