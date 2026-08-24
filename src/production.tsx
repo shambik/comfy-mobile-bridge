@@ -10,7 +10,13 @@ import { FeedbackToast, useFeedback } from './feedback'
 type ModelOption = { id: string; name: string; efforts: string[] }
 type MegapixelRule = { max_duration: number; megapixels: number }
 type Runtime = 'codex' | 'agy'
-type AgentSettings = { codex_runtime: Runtime; codex_model: string; codex_effort: string; agy_runtime: Runtime; agy_model: string; agy_effort: string }
+type AgentSeat = {
+  id: string; production_id?: string; seat_index: number; label: string;
+  tier: 'specialist' | 'supervisor'; runtime: Runtime; model: string; effort: string;
+  can_image: boolean; can_video: boolean; can_audio: boolean;
+  role_skill_id: string | null; role_prompt: string;
+}
+type AgentSettings = { codex_runtime: Runtime; codex_model: string; codex_effort: string; agy_runtime: Runtime; agy_model: string; agy_effort: string; default_seats?: AgentSeat[] }
 type Skill = {
   id: string; name: string; description: string; source: string; managed: boolean;
   enabled: boolean; valid: boolean; error?: string; agents: string[]
@@ -29,7 +35,7 @@ type Production = {
   song_name: string; codex_runtime: Runtime; codex_model: string; codex_effort: string; agy_runtime: Runtime; agy_model: string;
   agy_effort: string; generation_turbo_profile: string; generation_steps: number; generation_megapixels: number;
   generation_aspect_ratio?: string; generation_megapixel_rules?: MegapixelRule[];
-  skills: string[]; progress: number; error?: string;
+  skills: string[]; seats?: AgentSeat[]; progress: number; error?: string;
   controller_active?: boolean;
   agent_activity?: AgentActivity | null;
   generation_progress?: GenerationProgress;
@@ -493,6 +499,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const [referenceFiles, setReferenceFiles] = useState<File[]>([])
   const [participation, setParticipation] = useState<'autonomous' | 'interactive'>('autonomous')
   const [continuity, setContinuity] = useState('hybrid')
+  const [seats, setSeats] = useState<AgentSeat[]>([])
   const [codexRuntime, setCodexRuntime] = useState<Runtime>(settings.codex_runtime)
   const [codexModel, setCodexModel] = useState(settings.codex_model)
   const [codexEffort, setCodexEffort] = useState(settings.codex_effort)
@@ -712,6 +719,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   useEffect(() => {
     setCodexRuntime(settings.codex_runtime || 'codex'); setCodexModel(settings.codex_model); setCodexEffort(settings.codex_effort)
     setAgyRuntime('agy'); setAgyModel(settings.agy_model); setAgyEffort(settings.agy_effort)
+    setSeats(settings.default_seats || [])
   }, [settings])
   useEffect(() => {
     const referenceId = editingShot?.audio_reference_id
@@ -758,6 +766,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       form.set('codex_model', codexModel); form.set('codex_effort', codexEffort)
       form.set('agy_runtime', agyRuntime)
       form.set('agy_model', agyModel); form.set('agy_effort', agyEffort)
+      form.set('seats_json', JSON.stringify(seats))
       form.set('skills_json', JSON.stringify(selectedSkills)); form.set('approval_gates_json', JSON.stringify(participation === 'interactive' ? defaultGates : ['final']))
       const created = await mutate('/api/productions', 'POST', form)
       setProductions(current => [created, ...current]); setSelectedId(created.id); setProduction(created); setNewProject(false)
