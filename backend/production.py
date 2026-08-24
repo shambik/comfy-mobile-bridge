@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .agents import (AgentExecutionError, AgentHeartbeatCallback, AgentOutputCallback, AgentResult, AgentSeat,
+from .agents import (AgentExecutionError, AgentHeartbeatCallback, AgentOutputCallback, AgentResult,
                      _decode_structured_value, discover_codex_models, process_manager)
 from .config import AGENT_TIMEOUT_SECONDS, INPUT, PRODUCTIONS, PRODUCTION_CONCURRENCY
 from .db import connect, get_job, next_position, now_iso
@@ -33,27 +33,6 @@ class ReferenceGenerationError(RuntimeError):
 
 class ProductionInterruption(RuntimeError):
     """The user interrupted an active production and it should resume safely."""
-
-
-
-from dataclasses import dataclass as _council_dataclass
-
-
-@_council_dataclass
-class StageTask:
-    """A single specialist assignment within a council round."""
-    prompt: str
-    required_capability: str | None = None
-    depends_on: list[str] | None = None
-
-
-@_council_dataclass
-class CouncilResult:
-    """Aggregated outcome of a full council round."""
-    status: str  # "approved" | "escalated" | "revised"
-    decision_summary: str
-    specialist_outputs: dict[str, Any]
-    supervisor_verdicts: list[dict[str, Any]]
 
 
 class ProductionOrchestrator:
@@ -990,268 +969,6 @@ Your previous turn did not produce the requested task result. Perform the task n
             lines.append(message["content"])
             lines.append("")
         (folder / "production_transcript.md").write_text("\n".join(lines), encoding="utf-8")
-
-    # ── Council seat helpers ──────────────────────────────────────────────
-
-    def _all_seats(self, production_id: str) -> list[AgentSeat]:
-        """Return every configured seat for a production, ordered by seat_index."""
-        production = get_production(production_id, private=True)
-        seats = production.get("seats", []) if production else []
-        parsed: list[AgentSeat] = []
-        for raw in seats:
-            raw.setdefault("session_id", None)
-            raw.setdefault("production_id", production_id)
-            parsed.append(AgentSeat(**raw))
-        return sorted(parsed, key=lambda s: s.seat_index)
-
-    def _specialists(self, production_id: str) -> list[AgentSeat]:
-        return [s for s in self._all_seats(production_id) if s.tier == "specialist"]
-
-    def _supervisors(self, production_id: str) -> list[AgentSeat]:
-        return [s for s in self._all_seats(production_id) if s.tier == "supervisor"]
-
-    def _seats_with_capability(self, production_id: str, capability: str) -> list[AgentSeat]:
-        return [s for s in self._all_seats(production_id) if getattr(s, f"can_{capability}", False)]
-
-    def _has_council(self, production: dict[str, Any]) -> bool:
-        """True when the production has at least one configured seat."""
-        return bool(production.get("seats"))
-
-    def _seat_for_role(self, seats: list[AgentSeat], role_name: str) -> AgentSeat | None:
-        """Find the first seat whose role_skill_id contains the given role name."""
-        for seat in seats:
-            if seat.role_skill_id and role_name in seat.role_skill_id:
-                return seat
-        # Fallback: match by label (e.g. label="Audio Analyst", role="audio-analyst")
-        normalized = role_name.replace("-", " ").replace("_", " ").lower()
-        for seat in seats:
-            if normalized in seat.label.lower():
-                return seat
-        return None
-
-    async def _invoke_seat(
-        self, production: dict[str, Any], seat: AgentSeat, request: str,
-        images: list[Path] | None = None,
-        media_paths: list[Path] | None = None,
-        fresh_session: bool = False, compact_context: bool = False,
-    ) -> AgentResult:
-        """Invoke a single council seat with full trace/heartbeat/retry support.
-
-        This mirrors the existing _codex()/_agy() methods but routes through
-        the seat's configured runtime, model, and effort instead of the
-        hardcoded production-level agent columns.
-        """
-        runtime = seat.runtime
-        participant = seat.label.lower().replace(" ", "_")
-        images = self._reference_image_paths(production) if images is None else images
-
-        # AGY-runtime seats need media handoff
-        prepared_media = list(media_paths or [])
-        if runtime == "agy":
-            prepared_media, media_handoff = await asyncio.to_thread(
-                self._prepare_agy_media_handoff, production["id"], media_paths,
-            )
-            request = request + media_handoff
-
-        # Role context injection: prepend the seat's role prompt if configured
-        if seat.role_prompt:
-            request = f"YOUR ROLE:\n{seat.role_prompt}\n\nTASK:\n{request}"
-
-        task_preview = self._agent_task_preview(production, request)
-        trace = self._agent_trace_callback(production, participant, runtime)
-        heartbeat = self._agent_heartbeat_callback(production, participant, runtime, task_preview)
-
-        self._record_agent_task_started(production, participant, runtime, task_preview)
-
-        try:
-            result = await process_manager.invoke_seat(
-                seat, production["id"],
-                self._base_context(production, participant, compact_context) + "\n\nTASK:\n" + request,
-                images=images,
-                on_output=trace, on_heartbeat=heartbeat,
-                extra_dirs=self._agent_dirs([*(images or []), *prepared_media]),
-            )
-        except Exception as exc:
-            if self._control_pending(production["id"]):
-                raise
-            add_message(
-                production["id"], participant, "all", "agent_trace",
-                f"{seat.label} failed: {str(exc)[:1600]}",
-                {"live": True, "runtime": runtime, "model": seat.model,
-                 "effort": seat.effort, "stream": "error"},
-            )
-            self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_{participant}", exc)
-            raise
-
-        add_message(production["id"], participant, "all", "agent", result.content.get("summary", ""), {
-            "model": result.model, "effort": result.effort, "session_id": result.session_id,
-            "runtime": runtime, "seat_label": seat.label, "seat_tier": seat.tier,
-            "decision": result.content.get("decision"), "next_action": result.content.get("next_action"),
-            "content": result.content.get("content"), "issues": result.content.get("issues", []),
-        })
-        return result
-
-    # ── Council orchestration ─────────────────────────────────────────────
-
-    async def _council_round(
-        self, production: dict[str, Any], stage_tasks: dict[str, StageTask],
-    ) -> CouncilResult:
-        """Execute a full tiered council round per §6 of the architecture doc.
-
-        Phases:
-        1. Specialist work — serial for now (dependency graph is a future enhancement)
-        2. Supervisor review — all supervisors review all specialist outputs
-        3. Specialist revision — targeted to flagged deliverables only
-        4. Supervisor sign-off — approve or escalate
-
-        When no supervisors are configured the round runs in solo mode: each
-        specialist produces its deliverable and the round auto-approves.
-        """
-        production_id = production["id"]
-        specialists = self._specialists(production_id)
-        supervisors = self._supervisors(production_id)
-
-        # ── Phase 1: Specialist work ─────────────────────────────────────
-        specialist_outputs: dict[str, AgentResult] = {}
-
-        for role_name, task in stage_tasks.items():
-            seat = self._seat_for_role(specialists, role_name)
-            if not seat:
-                # No specialist assigned to this role — skip rather than crash
-                add_message(
-                    production_id, "system", "all", "agent_trace",
-                    f"Council: no specialist seat mapped to role '{role_name}', skipping.",
-                    {"live": True, "stream": "controller", "event_type": "council_skip"},
-                )
-                continue
-
-            # Capability gate
-            if task.required_capability:
-                if not getattr(seat, f"can_{task.required_capability}", False):
-                    add_message(
-                        production_id, "system", "all", "agent_trace",
-                        f"Council: seat '{seat.label}' lacks '{task.required_capability}' capability for role '{role_name}'.",
-                        {"live": True, "stream": "controller", "event_type": "council_capability_mismatch"},
-                    )
-                    continue
-
-            result = await self._invoke_seat(production, seat, task.prompt)
-            specialist_outputs[role_name] = result
-
-            if self._control_requested(production_id):
-                return CouncilResult("interrupted", "Control requested during specialist phase", {}, [])
-            production = get_production(production_id, private=True)
-
-        # ── Solo flow (no supervisors) ────────────────────────────────────
-        if not supervisors:
-            summary_parts = []
-            for role, result in specialist_outputs.items():
-                summary_parts.append(result.content.get("summary", f"{role} completed"))
-            return CouncilResult(
-                "approved",
-                " | ".join(summary_parts) or "Solo specialist phase completed",
-                {k: v.content for k, v in specialist_outputs.items()},
-                [],
-            )
-
-        # ── Phase 2: Supervisor review ────────────────────────────────────
-        deliverables_context = "\n\n".join([
-            f"--- {role} ---\n{json.dumps(result.content, ensure_ascii=False, indent=2)}"
-            for role, result in specialist_outputs.items()
-        ])
-
-        supervisor_verdicts: list[dict[str, Any]] = []
-        flagged_roles: set[str] = set()
-
-        for supervisor in supervisors:
-            review = await self._invoke_seat(
-                production, supervisor,
-                f"Review the following specialist deliverables. For each, state APPROVE or flag specific issues.\n\n{deliverables_context}",
-            )
-            verdict = review.content
-            supervisor_verdicts.append({
-                "seat_label": supervisor.label,
-                "decision": verdict.get("decision", ""),
-                "issues": verdict.get("issues", []),
-                "content": verdict.get("content"),
-            })
-
-            # Collect flagged roles from issues
-            for issue in (verdict.get("issues") or []):
-                if isinstance(issue, dict):
-                    target = issue.get("target_role") or issue.get("role") or ""
-                    if target:
-                        flagged_roles.add(target)
-
-            if self._control_requested(production_id):
-                return CouncilResult("interrupted", "Control requested during supervisor review", {}, supervisor_verdicts)
-            production = get_production(production_id, private=True)
-
-        # Check if all supervisors approved without flags
-        all_approved = all(
-            "approve" in (v.get("decision") or "").lower()
-            for v in supervisor_verdicts
-        ) and not flagged_roles
-
-        if all_approved:
-            return CouncilResult(
-                "approved",
-                " | ".join(v.get("decision", "Approved") for v in supervisor_verdicts),
-                {k: v.content for k, v in specialist_outputs.items()},
-                supervisor_verdicts,
-            )
-
-        # ── Phase 3: Specialist revision (targeted) ───────────────────────
-        revision_context = json.dumps(supervisor_verdicts, ensure_ascii=False, indent=2)
-        for role_name in flagged_roles:
-            if role_name not in specialist_outputs:
-                continue
-            seat = self._seat_for_role(specialists, role_name)
-            if not seat:
-                continue
-            original = specialist_outputs[role_name]
-            revised = await self._invoke_seat(
-                production, seat,
-                f"The supervisors flagged issues with your deliverable. Apply their corrections and return the complete revised output.\n\nYour original output:\n{json.dumps(original.content, ensure_ascii=False, indent=2)}\n\nSupervisor feedback:\n{revision_context}",
-            )
-            specialist_outputs[role_name] = revised
-
-            if self._control_requested(production_id):
-                return CouncilResult("interrupted", "Control requested during revision", {}, supervisor_verdicts)
-            production = get_production(production_id, private=True)
-
-        # ── Phase 4: Supervisor sign-off ──────────────────────────────────
-        revised_context = "\n\n".join([
-            f"--- {role} ---\n{json.dumps(result.content, ensure_ascii=False, indent=2)}"
-            for role, result in specialist_outputs.items()
-        ])
-        signoff_verdicts: list[dict[str, Any]] = []
-        for supervisor in supervisors:
-            signoff = await self._invoke_seat(
-                production, supervisor,
-                f"Review the revised specialist deliverables after your feedback was applied. Return APPROVE if the issues are resolved, or ESCALATE if concrete blocking defects remain.\n\n{revised_context}",
-            )
-            signoff_verdicts.append({
-                "seat_label": supervisor.label,
-                "decision": signoff.content.get("decision", ""),
-                "phase": "sign-off",
-            })
-            if self._control_requested(production_id):
-                return CouncilResult("interrupted", "Control requested during sign-off", {}, signoff_verdicts)
-            production = get_production(production_id, private=True)
-
-        final_approved = all(
-            "approve" in (v.get("decision") or "").lower()
-            for v in signoff_verdicts
-        )
-
-        return CouncilResult(
-            "approved" if final_approved else "escalated",
-            " | ".join(v.get("decision", "") for v in signoff_verdicts),
-            {k: v.content for k, v in specialist_outputs.items()},
-            supervisor_verdicts + signoff_verdicts,
-        )
-
 
     def _control_requested(self, production_id: str) -> bool:
         current = get_production(production_id, private=True)
@@ -2681,35 +2398,7 @@ production moving, record the warning, and let the controller retry or choose th
         if stage == "treatment_consultation":
             analysis_path = self._folder(production_id) / "analysis" / "song_analysis.json"
             analysis_text = analysis_path.read_text(encoding="utf-8") if analysis_path.exists() else "{}"
-
-            if self._has_council(production):
-                # ── Council path ──────────────────────────────────────────
-                council = await self._council_round(production, {
-                    "visual-director": StageTask(
-                        prompt=f"""Using the song analysis below, propose a professional treatment, visual language,
-character/location bible, continuity map, timestamped storyboard, shot durations, I2V/T2V choice,
-camera movement, transitions, megapixel policy, and acceptance criteria. Keep the story connected to the lyrics.
-The production context includes optional user-provided references. Treat those files as the user's visual
-constraints and use them wherever relevant; invent only the missing characters, locations, props, or wardrobe.
-Song analysis: {analysis_text}""",
-                    ),
-                })
-                if council.status == "interrupted":
-                    return
-                production = get_production(production_id, private=True)
-
-                # Extract the treatment from the council's outputs
-                treatment_content = {}
-                for role, output in council.specialist_outputs.items():
-                    treatment_content[role] = output
-                treatment_package = {
-                    "council_outputs": treatment_content,
-                    "supervisor_verdicts": council.supervisor_verdicts,
-                    "council_decision": council.decision_summary,
-                }
-            else:
-                # ── Legacy Codex+AGY path ─────────────────────────────────
-                codex = await self._codex(production, f"""
+            codex = await self._codex(production, f"""
 Using AGY's song analysis below, propose a professional treatment, visual language, character/location bible,
 continuity map, timestamped storyboard, shot durations, I2V/T2V choice, camera movement, transitions,
 megapixel policy, and acceptance criteria. Keep the story connected to the lyrics.
@@ -2717,55 +2406,48 @@ The production context includes optional user-provided references. Treat those f
 constraints and use them wherever relevant; invent only the missing characters, locations, props, or wardrobe.
 AGY analysis: {analysis_text}
 """)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                agy = await self._media_agent(production, f"""
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            agy = await self._media_agent(production, f"""
 Critique Codex's proposed treatment as an equal co-producer. Check lyric timing, pacing, visual variety,
 character continuity, camera physics, backwards motion risk, obvious text/signage risk, and whether enough
 story action occurs. Return concrete revisions and approval status.
 Codex proposal: {json.dumps(codex.content, ensure_ascii=False)}
 """)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                final = await self._codex(production, f"""
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            final = await self._codex(production, f"""
 Respond point by point to AGY and produce the revised joint treatment and storyboard. Preserve useful
 disagreement in issues. The user is final authority. Return the complete decision package in content.
 Original proposal: {json.dumps(codex.content, ensure_ascii=False)}
 AGY critique: {json.dumps(agy.content, ensure_ascii=False)}
 """)
-                production = get_production(production_id, private=True)
-                confirmation = await self._agy(production, f"""
+            production = get_production(production_id, private=True)
+            confirmation = await self._agy(production, f"""
 Confirm or counter Codex's revised treatment as equal co-producer. Approve unless a concrete unresolved
 timing, continuity, story, or feasibility defect remains.
 Revised treatment: {json.dumps(final.content, ensure_ascii=False)}
 """)
-                if self._control_requested(production_id):
-                    return
-                treatment_package = {"codex_draft": codex.content, "agy_critique": agy.content,
-                                     "codex_revision": final.content, "agy_confirmation": confirmation.content}
-
+            if self._control_requested(production_id):
+                return
             treatment_path = self._folder(production_id) / "treatment" / "joint_treatment.json"
+            treatment_package = {"codex_draft": codex.content, "agy_critique": agy.content,
+                                 "codex_revision": final.content, "agy_confirmation": confirmation.content}
             treatment_path.write_text(json.dumps(treatment_package, ensure_ascii=False, indent=2), encoding="utf-8")
-            decision_summary = (
-                treatment_package.get("council_decision")
-                or treatment_package.get("codex_revision", {}).get("summary")
-                or treatment_package.get("codex_revision", {}).get("decision")
-                or "Treatment consultation completed."
-            )
             decision = add_decision(
                 production_id, "treatment_consultation", "Joint treatment and storyboard",
-                decision_summary,
+                final.content.get("summary", final.content.get("decision", "Codex and AGY completed the treatment consultation.")),
                 {"artifact": "treatment/joint_treatment.json", **treatment_package},
             )
             if production["participation_mode"] == "autonomous":
                 from .production_db import resolve_decision
-                resolve_decision(production_id, decision["id"], "approved", "council" if self._has_council(production) else "codex+agy", "Autonomous joint approval")
+                resolve_decision(production_id, decision["id"], "approved", "codex+agy", "Autonomous joint approval")
                 update_production(production_id, status="queued", stage="reference_development", progress=0.35)
             else:
                 update_production(production_id, status="awaiting_user", stage="treatment_review", progress=0.35)
-                add_message(production_id, "system", "user", "decision", "The production council finished the joint treatment. Review their decision before references are developed.")
+                add_message(production_id, "system", "user", "decision", "Codex and AGY finished the joint treatment. Review their decision before references are developed.")
             self._checkpoint(production_id)
             return
 
@@ -2773,8 +2455,8 @@ Revised treatment: {json.dumps(final.content, ensure_ascii=False)}
             treatment_path = self._folder(production_id) / "treatment" / "joint_treatment.json"
             treatment = treatment_path.read_text(encoding="utf-8") if treatment_path.exists() else "{}"
             aspect_ratio = str(production.get("generation_aspect_ratio") or "16:9")
-
-            ref_prompt = f"""Create detailed original reference briefs for every recurring character, location, vehicle, prop, wardrobe
+            codex = await self._codex(production, f"""
+Create detailed original reference briefs for every recurring character, location, vehicle, prop, wardrobe
 and continuity anchor in this treatment: {treatment}
 The top-level content object MUST include a `references` array. Every item must include `name`, `kind`,
 `description`, and a complete `image_prompt` for a polished {aspect_ratio} still. The production-selected
@@ -2782,60 +2464,38 @@ aspect ratio is authoritative for every reference; do not substitute another rat
 text is narratively required. The production context lists optional user-provided reference files. Preserve
 their identity, wardrobe, location, and prop details; do not recreate a user-supplied reference as a duplicate.
 Create new reference briefs only for categories the user did not provide. Mark user files as source references
-in the returned package so the later shot plan can select them by name."""
-
-            if self._has_council(production):
-                # ── Council path ──────────────────────────────────────────
-                council = await self._council_round(production, {
-                    "visual-director": StageTask(prompt=ref_prompt),
-                })
-                if council.status == "interrupted":
-                    return
-                production = get_production(production_id, private=True)
-                package = {
-                    "council_outputs": council.specialist_outputs,
-                    "supervisor_verdicts": council.supervisor_verdicts,
-                    "council_decision": council.decision_summary,
-                }
-            else:
-                # ── Legacy Codex+AGY path ─────────────────────────────────
-                codex = await self._codex(production, ref_prompt)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                agy = await self._agy(production, f"Review these reference briefs for identity consistency, composition usability, visible text risk and shot coverage. Suggest precise corrections: {json.dumps(codex.content, ensure_ascii=False)}")
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                revision = await self._codex(production, f"""
+in the returned package so the later shot plan can select them by name.
+""")
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            agy = await self._agy(production, f"Review these reference briefs for identity consistency, composition usability, visible text risk and shot coverage. Suggest precise corrections: {json.dumps(codex.content, ensure_ascii=False)}")
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            revision = await self._codex(production, f"""
 Apply AGY's concrete corrections and return the complete revised reference package. The top-level content
 object MUST preserve the full executable `references` array with name, kind, description and image_prompt.
 AGY review: {json.dumps(agy.content, ensure_ascii=False)}
 Original: {json.dumps(codex.content, ensure_ascii=False)}
 """)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                confirmation = await self._agy(production, f"Confirm or counter the revised reference package. Approve unless a concrete identity, coverage, or visible-text defect remains: {json.dumps(revision.content, ensure_ascii=False)}")
-                if self._control_requested(production_id):
-                    return
-                package = {"codex_draft": codex.content, "agy_review": agy.content,
-                           "codex_revision": revision.content, "agy_confirmation": confirmation.content}
-
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            confirmation = await self._agy(production, f"Confirm or counter the revised reference package. Approve unless a concrete identity, coverage, or visible-text defect remains: {json.dumps(revision.content, ensure_ascii=False)}")
+            if self._control_requested(production_id):
+                return
+            package = {"codex_draft": codex.content, "agy_review": agy.content,
+                       "codex_revision": revision.content, "agy_confirmation": confirmation.content}
             (self._folder(production_id) / "references" / "reference_plan.json").write_text(
                 json.dumps(package, ensure_ascii=False, indent=2), encoding="utf-8",
             )
-            decision_summary = (
-                package.get("council_decision")
-                or package.get("agy_confirmation", {}).get("summary")
-                or "Reference briefs are ready for user review."
-            )
             decision = add_decision(production_id, "reference_development", "Reference development plan",
-                                    decision_summary,
+                                    confirmation.content.get("summary", "Reference briefs are ready for user review."),
                                     {"artifact": "references/reference_plan.json", **package})
             if production["participation_mode"] == "autonomous":
                 from .production_db import resolve_decision
-                resolve_decision(production_id, decision["id"], "approved", "council" if self._has_council(production) else "codex+agy", "Autonomous joint approval")
+                resolve_decision(production_id, decision["id"], "approved", "codex+agy", "Autonomous joint approval")
                 update_production(production_id, status="queued", stage="reference_generation", progress=0.5)
             else:
                 update_production(production_id, status="awaiting_user", stage="reference_review", progress=0.5)
@@ -2858,7 +2518,8 @@ Original: {json.dumps(codex.content, ensure_ascii=False)}
             return
 
         if stage == "prompt_consultation":
-            shot_prompt = f"""Create the complete shot-by-shot MiniMax H3 prompt package from the approved treatment and references.
+            codex = await self._codex(production, f"""
+Create the complete shot-by-shot MiniMax H3 prompt package from the approved treatment and references.
 The user selected project-wide generation defaults: Turbo {production.get('generation_turbo_profile', 'v1')},
 {production.get('generation_steps', 4)} whole steps, resolution shape {production.get('generation_aspect_ratio', '16:9')},
 and this duration-to-MP policy: {json.dumps(production.get('generation_megapixel_rules', []), ensure_ascii=False)}.
@@ -2875,87 +2536,52 @@ Production does not use R2V yet: if a scene needs a reference, select the releva
 reference whenever approved image references exist; never label a reference-backed shot as T2V. Every shot must also include `audio_mode` (`silent` or `lip_sync`), `audio_source` (`song` or
 `reference`), `audio_start`, and `audio_duration`; use lip_sync only for shots where visible mouth performance
 is required. For a reference audio source, include its exact `audio_reference` name. Every generation uses
-turbo and no generated audio unless `audio_mode` is lip_sync. Ensure total shot duration covers the analyzed song."""
-
-            if self._has_council(production):
-                # ── Council path ──────────────────────────────────────────
-                council = await self._council_round(production, {
-                    "prompt-engineer": StageTask(prompt=shot_prompt),
-                })
-                if council.status == "interrupted":
-                    return
-                production = get_production(production_id, private=True)
-
-                # Extract shots from the council's prompt-engineer output
-                pe_output = council.specialist_outputs.get("prompt-engineer", {})
-                raw_shots = self._find_shots(pe_output)
-                shots = self._normalize_shots(
-                    raw_shots, production["continuity_mode"],
-                    list_references(production_id, private=True),
-                    production,
-                )
-                for shot in shots:
-                    shot["production_id"] = production_id
-                replace_shot_plan(production_id, shots)
-                package = {
-                    "council_outputs": council.specialist_outputs,
-                    "supervisor_verdicts": council.supervisor_verdicts,
-                    "council_decision": council.decision_summary,
-                    "normalized_shots": shots,
-                }
-            else:
-                # ── Legacy Codex+AGY path ─────────────────────────────────
-                codex = await self._codex(production, shot_prompt)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                agy = await self._agy(production, f"Review every proposed video prompt for lyric fit, action clarity, visual variety, camera continuity, character visibility and text risk. Return corrections: {json.dumps(codex.content, ensure_ascii=False)}")
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                final = await self._codex(production, f"""
+turbo and no generated audio unless `audio_mode` is lip_sync. Ensure total shot duration covers the analyzed song.
+""")
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            agy = await self._agy(production, f"Review every proposed video prompt for lyric fit, action clarity, visual variety, camera continuity, character visibility and text risk. Return corrections: {json.dumps(codex.content, ensure_ascii=False)}")
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            final = await self._codex(production, f"""
 Apply AGY's corrections and return the final executable prompt package. The top-level content object MUST
 contain the complete `shots` array, not a summary or reference to an earlier response.
 Draft: {json.dumps(codex.content, ensure_ascii=False)}
 AGY review: {json.dumps(agy.content, ensure_ascii=False)}
 """)
-                if self._control_requested(production_id):
-                    return
-                production = get_production(production_id, private=True)
-                confirmation = await self._agy(production, f"""
+            if self._control_requested(production_id):
+                return
+            production = get_production(production_id, private=True)
+            confirmation = await self._agy(production, f"""
 Confirm the final package is executable, timed to the song, visually varied, and obeys the continuity plan.
 Return APPROVE unless there is a concrete blocking defect; do not rewrite it merely for stylistic preference.
 Final package: {json.dumps(final.content, ensure_ascii=False)}
 """)
-                if self._control_requested(production_id):
-                    return
-                raw_shots = self._find_shots(final.content)
-                shots = self._normalize_shots(
-                    raw_shots, production["continuity_mode"],
-                    list_references(production_id, private=True),
-                    production,
-                )
-                for shot in shots:
-                    shot["production_id"] = production_id
-                replace_shot_plan(production_id, shots)
-                package = {"codex_draft": codex.content, "agy_review": agy.content,
-                           "codex_final": final.content, "agy_confirmation": confirmation.content,
-                           "normalized_shots": shots}
-
+            if self._control_requested(production_id):
+                return
+            raw_shots = self._find_shots(final.content)
+            shots = self._normalize_shots(
+                raw_shots, production["continuity_mode"],
+                list_references(production_id, private=True),
+                production,
+            )
+            for shot in shots:
+                shot["production_id"] = production_id
+            replace_shot_plan(production_id, shots)
+            package = {"codex_draft": codex.content, "agy_review": agy.content,
+                       "codex_final": final.content, "agy_confirmation": confirmation.content,
+                       "normalized_shots": shots}
             (self._folder(production_id) / "shots" / "prompt_package.json").write_text(
                 json.dumps(package, ensure_ascii=False, indent=2), encoding="utf-8",
             )
-            decision_summary = (
-                package.get("council_decision")
-                or package.get("agy_confirmation", {}).get("summary")
-                or "The video prompt package is ready for review."
-            )
             decision = add_decision(production_id, "prompt_consultation", "Video prompt package",
-                                    decision_summary,
+                                    confirmation.content.get("summary", "The video prompt package is ready for review."),
                                     {"artifact": "shots/prompt_package.json", **package})
             if production["participation_mode"] == "autonomous":
                 from .production_db import resolve_decision
-                resolve_decision(production_id, decision["id"], "approved", "council" if self._has_council(production) else "codex+agy", "Autonomous joint approval")
+                resolve_decision(production_id, decision["id"], "approved", "codex+agy", "Autonomous joint approval")
                 update_production(production_id, status="queued", stage="shot_generation", progress=0.65)
             else:
                 update_production(production_id, status="awaiting_user", stage="prompt_review", progress=0.65)
