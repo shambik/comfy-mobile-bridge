@@ -148,6 +148,26 @@ async function jsonResponse(response: Response) {
 }
 
 
+
+const FALLBACK_MODELS_CLIENT: Record<Runtime, ModelOption[]> = {
+  codex: [
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
+    { id: 'gpt-5.5', name: 'GPT-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.4', name: 'GPT-5.4', efforts: ['low', 'medium', 'high', 'xhigh'] },
+    { id: 'gpt-5.4-mini', name: 'GPT-5.4 Mini', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  ],
+  agy: [
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)', efforts: ['low', 'medium', 'high', 'max'] },
+    { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)', efforts: ['low', 'medium', 'high'] },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', efforts: ['low', 'medium', 'high'] },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', efforts: ['low', 'medium', 'high'] },
+    { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet', efforts: ['low', 'medium', 'high'] },
+    { id: 'gpt-4o', name: 'GPT-4o', efforts: ['low', 'medium', 'high'] },
+  ],
+}
+
 function CouncilSeatsEditor({
   seats,
   onChange,
@@ -159,10 +179,15 @@ function CouncilSeatsEditor({
   catalogs: Record<Runtime, ModelOption[]>
   skills: Skill[]
 }) {
+  const getModelsList = (rt: Runtime) => {
+    const fromCat = catalogs[rt] || []
+    return fromCat.length > 0 ? fromCat : (FALLBACK_MODELS_CLIENT[rt] || [])
+  }
+
   const addSeat = (tier: 'specialist' | 'supervisor') => {
     const nextIndex = seats.length
     const runtime: Runtime = tier === 'supervisor' ? 'agy' : 'codex'
-    const available = catalogs[runtime] || []
+    const available = getModelsList(runtime)
     const defaultModel = available[0]?.id || (runtime === 'agy' ? 'gemini-3.1-pro-high' : 'gpt-5.6-sol')
     const defaultEffort = available[0]?.efforts?.[0] || 'high'
     const newSeat: AgentSeat = {
@@ -187,10 +212,10 @@ function CouncilSeatsEditor({
       if (i !== index) return seat
       const next = { ...seat, ...patch }
       if (patch.runtime && patch.runtime !== seat.runtime) {
-        const available = catalogs[patch.runtime] || []
+        const available = getModelsList(patch.runtime)
         if (available.length > 0) {
           next.model = available[0].id
-          next.effort = available[0].efforts[0] || 'high'
+          next.effort = available[0].efforts.includes(seat.effort) ? seat.effort : (available[0].efforts[0] || 'high')
         }
       }
       if (patch.role_skill_id !== undefined && patch.role_skill_id !== seat.role_skill_id) {
@@ -370,8 +395,8 @@ function CouncilSeatsEditor({
 
       <div className="ps-seats-list">
         {seats.map((seat, index) => {
-          const modelsList = catalogs[seat.runtime] || []
-          const selectedModel = modelsList.find(m => m.id === seat.model)
+          const modelsList = getModelsList(seat.runtime)
+          const selectedModel = modelsList.find(m => m.id === seat.model) || modelsList[0]
           const effortOptions = selectedModel?.efforts?.length ? selectedModel.efforts : ['low', 'medium', 'high']
 
           return (
