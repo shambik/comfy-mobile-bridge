@@ -24,7 +24,7 @@ from backend.production_db import (add_decision, ensure_agent_settings,
                                    add_artifact, add_message, add_reference, create_shot_attempt, get_production,
                                    init_production_db, list_messages, list_shots, replace_shot_plan,
                                    megapixels_for_duration, normalize_production_generation,
-                                   recover_productions, update_production, update_shot_attempt)
+                                   recover_productions, update_production, update_shot, update_shot_attempt)
 
 
 class ProductionStudioTests(unittest.TestCase):
@@ -372,6 +372,330 @@ class ProductionStudioTests(unittest.TestCase):
         self.assertEqual(shot["megapixels"], 1.0)
         self.assertEqual(shot["prompt"], "User-directed prompt")
 
+    def test_legacy_shot_update_invalidates_stale_generation_attempt(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Opening", "prompt": "Old shot-plan prompt", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 0.7,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(attempt["id"], job_id="old-comfy-job", status="queued")
+
+        results, policy = asyncio.run(production_orchestrator._execute_intervention_actions(
+            get_production(production_id, private=True),
+            [{
+                "type": "update_shot", "shot_index": 1,
+                "changes": {"prompt": "Latest agreed prompt from the user"},
+            }],
+            "intervention-update-1",
+        ))
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        saved_attempt = saved_shot["attempts"][0]
+        self.assertIsNone(policy)
+        self.assertEqual(results[0]["status"], "completed")
+        self.assertTrue(results[0]["requeued"])
+        self.assertEqual(saved_shot["status"], "planned")
+        self.assertIsNone(saved_shot["accepted_attempt"])
+        self.assertEqual(saved_attempt["status"], "interrupted")
+        self.assertEqual(saved_attempt["job_id"], "old-comfy-job")
+        self.assertEqual(saved_shot["prompt"], "Latest agreed prompt from the user")
+
+    def test_legacy_promptless_regeneration_cannot_reuse_old_prompt(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Opening", "prompt": "Earlier agent suggestion", "mode": "opening",
+            "continuity": "hard_cut", "audio_mode": "silent", "audio_source": "song",
+            "audio_start": 0, "audio_duration": 5, "duration": 5,
+            "editorial_start": 0, "editorial_end": 5, "trim_in": 0, "trim_out": 0,
+            "megapixels": 0.7, "aspect_ratio": "16:9", "steps": 6,
+            "engine": "turbo", "turbo_profile": "v4", "reference_ids": [],
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(attempt["id"], job_id="old-comfy-job", status="queued")
+        update_production(
+            production_id, participation_mode="autonomous", status="running",
+            stage="shot_generation",
+        )
+        message = add_message(
+            production_id, "user", "both", "intervention",
+            "The prompt is wrong. Fix Shot 1 with the new direction and regenerate it.",
+            {"priority": "user", "interrupt": True, "execution_status": "pending",
+             "previous_status": "running"},
+        )
+        result = AgentResult(
+            "codex",
+            {"summary": "Agreed.", "decision": "REGENERATE", "next_action": "regenerate_shot",
+             "content": {"reply": "Agreed, regenerating it.",
+                         "actions": [{"type": "regenerate_shot", "shot_index": 1}],
+                         "resume_policy": "resume"},
+             "issues": [], "requires_user": False},
+            "", "codex-session", "test", "medium",
+        )
+        followup = AgentResult(
+            "codex",
+            {"summary": "The request needs a concrete prompt.", "decision": "BLOCK",
+             "content": {"reply": "A new prompt is required before regeneration.",
+                         "actions": [], "resume_policy": "await_user"},
+             "issues": [], "requires_user": True},
+            "", "codex-session-followup", "test", "medium",
+        )
+        with patch.object(
+            production_orchestrator, "_intervention_council_turn",
+            new=AsyncMock(return_value=result),
+        ), patch.object(
+            production_orchestrator, "_intervention_followup",
+            new=AsyncMock(return_value=followup),
+        ):
+            resumed = asyncio.run(
+                production_orchestrator._apply_pending_interventions(
+                    get_production(production_id, private=True),
+                )
+            )
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        self.assertEqual(resumed["status"], "awaiting_user")
+        self.assertEqual(saved_shot["prompt"], "Earlier agent suggestion")
+        self.assertEqual(saved_shot["status"], "planned")
+        self.assertEqual(saved_shot["attempts"][0]["status"], "interrupted")
+        saved = next(item for item in list_messages(production_id) if item["id"] == message["id"])
+        self.assertEqual(saved["metadata"]["execution_result"], "awaiting_action")
+
+    def test_accept_shot_locks_selected_existing_attempt(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Existing shot", "prompt": "Keep this shot", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        old_attempt = create_shot_attempt(shot["id"], 1)
+        selected_attempt = create_shot_attempt(shot["id"], 2)
+        old_video = self.root / "old-attempt.mp4"
+        selected_video = self.root / "selected-attempt.mp4"
+        old_video.write_bytes(b"old")
+        selected_video.write_bytes(b"selected")
+        update_shot_attempt(old_attempt["id"], status="accepted", output_path=str(old_video))
+        update_shot_attempt(selected_attempt["id"], status="reviewing", output_path=str(selected_video))
+        update_shot(shot["id"], status="reviewing", accepted_attempt=1)
+
+        private = get_production(production_id, private=True)
+        results, policy = asyncio.run(production_orchestrator._execute_intervention_actions(
+            private,
+            [{"type": "accept_shot", "shot_index": 1, "output_path": str(selected_video)}],
+            "message-id",
+        ))
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        saved_attempts = {item["attempt"]: item for item in saved_shot["attempts"]}
+        self.assertIsNone(policy)
+        self.assertEqual(results[0]["status"], "completed")
+        self.assertEqual(results[0]["attempt"], 2)
+        self.assertEqual(saved_shot["status"], "accepted")
+        self.assertEqual(saved_shot["accepted_attempt"], 2)
+        self.assertEqual(saved_attempts[2]["status"], "accepted")
+        self.assertEqual(saved_attempts[1]["status"], "accepted")
+
+    def test_legacy_update_shot_status_accepted_uses_acceptance_operation(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Recoverable shot", "prompt": "Use the existing result", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        stale_attempt = create_shot_attempt(shot["id"], 1)
+        attempt = create_shot_attempt(shot["id"], 2)
+        video = self.root / "existing-result.mp4"
+        video.write_bytes(b"existing")
+        update_shot_attempt(
+            stale_attempt["id"], status="accepted",
+            output_path=str(self.root / "stale-result.mp4"),
+        )
+        update_shot_attempt(attempt["id"], status="reviewing", output_path=str(video))
+        update_shot(shot["id"], status="reviewing", accepted_attempt=1)
+
+        private = get_production(production_id, private=True)
+        results, _ = asyncio.run(production_orchestrator._execute_intervention_actions(
+            private,
+            [{"type": "update_shot", "shot_index": 1,
+              "changes": {"status": "accepted"}}],
+            "message-id",
+        ))
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        self.assertEqual(results[0]["status"], "completed")
+        self.assertEqual(results[0]["compatibility_action"], "accept_shot")
+        self.assertEqual(saved_shot["status"], "accepted")
+        self.assertEqual(saved_shot["accepted_attempt"], 2)
+
+    def test_accepted_shot_with_missing_output_does_not_create_retry(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Already accepted", "prompt": "Do not regenerate", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(
+            attempt["id"], status="accepted",
+            output_path=str(self.root / "missing-output.mp4"),
+        )
+        update_shot(shot["id"], status="accepted", accepted_attempt=1)
+        update_production(production_id, status="running", stage="shot_generation")
+
+        private = get_production(production_id, private=True)
+        with patch.object(
+            production_module, "create_shot_attempt",
+            side_effect=AssertionError("an accepted shot must not be regenerated"),
+        ):
+            asyncio.run(production_orchestrator._run_stage(production_id))
+
+        saved = get_production(production_id, private=True)
+        self.assertEqual(saved["status"], "awaiting_user")
+        self.assertEqual(saved["stage"], "shot_review")
+        self.assertEqual(len(list_shots(production_id, private=True)[0]["attempts"]), 1)
+        self.assertTrue(any(
+            item.get("metadata", {}).get("accepted_asset_missing") is True
+            for item in list_messages(production_id)
+        ))
+
+    def test_user_preservation_instruction_maps_each_named_shot_to_acceptance(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": f"Shot {index}", "prompt": "Keep the existing shot", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        } for index in range(1, 4)])
+        for index, shot in enumerate(list_shots(production_id, private=True), 1):
+            video = self.root / f"shot-{index}.mp4"
+            video.write_bytes(f"shot-{index}".encode())
+            attempt = create_shot_attempt(shot["id"], 1)
+            update_shot_attempt(attempt["id"], status="reviewing", output_path=str(video))
+            update_shot(shot["id"], status="reviewing")
+
+        actions, targets = production_orchestrator._infer_user_acceptance_actions(
+            get_production(production_id, private=True),
+            "Stop retrying S01, S02 and S03. They are already good; keep them and move to the next shot.",
+        )
+
+        self.assertEqual(targets, {1, 2, 3})
+        self.assertEqual(
+            {(item["type"], item["shot_index"]) for item in actions},
+            {("accept_shot", 1), ("accept_shot", 2), ("accept_shot", 3)},
+        )
+
+    def test_user_preservation_is_applied_even_if_council_returns_regeneration(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Shot 1", "prompt": "Keep the existing shot", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        video = self.root / "accepted-shot.mp4"
+        video.write_bytes(b"accepted")
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(attempt["id"], status="reviewing", output_path=str(video))
+        update_shot(shot["id"], status="reviewing")
+        update_production(
+            production_id, status="running", stage="shot_generation", participation_mode="interactive",
+        )
+        message = add_message(
+            production_id, "user", "both", "intervention",
+            "S01 is already good. Do not regenerate it; keep it and move to the next shot.",
+            {"priority": "user", "interrupt": True, "execution_status": "pending", "previous_status": "running"},
+        )
+        council = AgentResult(
+            "codex", {"summary": "The shot should be regenerated.", "decision": "REGENERATE",
+                       "content": {"reply": "I would regenerate S01.", "actions": [{
+                           "type": "regenerate_shot", "shot_index": 1,
+                       }], "resume_policy": "resume"}, "issues": []},
+            "", "codex-session", "test", "medium",
+        )
+        followup = AgentResult(
+            "codex", {"summary": "Preserved.", "decision": "CONTINUE",
+                       "content": {"reply": "S01 was preserved.", "actions": [], "resume_policy": "resume"},
+                       "issues": []},
+            "", "codex-session", "test", "medium",
+        )
+        with patch.object(
+            production_orchestrator, "_intervention_council_turn", new=AsyncMock(return_value=council),
+        ), patch.object(
+            production_orchestrator, "_intervention_followup", new=AsyncMock(return_value=followup),
+        ):
+            result = asyncio.run(
+                production_orchestrator._apply_pending_interventions(
+                    get_production(production_id, private=True),
+                )
+            )
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        saved_message = next(item for item in list_messages(production_id) if item["id"] == message["id"])
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(saved_shot["status"], "accepted")
+        self.assertEqual(saved_shot["accepted_attempt"], 1)
+        self.assertEqual(saved_message["metadata"]["execution_status"], "completed")
+        self.assertFalse(any(
+            item.get("type") == "regenerate_shot"
+            for item in saved_message["metadata"].get("action_results", [])
+        ))
+
+    def test_user_preservation_survives_council_failure(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Shot 1", "prompt": "Keep the existing shot", "mode": "opening",
+            "continuity": "hard_cut", "duration": 5, "megapixels": 1.0,
+            "aspect_ratio": "16:9", "steps": 6, "engine": "turbo", "turbo_profile": "v4",
+        }])
+        shot = list_shots(production_id, private=True)[0]
+        video = self.root / "accepted-shot-council-failure.mp4"
+        video.write_bytes(b"accepted")
+        attempt = create_shot_attempt(shot["id"], 1)
+        update_shot_attempt(attempt["id"], status="reviewing", output_path=str(video))
+        update_shot(shot["id"], status="reviewing")
+        update_production(
+            production_id, status="running", stage="shot_generation", participation_mode="interactive",
+        )
+        message = add_message(
+            production_id, "user", "both", "intervention",
+            "S01 is already good. Do not regenerate it; keep it and move to the next shot.",
+            {"priority": "user", "interrupt": True, "execution_status": "pending", "previous_status": "running"},
+        )
+
+        with patch.object(
+            production_orchestrator, "_intervention_council_turn",
+            new=AsyncMock(side_effect=RuntimeError("AGY council timeout")),
+        ):
+            result = asyncio.run(
+                production_orchestrator._apply_pending_interventions(
+                    get_production(production_id, private=True),
+                )
+            )
+
+        saved_shot = list_shots(production_id, private=True)[0]
+        saved_message = next(item for item in list_messages(production_id) if item["id"] == message["id"])
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(saved_shot["status"], "accepted")
+        self.assertEqual(saved_shot["accepted_attempt"], 1)
+        self.assertEqual(saved_message["metadata"]["execution_status"], "completed")
+        self.assertTrue(any(
+            "council consultation did not complete" in item["content"]
+            for item in list_messages(production_id)
+        ))
+
     def test_pending_audio_intervention_is_executed_before_stage_resumes(self):
         production = self.create_production().json()
         message = add_message(
@@ -446,6 +770,53 @@ class ProductionStudioTests(unittest.TestCase):
             for item in list_messages(production["id"])
         ))
 
+    def test_intervention_acknowledgement_without_action_does_not_reuse_old_prompt(self):
+        production = self.create_production().json()
+        production_id = production["id"]
+        replace_shot_plan(production_id, [{
+            "title": "Opening", "prompt": "Earlier agent suggestion", "mode": "opening",
+            "continuity": "hard_cut", "audio_mode": "silent", "audio_source": "song",
+            "audio_start": 0, "audio_duration": 5, "duration": 5,
+            "editorial_start": 0, "editorial_end": 5, "trim_in": 0, "trim_out": 0,
+            "megapixels": 0.7, "aspect_ratio": "16:9", "steps": 6,
+            "engine": "turbo", "turbo_profile": "v4", "reference_ids": [],
+        }])
+        update_production(
+            production_id, participation_mode="autonomous", status="running",
+            stage="shot_generation",
+        )
+        message = add_message(
+            production_id, "user", "both", "intervention",
+            "The generation is back to the old prompt. Fix the shot and use my new direction.",
+            {"priority": "user", "interrupt": True, "execution_status": "pending",
+             "previous_status": "running"},
+        )
+        result = AgentResult(
+            "codex",
+            {"summary": "Agreed.", "decision": "APPROVE", "next_action": "resume",
+             "content": {"reply": "Agreed, continuing.", "actions": [], "resume_policy": "resume"},
+             "issues": [], "requires_user": False},
+            "", "codex-session", "test", "medium",
+        )
+        with patch.object(
+            production_orchestrator, "_intervention_council_turn",
+            new=AsyncMock(return_value=result),
+        ):
+            resumed = asyncio.run(
+                production_orchestrator._apply_pending_interventions(
+                    get_production(production_id, private=True),
+                )
+            )
+
+        self.assertEqual(resumed["status"], "awaiting_user")
+        self.assertEqual(list_shots(production_id, private=True)[0]["prompt"], "Earlier agent suggestion")
+        saved = next(item for item in list_messages(production_id) if item["id"] == message["id"])
+        self.assertEqual(saved["metadata"]["execution_result"], "awaiting_action")
+        self.assertTrue(any(
+            item.get("metadata", {}).get("no_executable_action") is True
+            for item in list_messages(production_id)
+        ))
+
     def test_autonomous_intervention_continues_when_agents_request_pause_or_regeneration(self):
         production = self.create_production().json()
         production_id = production["id"]
@@ -453,6 +824,14 @@ class ProductionStudioTests(unittest.TestCase):
             production_id, participation_mode="autonomous", status="running",
             stage="shot_generation",
         )
+        replace_shot_plan(production_id, [{
+            "title": "Opening", "prompt": "Original prompt", "mode": "opening",
+            "continuity": "hard_cut", "audio_mode": "silent", "audio_source": "song",
+            "audio_start": 0, "audio_duration": 5, "duration": 5,
+            "editorial_start": 0, "editorial_end": 5, "trim_in": 0, "trim_out": 0,
+            "megapixels": 0.7, "aspect_ratio": "16:9", "steps": 6,
+            "engine": "turbo", "turbo_profile": "v4", "reference_ids": [],
+        }])
         message = add_message(
             production_id, "user", "both", "intervention",
             "The shot needs a stronger performance. Keep going and fix it automatically.",
@@ -468,7 +847,12 @@ class ProductionStudioTests(unittest.TestCase):
                 "next_action": "regenerate_shot",
                 "content": {
                     "reply": "I will regenerate the shot and continue.",
-                    "actions": [{"type": "pause"}],
+                    "actions": [
+                        {"type": "regenerate_shot", "shot_index": 1,
+                         "prompt": "A stronger close performance with purposeful movement.",
+                         "regenerate_downstream": False},
+                        {"type": "pause"},
+                    ],
                     "resume_policy": "await_user",
                 },
                 "issues": [{"description": "Performance is too weak", "severity": "blocking"}],
@@ -476,9 +860,27 @@ class ProductionStudioTests(unittest.TestCase):
             },
             "", "codex-session", "test", "medium",
         )
+        followup = AgentResult(
+            "codex",
+            {
+                "summary": "The regenerated shot is queued.",
+                "decision": "CONTINUE",
+                "content": {
+                    "reply": "The requested regeneration was applied and the production can continue.",
+                    "actions": [],
+                    "resume_policy": "resume",
+                },
+                "issues": [],
+                "requires_user": False,
+            },
+            "", "codex-session-followup", "test", "medium",
+        )
         with patch.object(
             production_orchestrator, "_intervention_council_turn",
             new=AsyncMock(return_value=result),
+        ), patch.object(
+            production_orchestrator, "_intervention_followup",
+            new=AsyncMock(return_value=followup),
         ):
             resumed = asyncio.run(
                 production_orchestrator._apply_pending_interventions(private),
@@ -642,6 +1044,58 @@ class ProductionStudioTests(unittest.TestCase):
         self.assertIn("AGY-only audio correction", agy_context)
         self.assertNotIn("Codex-only camera correction", agy_context)
 
+    def test_resumed_codex_turn_does_not_reattach_all_production_references(self):
+        production = get_production(self.create_production().json()["id"], private=True)
+        production["codex_session_id"] = "existing-codex-session"
+        references = [self.root / "reference-one.png", self.root / "reference-two.png"]
+        result = AgentResult(
+            "codex", {"summary": "Done", "decision": "CONTINUE", "content": {},
+                       "issues": [], "next_action": "continue"},
+            "", "new-codex-session", "gpt-test", "medium",
+        )
+
+        for compact_context in (False, True):
+            with patch.object(production_orchestrator, "_reference_image_paths", return_value=references), \
+                 patch.object(process_manager, "invoke", new=AsyncMock(return_value=result)) as invoke:
+                asyncio.run(production_orchestrator._codex(
+                    production, "Continue from the checkpoint.",
+                    compact_context=compact_context,
+                ))
+
+            invocation = invoke.await_args.args
+            self.assertEqual(invocation[6], "existing-codex-session")
+            self.assertEqual(invocation[7], [])
+
+    def test_codex_image_budget_failure_retries_with_fresh_text_only_context(self):
+        production = get_production(self.create_production().json()["id"], private=True)
+        production["codex_session_id"] = "oversized-codex-session"
+        reference = self.root / "reference.png"
+        success = AgentResult(
+            "codex", {"summary": "Recovered", "decision": "CONTINUE", "content": {},
+                       "issues": [], "next_action": "continue"},
+            "", "recovered-codex-session", "gpt-test", "medium",
+        )
+        oversized = RuntimeError(
+            "Total image data in 'input' exceeds the 536870912 byte limit for a single /v1/responses request."
+        )
+
+        with patch.object(process_manager, "invoke", new=AsyncMock(side_effect=[oversized, success])) as invoke:
+            result = asyncio.run(production_orchestrator._codex(
+                production, "Continue from the checkpoint.", images=[reference],
+            ))
+
+        self.assertIs(result, success)
+        first, retry = invoke.await_args_list
+        self.assertEqual(first.args[6], "oversized-codex-session")
+        self.assertEqual(first.args[7], [reference])
+        self.assertIsNone(retry.args[6])
+        self.assertEqual(retry.args[7], [])
+        self.assertTrue(any(
+            "image-input limit" in message["content"]
+            for message in list_messages(production["id"])
+            if message["participant"] == "codex"
+        ))
+
     def test_intervention_is_consumed_at_safe_checkpoint(self):
         production = self.create_production().json()
         production_id = production["id"]
@@ -676,7 +1130,22 @@ class ProductionStudioTests(unittest.TestCase):
             "2026-08-22 WARN codex_core::responses_retry: stream disconnected - "
             "retrying sampling request (5/5); websocket closed by server before response.completed"
         )
-        self.assertIsNone(ProductionOrchestrator._format_agent_trace("codex", "codex", "stderr", transport))
+        transport_trace = ProductionOrchestrator._format_agent_trace("codex", "codex", "stderr", transport)
+        self.assertIsNotNone(transport_trace)
+        self.assertEqual(transport_trace[1], "agent_update")
+        self.assertIn("retrying connection (5/5)", transport_trace[0])
+        fallback_trace = ProductionOrchestrator._format_agent_trace(
+            "codex", "codex", "stdout", json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "error",
+                    "message": "Falling back from WebSockets to HTTPS transport after retries",
+                },
+            }),
+        )
+        self.assertIsNotNone(fallback_trace)
+        self.assertEqual(fallback_trace[1], "agent_update")
+        self.assertIn("HTTPS", fallback_trace[0])
         self.assertIsNone(ProductionOrchestrator._format_agent_trace(
             "codex", "codex", "stdout", json.dumps({"type": "error"}),
         ))
@@ -741,6 +1210,21 @@ class ProductionStudioTests(unittest.TestCase):
             for message in orphan_state["messages"]
             if message["participant"] == "system"
         ))
+
+    def test_legacy_watchdog_recovery_does_not_pause_council_productions(self):
+        legacy = self.create_production().json()
+        council = self.create_production().json()
+        update_production(legacy["id"], status="running", pipeline="legacy_music_video_v1", error=None)
+        update_production(council["id"], status="running", pipeline="council_music_video_v1", error=None)
+
+        recovered = recover_productions(
+            reason="Production controller lost its active process",
+            pipeline="legacy_music_video_v1",
+        )
+
+        self.assertEqual(recovered, [legacy["id"]])
+        self.assertEqual(get_production(legacy["id"], private=True)["status"], "paused")
+        self.assertEqual(get_production(council["id"], private=True)["status"], "running")
 
     def test_recover_productions_requeues_a_pending_intervention(self):
         production = self.create_production().json()
@@ -1631,10 +2115,40 @@ class AgentParsingTests(unittest.TestCase):
                     "production", "A clean reference", target, "gpt-test", "high", [], "1:1",
                 ))
                 command = process_manager._run.await_args.args[1]
+                task = process_manager._run.await_args.args[2]
                 self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
                 self.assertNotIn("--approve-for-me", command)
+                self.assertIn("built-in image-generation tool directly", task)
+                self.assertIn("bridge", task)
+                self.assertNotIn("Copy the selected final image", task)
 
             self.assertEqual(result.resolve(), target.resolve())
+            with Image.open(target) as image:
+                self.assertEqual(image.size, (32, 32))
+
+    def test_codex_reference_materializes_standard_generated_image_after_copy_runner_failure(self):
+        with tempfile.TemporaryDirectory(prefix="codex-generated-handoff-test-") as temp:
+            root = Path(temp)
+            production_root = root / "productions" / "production"
+            generated_root = root / "codex-home" / "generated_images"
+            target = production_root / "references" / "generated" / "attempt.png"
+            generated = generated_root / "exec-generated.png"
+
+            async def generate_then_fail_during_copy(*_args, **_kwargs):
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (32, 32), "purple").save(generated, "PNG")
+                raise RuntimeError("CreateProcess timed out connecting runner pipe-in")
+
+            with patch("backend.agents.PRODUCTIONS", root / "productions"), \
+                 patch("backend.agents.CODEX_GENERATED_IMAGES", generated_root), \
+                 patch("backend.agents._command_path", return_value="codex"), \
+                 patch.object(process_manager, "_run", new=AsyncMock(side_effect=generate_then_fail_during_copy)):
+                result = asyncio.run(process_manager._generate_reference_image_codex(
+                    "production", "A clean reference", target, "gpt-test", "high", [], "1:1",
+                ))
+
+            self.assertEqual(result.resolve(), target.resolve())
+            self.assertTrue(target.is_file())
             with Image.open(target) as image:
                 self.assertEqual(image.size, (32, 32))
 
@@ -1702,6 +2216,7 @@ class AgentParsingTests(unittest.TestCase):
             command = call.args[1]
             schema_index = command.index("--output-schema")
             self.assertEqual(command[schema_index + 1], "schema.json")
+            self.assertIn("mcp_servers.runpod.enabled=false", command)
         self.assertNotIn("--add-dir", runner.await_args_list[1].args[1])
 
     def test_agent_run_does_not_wait_for_windows_stdin_pipe_to_close(self):

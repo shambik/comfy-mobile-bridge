@@ -10,7 +10,23 @@ import { FeedbackToast, useFeedback } from './feedback'
 type ModelOption = { id: string; name: string; efforts: string[] }
 type MegapixelRule = { max_duration: number; megapixels: number }
 type Runtime = 'codex' | 'agy'
+type Pipeline = 'legacy_music_video_v1' | 'council_music_video_v1'
 type AgentSettings = { codex_runtime: Runtime; codex_model: string; codex_effort: string; agy_runtime: Runtime; agy_model: string; agy_effort: string }
+type CouncilRole = { id: string; tier: 'specialist'|'supervisor'; required_capabilities?: string[]; task_types?: string[] }
+type CouncilSeat = {
+  id: string; label: string; runtime: Runtime; model: string; effort: string;
+  role_ids: string[]; user_enabled_capabilities: string[]; priority: number;
+  active: boolean; custom_instructions: string;
+}
+type CouncilSnapshot = {
+  config?: { revision: number; mode: 'solo'|'multi'; config?: { mode: 'solo'|'multi'; seats: CouncilSeat[] }; validation?: Record<string, unknown> };
+  seats?: Array<CouncilSeat & { effective_capabilities?: string[] }>;
+  tasks?: Array<{ id: string; stage: string; task_type: string; worker_type: string; role_id: string; assigned_seat_id?: string | null; state: string; attempt: number; max_attempts?: number }>;
+  deliverables?: Array<{ id: string; contract: string; version: number; role_id: string; payload: unknown }>;
+  reviews?: Array<{ id: string; gate_id: string; decision: string; reviewer_seat_id: string; findings?: unknown }>;
+  interventions?: Array<{ id: string; content: string; state: string }>;
+  activity?: { worker_type: string; worker_id?: string; role_id?: string; state: string; message: string } | null;
+}
 type Skill = {
   id: string; name: string; description: string; source: string; managed: boolean;
   enabled: boolean; valid: boolean; error?: string; agents: string[]
@@ -31,6 +47,7 @@ type Production = {
   generation_aspect_ratio?: string; generation_megapixel_rules?: MegapixelRule[];
   skills: string[]; progress: number; error?: string;
   controller_active?: boolean;
+  council?: CouncilSnapshot | null;
   agent_activity?: AgentActivity | null;
   generation_progress?: GenerationProgress;
   created_at: string; archived?: boolean; messages?: Message[]; message_total?: number;
@@ -46,8 +63,13 @@ type AgentActivity = {
   elapsed_seconds: number; idle_seconds: number; last_event?: string; process_alive: boolean; pid?: number | null;
 }
 type ShotAttempt = { id: string; attempt: number; job_id?: string; status: string; opening_frame_path?: string; output_path?: string; frames?: string[]; error?: string }
+type ShotPromptRevision = {
+  version?: number; task_id?: string; task_attempt?: number; status?: string; created_at?: string;
+  scene_frame_prompt?: string; video_prompt: string
+}
 type Shot = {
   id: string; shot_index: number; title: string; prompt: string;
+  scene_frame_prompt?: string; video_prompt?: string; prompt_history?: ShotPromptRevision[];
   mode: 'text'|'opening'|'reference'; continuity: 'hard_cut'|'sequential';
   audio_mode: 'silent'|'lip_sync'; audio_source: 'song'|'reference'; audio_start: number;
   audio_duration?: number; audio_reference_id?: string | null;
@@ -137,7 +159,13 @@ function isNonMeaningfulTrace(message: Message) {
 
 async function jsonResponse(response: Response) {
   const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.detail || 'Request failed')
+  if (!response.ok) {
+    const detail = data.detail
+    const message = typeof detail === 'string' ? detail
+      : (detail && typeof detail === 'object' && typeof detail.message === 'string') ? detail.message
+      : detail ? JSON.stringify(detail) : 'Request failed'
+    throw new Error(message)
+  }
   return data
 }
 
@@ -419,9 +447,18 @@ function ShotPlanModal({ shots, references, active, autonomous, onClose, onEdit,
               {assignedReferences.length > 0 && <div className="ps-shot-reference-strip">{assignedReferences.map(reference => <ShotReferenceTile key={reference.id} reference={reference} onOpen={onOpenReference} />)}</div>}
               {sceneReference ? <div className="ps-shot-scene-reference"><div className="ps-shot-reference-heading"><b>Actual scene reference</b><span>Opening frame sent to I2V</span></div><div className="ps-shot-reference-strip"><ShotReferenceTile reference={sceneReference} onOpen={onOpenReference} scene /></div></div> : <div className="ps-shot-scene-pending">The shot-specific opening frame will appear here after scene preparation.</div>}
             </div>
-            <details className="ps-shot-plan-details">
-              <summary>Prompt and attempts</summary>
-              <p>{shot.prompt}</p>
+            <details className="ps-shot-plan-details" open>
+              <summary>Prompts and attempts</summary>
+              {shot.scene_frame_prompt && <div className="ps-shot-prompt-block ps-shot-scene-prompt"><b>Scene opening-frame prompt</b><p>{shot.scene_frame_prompt}</p></div>}
+              <div className="ps-shot-prompt-block ps-shot-video-prompt"><b>Video-generation prompt</b><p>{shot.video_prompt || shot.prompt}</p></div>
+              {shot.prompt_history && shot.prompt_history.length > 0 && <details className="ps-shot-prompt-history">
+                <summary>Prompt revisions ({shot.prompt_history.length})</summary>
+                <div>{shot.prompt_history.map((revision, index) => <article key={`${revision.task_id || 'revision'}-${revision.version || index}`}>
+                  <b>Revision {revision.version || index + 1}{revision.task_attempt ? ` · task attempt ${revision.task_attempt}` : ''}</b>
+                  {revision.scene_frame_prompt && <><span>Scene opening-frame prompt</span><p>{revision.scene_frame_prompt}</p></>}
+                  <span>Video-generation prompt</span><p>{revision.video_prompt}</p>
+                </article>)}</div>
+              </details>}
               {shot.audio_mode === 'lip_sync' && <p className="ps-shot-audio-note">Audio: {shot.audio_source === 'reference' ? 'reference audio' : 'song'} · starts at {Number(shot.audio_start || 0).toFixed(2)}s</p>}
               {shot.attempts.length > 0 && <div className="ps-shot-plan-attempts">{shot.attempts.map(attempt => <div key={attempt.id}>Attempt {attempt.attempt}: {attempt.status}{attempt.opening_frame_path && <> · <a href={attempt.opening_frame_path} target="_blank" rel="noreferrer">Opening frame</a></>}{attempt.output_path && <> · <a href={attempt.output_path} target="_blank" rel="noreferrer">Open video</a></>}</div>)}</div>}
             </details>
@@ -465,6 +502,11 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const [modelsFetchedAt, setModelsFetchedAt] = useState('')
   const [modelsRefreshing, setModelsRefreshing] = useState(false)
   const [settings, setSettings] = useState<AgentSettings>({ codex_runtime: 'codex', codex_model: 'gpt-5.6-sol', codex_effort: 'high', agy_runtime: 'agy', agy_model: 'gemini-3.1-pro-high', agy_effort: 'high' })
+  const [pipeline, setPipeline] = useState<Pipeline>('legacy_music_video_v1')
+  const [councilMode, setCouncilMode] = useState<'solo'|'multi'>('multi')
+  const [councilRoles, setCouncilRoles] = useState<CouncilRole[]>([])
+  const [councilRequiredRoles, setCouncilRequiredRoles] = useState<string[]>([])
+  const [councilSeats, setCouncilSeats] = useState<CouncilSeat[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
   const [productions, setProductions] = useState<Production[]>([])
   const [selectedId, setSelectedId] = useState('')
@@ -588,8 +630,18 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       }
     })()
 
+    const councilTask = (async () => {
+      try {
+        const data = await jsonResponse(await fetch('/api/council/roles', { cache: 'no-store' }))
+        setCouncilRoles(data.manifest?.roles || [])
+        setCouncilRequiredRoles(data.required_role_ids || [])
+      } catch (reason) {
+        setSectionError('settings', reason instanceof Error ? reason.message : 'Unable to load Council roles')
+      }
+    })()
+
     try {
-      await Promise.all([settingsTask, skillsTask, modelsTask])
+      await Promise.all([settingsTask, skillsTask, modelsTask, councilTask])
     } finally {
       setAgentCatalogLoading(false)
       setModelsRefreshing(false)
@@ -714,6 +766,24 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     setAgyRuntime('agy'); setAgyModel(settings.agy_model); setAgyEffort(settings.agy_effort)
   }, [settings])
   useEffect(() => {
+    if (councilSeats.length || !models.codex.length || !models.agy.length) return
+    const codex = models.codex[0]
+    const agy = models.agy[0]
+    setCouncilSeats([
+      {
+        id: 'seat_codex_1', label: 'Codex Director', runtime: 'codex', model: codex.id,
+        effort: codex.efforts[0] || 'medium',
+        role_ids: ['visual-director', 'storyboard-editor', 'technical-director', 'scene-frame-designer', 'prompt-engineer', 'post-production-editor'],
+        user_enabled_capabilities: ['text', 'image'], priority: 100, active: true, custom_instructions: '',
+      },
+      {
+        id: 'seat_agy_1', label: 'AGY Audio Analyst', runtime: 'agy', model: agy.id,
+        effort: agy.efforts[0] || 'medium', role_ids: ['audio-analyst', 'technical-qc', 'av-sync-reviewer'],
+        user_enabled_capabilities: ['text', 'image', 'audio', 'video'], priority: 200, active: true, custom_instructions: '',
+      },
+    ])
+  }, [models, councilSeats.length])
+  useEffect(() => {
     const referenceId = editingShot?.audio_reference_id
     if (!referenceId || editingShot.reference_ids.includes(referenceId)) return
     setEditingShot(current => current && current.audio_reference_id === referenceId && !current.reference_ids.includes(referenceId)
@@ -740,12 +810,116 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     return jsonResponse(response)
   }
 
+  const councilConfig = () => ({
+    mode: councilMode,
+    seats: councilSeats.map((seat, index) => ({ ...seat, priority: (index + 1) * 100 })),
+    self_review_policy: councilMode === 'solo' ? 'require_user' : 'skip_optional',
+    required_role_ids: councilRequiredRoles,
+    revision_budget: 2,
+  })
+
+  const updateCouncilSeat = (id: string, update: Partial<CouncilSeat>) => {
+    setCouncilSeats(current => current.map(seat => seat.id === id ? { ...seat, ...update } : seat))
+  }
+
+  const addCouncilSeat = () => {
+    if (councilSeats.length >= 8) {
+      setSectionError('config', 'A Council can contain at most eight agent seats.')
+      return
+    }
+    const preferred: Runtime = councilSeats.some(seat => seat.runtime === 'agy') ? 'codex' : 'agy'
+    const fallback: Runtime = preferred === 'codex' ? 'agy' : 'codex'
+    const runtime = ([preferred, fallback] as Runtime[]).find(candidate => models[candidate].length > 0)
+    if (!runtime) {
+      setSectionError('config', 'No Codex or AGY models are currently available. Reload the model catalog and try again.')
+      return
+    }
+    const model = models[runtime][0]
+    const count = councilSeats.filter(seat => seat.runtime === runtime).length + 1
+    clearSectionError('config')
+    setCouncilSeats(current => [...current, {
+      id: `seat_${runtime}_${Date.now()}`, label: `${runtime === 'codex' ? 'Codex' : 'AGY'} Seat ${count}`,
+      runtime, model: model.id, effort: model.efforts[0] || 'medium', role_ids: [],
+      user_enabled_capabilities: runtime === 'agy' ? ['text', 'image', 'audio', 'video'] : ['text', 'image'],
+      priority: (current.length + 1) * 100, active: true, custom_instructions: '',
+    }])
+    window.requestAnimationFrame(() => {
+      document.querySelector('.ps-council-seat:last-of-type')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    })
+  }
+
+  const chooseCouncilMode = (mode: 'solo'|'multi') => {
+    setCouncilMode(mode)
+    if (mode === 'solo') {
+      const agy = councilSeats.find(seat => seat.runtime === 'agy') || councilSeats[0]
+      if (agy) setCouncilSeats([{ ...agy, role_ids: [...councilRequiredRoles], priority: 100 }])
+      return
+    }
+    if (councilSeats.length >= 2) return
+    const codex = models.codex[0]
+    const agy = models.agy[0]
+    if (!codex || !agy) return
+    setCouncilSeats([
+      { id: `seat_codex_${Date.now()}`, label: 'Codex Director', runtime: 'codex', model: codex.id, effort: codex.efforts[0] || 'medium', role_ids: ['visual-director', 'storyboard-editor', 'technical-director', 'scene-frame-designer', 'prompt-engineer', 'post-production-editor'], user_enabled_capabilities: ['text', 'image'], priority: 100, active: true, custom_instructions: '' },
+      { id: `seat_agy_${Date.now() + 1}`, label: 'AGY Media Reviewer', runtime: 'agy', model: agy.id, effort: agy.efforts[0] || 'medium', role_ids: ['audio-analyst', 'technical-qc', 'av-sync-reviewer'], user_enabled_capabilities: ['text', 'image', 'audio', 'video'], priority: 200, active: true, custom_instructions: '' },
+    ])
+  }
+
+  const openProductionConfig = () => {
+    if (!production) return
+    setConfigDraft({
+      ...production,
+      generation_turbo_profile: production.generation_turbo_profile || 'v1',
+      generation_steps: production.generation_steps || 4,
+      generation_megapixels: production.generation_megapixels || 0.7,
+      generation_aspect_ratio: production.generation_aspect_ratio || '16:9',
+      generation_megapixel_rules: copyMegapixelRules(production.generation_megapixel_rules),
+    })
+    if (production.pipeline === 'council_music_video_v1') {
+      const saved = production.council?.config?.config
+      setCouncilMode(saved?.mode || production.council?.config?.mode || 'multi')
+      setCouncilSeats((saved?.seats || production.council?.seats || []).map(seat => ({ ...seat })))
+    }
+    setConfigOpen(true)
+    window.requestAnimationFrame(() => {
+      document.querySelector('.ps-project-config')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  const renderCouncilBuilder = () => <section className="ps-council-builder">
+    <div className="ps-field-title"><Bot size={16}/><span>Production Council</span></div>
+    <p>Choose one solo agent or build a team. Every required planning and execution role must be assigned to a seat whose runtime supports it.</p>
+    <div className="ps-choice-row"><div><span>Council mode</span><div className="ps-segment"><button className={councilMode === 'solo' ? 'active' : ''} onClick={() => chooseCouncilMode('solo')}>Solo agent</button><button className={councilMode === 'multi' ? 'active' : ''} onClick={() => chooseCouncilMode('multi')}>Multi-agent</button></div></div></div>
+    <div className="ps-council-seats">{councilSeats.map((seat, seatIndex) => <article className="ps-council-seat" key={seat.id}>
+      <div className="ps-council-seat-head"><label><span>Seat name</span><input value={seat.label} onChange={event => updateCouncilSeat(seat.id, { label: event.target.value })}/></label>{councilMode === 'multi' && <button type="button" className="danger" onClick={() => setCouncilSeats(current => current.filter(item => item.id !== seat.id))} aria-label={`Remove ${seat.label}`}><Trash2 size={15}/></button>}</div>
+      <AgentSelect label={`Agent ${seatIndex + 1}`} catalogs={models} runtime={seat.runtime} model={seat.model} effort={seat.effort} showRuntime
+        onRuntime={runtime => { const first = models[runtime][0]; updateCouncilSeat(seat.id, { runtime, model: first?.id || '', effort: first?.efforts[0] || 'medium', user_enabled_capabilities: runtime === 'agy' ? ['text','image','audio','video'] : ['text','image'] }) }}
+        onModel={model => updateCouncilSeat(seat.id, { model })} onEffort={effort => updateCouncilSeat(seat.id, { effort })}/>
+      <fieldset className="ps-role-picker"><legend>Assigned roles</legend>{councilRoles.map(role => <label key={role.id} className={councilRequiredRoles.includes(role.id) ? 'required' : ''}><input type="checkbox" checked={seat.role_ids.includes(role.id)} onChange={() => updateCouncilSeat(seat.id, { role_ids: seat.role_ids.includes(role.id) ? seat.role_ids.filter(id => id !== role.id) : [...seat.role_ids, role.id] })}/><span>{humanizeAgentKey(role.id)}{councilRequiredRoles.includes(role.id) && <small>Required for this pipeline</small>}</span></label>)}</fieldset>
+      <label><span>Seat instructions (optional)</span><textarea value={seat.custom_instructions} onChange={event => updateCouncilSeat(seat.id, { custom_instructions: event.target.value })} placeholder="Style, responsibility, or decision constraints for this seat…"/></label>
+    </article>)}</div>
+    {councilMode === 'multi' && councilSeats.length < 8 && <button type="button" className="ps-secondary ps-add-seat" onClick={addCouncilSeat}><Bot size={15}/> Add agent seat</button>}
+  </section>
+
   const create = async () => {
     clearSectionError('intake')
     if (!title.trim() || !lyrics.trim() || !song) return setSectionError('intake', 'Title, song file and lyrics are required.')
     setBusy(true)
     try {
+      if (pipeline === 'council_music_video_v1') {
+        if (councilMode === 'solo' && councilSeats.length !== 1) throw new Error('Solo Council requires exactly one agent seat')
+        if (councilMode === 'multi' && councilSeats.length < 2) throw new Error('Multi-agent Council requires at least two seats')
+        const validation = await mutate('/api/council/validate', 'POST', JSON.stringify({ config: councilConfig() }))
+        if (!validation.valid) {
+          const reasons = [
+            ...(validation.missing_roles || []).map((role: string) => `missing role ${role}`),
+            ...(validation.capability_gaps || []).map((gap: Record<string, unknown>) => String(gap.reason || `${gap.role_id || gap.seat_id}: missing ${(gap.missing_capabilities as string[] || []).join(', ')}`)),
+          ]
+          throw new Error(`Council configuration is not runnable: ${reasons.join('; ')}`)
+        }
+      }
       const form = new FormData()
+      form.set('pipeline', pipeline)
       form.set('title', title.trim()); form.set('lyrics', lyrics.trim()); form.set('song', song)
       referenceFiles.forEach(file => form.append('reference_files', file))
       form.set('concept', concept.trim()); form.set('participation_mode', participation); form.set('continuity_mode', continuity)
@@ -759,6 +933,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       form.set('agy_runtime', agyRuntime)
       form.set('agy_model', agyModel); form.set('agy_effort', agyEffort)
       form.set('skills_json', JSON.stringify(selectedSkills)); form.set('approval_gates_json', JSON.stringify(participation === 'interactive' ? defaultGates : ['final']))
+      if (pipeline === 'council_music_video_v1') form.set('council_config_json', JSON.stringify(councilConfig()))
       const created = await mutate('/api/productions', 'POST', form)
       setProductions(current => [created, ...current]); setSelectedId(created.id); setProduction(created); setNewProject(false)
       setTitle(''); setLyrics(''); setConcept(''); setSong(null); setReferenceFiles([])
@@ -957,7 +1132,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     try {
       const updated = await mutate(`/api/productions/${production.id}/shots/${editingShot.id}`, 'PATCH', JSON.stringify({
         title: editingShot.title, prompt: editingShot.prompt, mode: editingShot.mode,
-        continuity: editingShot.continuity, duration: Number(editingShot.duration),
+        continuity: editingShot.continuity, duration: Math.min(15, Math.max(1, Math.round(Number(editingShot.duration)))),
         audio_mode: editingShot.audio_mode, audio_source: editingShot.audio_source,
         audio_start: Number(editingShot.audio_start || 0), audio_duration: Number(editingShot.audio_duration || editingShot.duration),
         audio_reference_id: editingShot.audio_reference_id || null,
@@ -989,7 +1164,11 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     if (!production || !configDraft) return
     setBusy(true)
     try {
-      const updated = await mutate(`/api/productions/${production.id}/settings`, 'PATCH', JSON.stringify({
+      if (production.pipeline === 'council_music_video_v1') {
+        if (councilMode === 'solo' && councilSeats.length !== 1) throw new Error('Solo Council requires exactly one agent seat')
+        if (councilMode === 'multi' && councilSeats.length < 2) throw new Error('Multi-agent Council requires at least two seats')
+      }
+      const fullConfiguration = {
         participation_mode: configDraft.participation_mode, continuity_mode: configDraft.continuity_mode,
         generation_turbo_profile: configDraft.generation_turbo_profile,
         generation_steps: Number(configDraft.generation_steps),
@@ -999,8 +1178,12 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
         codex_runtime: 'codex', codex_model: configDraft.codex_model,
         codex_effort: configDraft.codex_effort, agy_runtime: 'agy', agy_model: configDraft.agy_model,
         agy_effort: configDraft.agy_effort, skills: configDraft.skills,
+        council_config: production.pipeline === 'council_music_video_v1' ? councilConfig() : undefined,
         reason: 'Updated from Production Room',
-      }))
+      }
+       const updated = await mutate(`/api/productions/${production.id}/settings`, 'PATCH', JSON.stringify(
+         fullConfiguration,
+       ))
       setProduction(updated); setConfigOpen(false); feedback.notify('success', 'Production configuration saved as a revision')
     } catch (reason) { setSectionError('config', reason instanceof Error ? reason.message : 'Production settings failed') }
     finally { setBusy(false) }
@@ -1048,6 +1231,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     && ['awaiting_user', 'failed', 'paused', 'stopped'].includes(production.status)
   const cleanMessages = production?.messages?.filter(message => !isBenignTrace(message) && !isNonMeaningfulTrace(message)) || []
   const agentActivity = production?.agent_activity
+  const councilActivity = production?.pipeline === 'council_music_video_v1' ? production.council?.activity : null
   const agentActivityText = agentActivity
     ? `${(agentActivity.participant || agentActivity.runtime || 'agent').toUpperCase()} CLI is ${agentActivity.state || 'working'} · elapsed ${Math.round(agentActivity.elapsed_seconds)}s · quiet ${Math.round(agentActivity.idle_seconds)}s${agentActivity.last_event ? ` · last real event: ${agentActivity.last_event}` : ''}`
     : ''
@@ -1056,6 +1240,12 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     : ''
   const conversationMessages = cleanMessages.filter(message => message.kind !== 'agent_trace' || showLivePrints)
   const pendingDecisions = production?.decisions?.filter(item => item.status === 'pending') || []
+  const councilTasks = production?.council?.tasks || []
+  const councilTaskCounts = councilTasks.reduce<Record<string, number>>((counts, task) => ({ ...counts, [task.state]: (counts[task.state] || 0) + 1 }), {})
+  const councilActiveTasks = councilTasks.filter(task => ['starting', 'running', 'validating'].includes(task.state))
+  const councilSeatCount = production?.council?.config?.config?.seats?.length
+    || production?.council?.seats?.length
+    || 0
   const finalVideo = [...(production?.artifacts || [])].reverse().find(item => item.kind === 'final_video')
   const selectedProductionReady = !!production && production.id === selectedId
   const showProductionLoading = !newProject && !selectedProductionReady && (productionsLoading || productionLoading || (!!selectedId && !productionLoadError))
@@ -1101,6 +1291,14 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
     {showProductionLoading ? <section className="ps-panel ps-loading-panel" role="status" aria-live="polite"><LoaderCircle className="spin" size={25} /><div><h3>Loading production</h3><p>The production room is loading independently. Other app sections remain available while the selected production data arrives.</p></div></section> : showProductionError ? <section className="ps-panel ps-loading-panel ps-loading-error" role="alert"><X size={25} /><div><h3>Production could not be loaded</h3><p>{productionLoadError}</p><button className="ps-secondary" onClick={() => void loadProduction(selectedId)}>Retry production</button></div></section> : (newProject || !production) ? <section className="ps-create ps-panel">
       <SectionError message={sectionErrors.intake} className="ps-section-error" onDismiss={() => clearSectionError('intake')} />
       <div className="ps-panel-title"><Clapperboard size={20} /><div><h3>New music-video production</h3><p>The pipeline is music-video only for this POC.</p></div></div>
+      <div className="ps-pipeline-picker">
+        <span>Production engine</span>
+        <div className="ps-segment">
+          <button className={pipeline === 'legacy_music_video_v1' ? 'active' : ''} onClick={() => setPipeline('legacy_music_video_v1')}>Legacy</button>
+          <button className={pipeline === 'council_music_video_v1' ? 'active' : ''} onClick={() => setPipeline('council_music_video_v1')}>Council</button>
+        </div>
+        <small>{pipeline === 'legacy_music_video_v1' ? 'Existing Codex + AGY production behavior.' : 'Isolated role-based scheduler with persistent seats, sessions, scene-frame generation, ComfyUI execution, review, and assembly.'}</small>
+      </div>
       <div className="ps-form-grid"><label><span>Project title</span><input value={title} onChange={event => setTitle(event.target.value)} placeholder="Belly of the Beast" /></label><label><span>Song file</span><input type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg" onChange={event => setSong(event.target.files?.[0] || null)} /></label></div>
       <label><span>Lyrics</span><textarea value={lyrics} onChange={event => setLyrics(event.target.value)} placeholder="Paste the complete lyrics…" /></label>
       <label><span>Creative direction (optional)</span><textarea value={concept} onChange={event => setConcept(event.target.value)} placeholder="Characters, locations, visual style, story ideas, constraints…" /></label>
@@ -1119,21 +1317,25 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
          <MegapixelRulesEditor rules={generationMegapixelRules} onChange={setGenerationMegapixelRules} />
          <small>Turbo v4 supports 4–8 steps. MP remains the requested value; it is not replaced by the rounded pixel product shown after dimension calculation.</small>
        </div>
+      {pipeline === 'council_music_video_v1' && renderCouncilBuilder()}
       <details className="ps-advanced-settings"><summary>Advanced settings (optional)</summary>
+      {pipeline === 'legacy_music_video_v1' &&
       <div className="ps-agent-grid"><AgentSelect label="CODEX" catalogs={models} runtime={codexRuntime} model={codexModel} effort={codexEffort} onRuntime={setCodexRuntime} onModel={setCodexModel} onEffort={setCodexEffort} /><AgentSelect label="AGY" catalogs={models} runtime="agy" model={agyModel} effort={agyEffort} runtimeLocked onRuntime={() => {}} onModel={setAgyModel} onEffort={setAgyEffort} /></div>
+      }
       <div className="ps-project-skills"><div className="ps-field-title"><Sparkles size={15} /><span>Enabled skills</span></div><div>{skills.filter(item => item.valid && item.enabled).map(skill => <label key={skill.id}><input type="checkbox" checked={selectedSkills.includes(skill.id)} onChange={() => setSelectedSkills(current => current.includes(skill.id) ? current.filter(id => id !== skill.id) : [...current, skill.id])} />{skill.name}</label>)}</div></div>
       </details>
       <div className="ps-create-actions">{newProject && production && <button className="ps-secondary" onClick={() => setNewProject(false)}>Cancel</button>}<button className="ps-primary" onClick={() => void create()} disabled={busy}>{busy ? <LoaderCircle className="spin" size={18} /> : <Sparkles size={18} />} Create production</button></div>
     </section> : <>
-      <section className="ps-production-head ps-panel"><div><span className={`ps-status ${production.status}`}>{production.status}</span><h3>{production.title}</h3><p>{production.stage.replaceAll('_', ' ')} · {production.participation_mode} · {production.continuity_mode} · Turbo {(production.generation_turbo_profile || 'v1').toUpperCase()} · {production.generation_steps || 4} steps · {production.generation_aspect_ratio || '16:9'} · MP by duration</p></div><div className="ps-controls">
+      <section className="ps-production-head ps-panel"><div><span className={`ps-status ${production.status}`}>{production.status}</span><h3>{production.title}</h3><p>{production.pipeline === 'council_music_video_v1' ? 'Council' : 'Legacy'} · {production.stage.replaceAll('_', ' ')} · {production.participation_mode} · {production.continuity_mode} · Turbo {(production.generation_turbo_profile || 'v1').toUpperCase()} · {production.generation_steps || 4} steps · {production.generation_aspect_ratio || '16:9'} · MP by duration</p></div><div className="ps-controls">
         {['draft', 'stopped', 'failed'].includes(production.status) && !referenceRetryable && <button className="primary" onClick={() => void control('start')} disabled={busy}><Play size={17} /> Start</button>}
         {referenceRetryable && <button className="primary" onClick={() => void retryReferenceGeneration()} disabled={busy}><RotateCcw size={17} /> Retry references</button>}
         {production.status === 'paused' && <button className="primary" onClick={() => void control('resume')} disabled={busy}><Play size={17} /> Resume</button>}
         {active && <button onClick={() => void control('pause')} disabled={busy || production.status === 'pausing'}><Pause size={17} /> Pause</button>}
         {!['stopped', 'completed'].includes(production.status) && <button className="danger" onClick={() => void control('stop')} disabled={busy}><Square size={15} /> Stop</button>}
         <button onClick={() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })}><MessageSquare size={15} /> Intervene</button>
+        {production.pipeline === 'council_music_video_v1' && <button className="ps-council-config-button" onClick={openProductionConfig} disabled={busy}><Bot size={15} /> Agents &amp; roles · {councilSeatCount}</button>}
         <details className="ps-head-more"><summary>More</summary><div>
-         <button onClick={() => { setConfigDraft({ ...production, generation_turbo_profile: production.generation_turbo_profile || 'v1', generation_steps: production.generation_steps || 4, generation_megapixels: production.generation_megapixels || 0.7, generation_aspect_ratio: production.generation_aspect_ratio || '16:9', generation_megapixel_rules: copyMegapixelRules(production.generation_megapixel_rules) }); setConfigOpen(true) }} disabled={busy || !!active}><Settings size={15} /> Configure</button>
+         {production.pipeline !== 'council_music_video_v1' && <button onClick={openProductionConfig} disabled={busy}><Settings size={15} /> Configure</button>}
         <button onClick={() => void lifecycle('duplicate')} disabled={busy}><Copy size={15} /> Duplicate</button>
         <button onClick={() => void lifecycle('archive')} disabled={busy || !!active}><Archive size={15} /> {production.archived ? 'Unarchive' : 'Archive'}</button>
         <a className="ps-control-link" href={`/api/productions/${production.id}/export`}><Download size={15} /> Export</a>
@@ -1143,8 +1345,16 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
       <SectionError message={sectionErrors.controls} className="ps-section-error" onDismiss={() => clearSectionError('controls')} />
       <SectionError message={sectionErrors.config} className="ps-section-error" onDismiss={() => clearSectionError('config')} />
       <SectionError message={sectionErrors.references} className="ps-section-error" onDismiss={() => clearSectionError('references')} />
+      {production.pipeline === 'council_music_video_v1' && <details className="ps-panel ps-council-ledger"><summary><div><Bot size={17}/><span>Council execution</span></div><small>{councilTaskCounts.completed || 0}/{councilTasks.length} tasks complete · {councilActiveTasks.length} active</small></summary><div className="ps-council-ledger-body"><div className="ps-council-counts">{Object.entries(councilTaskCounts).map(([state, count]) => <span key={state} className={state}>{count} {state.replaceAll('_', ' ')}</span>)}</div><div className="ps-council-seat-summary">{production.council?.seats?.map(seat => <article key={seat.id}><b>{seat.label}</b><small>{seat.runtime.toUpperCase()} · {seat.model} · {seat.effort}</small><span>{seat.role_ids.map(humanizeAgentKey).join(' · ')}</span></article>)}</div>{councilActiveTasks.length > 0 && <div className="ps-council-active-tasks">{councilActiveTasks.map(task => <article key={task.id}><LoaderCircle className="spin" size={14}/><div><b>{humanizeAgentKey(task.task_type)}</b><small>{humanizeAgentKey(task.role_id)} · attempt {task.attempt}/{task.max_attempts || '?'}</small></div></article>)}</div>}</div></details>}
 
-      {configOpen && configDraft && <section className="ps-panel ps-project-config"><div className="ps-panel-title"><Settings size={18} /><div><h3>Production configuration</h3><p>Available while the production is not running. Saving creates a revision.</p></div></div><div className="ps-choice-row"><label><span>Mode</span><select value={configDraft.participation_mode} onChange={event => setConfigDraft(current => current && ({ ...current, participation_mode: event.target.value }))}><option value="autonomous">Autonomous</option><option value="interactive">Interactive</option></select></label><label><span>Continuity</span><select value={configDraft.continuity_mode} onChange={event => setConfigDraft(current => current && ({ ...current, continuity_mode: event.target.value }))}><option value="hybrid">Hybrid</option><option value="sequential">Sequential</option><option value="hard_cut">Hard cuts</option><option value="segmented">Segmented</option></select></label></div><div className="ps-generation-defaults ps-config-generation"><div className="ps-field-title"><Gauge size={15} /><span>Generation defaults</span></div><p>These settings are used when the next shot plan is created. Final dimensions are calculated by the workflow.</p><div className="ps-form-grid"><label><span>Turbo profile</span><select value={configDraft.generation_turbo_profile || 'v1'} onChange={event => setConfigDraft(current => current && ({ ...current, generation_turbo_profile: event.target.value, generation_steps: event.target.value === 'v4' ? Math.min(8, current.generation_steps || 4) : (current.generation_steps || 4) }))}><option value="v1">Turbo v1</option><option value="v4">Turbo v4</option></select></label><label><span>Steps · whole number</span><input type="number" min="4" max={configDraft.generation_turbo_profile === 'v4' ? 8 : 12} step="1" value={configDraft.generation_steps || 4} onChange={event => setConfigDraft(current => current && ({ ...current, generation_steps: Math.min((current.generation_turbo_profile || 'v1') === 'v4' ? 8 : 12, Math.max(4, Number.parseInt(event.target.value || '4', 10) || 4)) }))} /></label><label><span>Resolution shape</span><select value={configDraft.generation_aspect_ratio || '16:9'} onChange={event => setConfigDraft(current => current && ({ ...current, generation_aspect_ratio: event.target.value }))}>{resolutionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label></div><MegapixelRulesEditor rules={configDraft.generation_megapixel_rules} onChange={rules => setConfigDraft(current => current && ({ ...current, generation_megapixel_rules: rules }))} /><small>Turbo v4 supports 4–8 steps. Each shot uses the first MP rule covering its duration.</small></div><div className="ps-agent-grid"><AgentSelect label="CODEX" catalogs={models} runtime={configDraft.codex_runtime} model={configDraft.codex_model} effort={configDraft.codex_effort} onRuntime={value => { const first=models[value][0]; setConfigDraft(current => current && ({...current,codex_runtime:value,codex_model:first?.id || '',codex_effort:first?.efforts[0] || 'medium'})) }} onModel={value => setConfigDraft(current => current && ({...current,codex_model:value}))} onEffort={value => setConfigDraft(current => current && ({...current,codex_effort:value}))} /><AgentSelect label="AGY" catalogs={models} runtime="agy" model={configDraft.agy_model} effort={configDraft.agy_effort} onRuntime={value => setConfigDraft(current => current && ({...current,agy_runtime:value}))} onModel={value => setConfigDraft(current => current && ({...current,agy_model:value}))} onEffort={value => setConfigDraft(current => current && ({...current,agy_effort:value}))} /></div><div className="ps-project-skills"><div className="ps-field-title"><Sparkles size={15}/><span>Skills used by this production</span></div><div>{skills.filter(item => item.valid && item.enabled).map(skill => <label key={skill.id}><input type="checkbox" checked={configDraft.skills.includes(skill.id)} onChange={() => setConfigDraft(current => current && ({...current,skills:current.skills.includes(skill.id)?current.skills.filter(id=>id!==skill.id):[...current.skills,skill.id]}))}/>{skill.name}</label>)}</div></div><div className="ps-create-actions"><button className="ps-secondary" onClick={() => setConfigOpen(false)}>Cancel</button><button className="ps-primary" onClick={() => void saveProductionConfig()}>Save revision</button></div></section>}
+      {configOpen && configDraft && <section className="ps-panel ps-project-config">
+         <div className="ps-panel-title"><Settings size={18} /><div><h3>{production.pipeline === 'council_music_video_v1' ? 'Council agents and roles' : 'Production configuration'}</h3><p>{active ? 'Settings are live-editable. A turn already in progress keeps its started model; queued and subsequent work uses this saved revision.' : 'Saving creates a new configuration revision.'}</p></div><button type="button" onClick={() => setConfigOpen(false)} aria-label="Close configuration"><X size={16}/></button></div>
+        <div className="ps-choice-row"><label><span>Mode</span><select value={configDraft.participation_mode} onChange={event => setConfigDraft(current => current && ({ ...current, participation_mode: event.target.value }))}><option value="autonomous">Autonomous</option><option value="interactive">Interactive</option></select></label><label><span>Continuity</span><select value={configDraft.continuity_mode} onChange={event => setConfigDraft(current => current && ({ ...current, continuity_mode: event.target.value }))}><option value="hybrid">Hybrid</option><option value="sequential">Sequential</option><option value="hard_cut">Hard cuts</option><option value="segmented">Segmented</option></select></label></div>
+        <div className="ps-generation-defaults ps-config-generation"><div className="ps-field-title"><Gauge size={15} /><span>Generation defaults</span></div><p>These settings are used when the next shot plan is created. Final dimensions are calculated by the workflow.</p><div className="ps-form-grid"><label><span>Turbo profile</span><select value={configDraft.generation_turbo_profile || 'v1'} onChange={event => setConfigDraft(current => current && ({ ...current, generation_turbo_profile: event.target.value, generation_steps: event.target.value === 'v4' ? Math.min(8, current.generation_steps || 4) : (current.generation_steps || 4) }))}><option value="v1">Turbo v1</option><option value="v4">Turbo v4</option></select></label><label><span>Steps · whole number</span><input type="number" min="4" max={configDraft.generation_turbo_profile === 'v4' ? 8 : 12} step="1" value={configDraft.generation_steps || 4} onChange={event => setConfigDraft(current => current && ({ ...current, generation_steps: Math.min((current.generation_turbo_profile || 'v1') === 'v4' ? 8 : 12, Math.max(4, Number.parseInt(event.target.value || '4', 10) || 4)) }))} /></label><label><span>Resolution shape</span><select value={configDraft.generation_aspect_ratio || '16:9'} onChange={event => setConfigDraft(current => current && ({ ...current, generation_aspect_ratio: event.target.value }))}>{resolutionOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label></div><MegapixelRulesEditor rules={configDraft.generation_megapixel_rules} onChange={rules => setConfigDraft(current => current && ({ ...current, generation_megapixel_rules: rules }))} /><small>Turbo v4 supports 4–8 steps. Each shot uses the first MP rule covering its duration.</small></div>
+        {production.pipeline === 'council_music_video_v1' ? renderCouncilBuilder() : <div className="ps-agent-grid"><AgentSelect label="CODEX" catalogs={models} runtime={configDraft.codex_runtime} model={configDraft.codex_model} effort={configDraft.codex_effort} onRuntime={value => { const first=models[value][0]; setConfigDraft(current => current && ({...current,codex_runtime:value,codex_model:first?.id || '',codex_effort:first?.efforts[0] || 'medium'})) }} onModel={value => setConfigDraft(current => current && ({...current,codex_model:value}))} onEffort={value => setConfigDraft(current => current && ({...current,codex_effort:value}))} /><AgentSelect label="AGY" catalogs={models} runtime="agy" model={configDraft.agy_model} effort={configDraft.agy_effort} onRuntime={value => setConfigDraft(current => current && ({...current,agy_runtime:value}))} onModel={value => setConfigDraft(current => current && ({...current,agy_model:value}))} onEffort={value => setConfigDraft(current => current && ({...current,agy_effort:value}))} /></div>}
+        <div className="ps-project-skills"><div className="ps-field-title"><Sparkles size={15}/><span>Skills used by this production</span></div><div>{skills.filter(item => item.valid && item.enabled).map(skill => <label key={skill.id}><input type="checkbox" checked={configDraft.skills.includes(skill.id)} onChange={() => setConfigDraft(current => current && ({...current,skills:current.skills.includes(skill.id)?current.skills.filter(id=>id!==skill.id):[...current.skills,skill.id]}))}/>{skill.name}</label>)}</div></div>
+        <div className="ps-create-actions"><button className="ps-secondary" onClick={() => setConfigOpen(false)}>Cancel</button><button className="ps-primary" onClick={() => void saveProductionConfig()} disabled={busy}>{active && production.pipeline === 'council_music_video_v1' ? 'Apply to unstarted tasks' : 'Save revision'}</button></div>
+      </section>}
 
       <details className="ps-panel ps-reference-manager"><summary className="ps-panel-title"><Upload size={18} /><div><h3>Reference media</h3><p>Images, videos, and audio can be assigned to current T2V/I2V production shots. R2V remains available elsewhere in the app for future production support. Generated stills are jointly reviewed by Codex and AGY.</p></div></summary><div className="ps-reference-generator"><div className="ps-field-title"><ImagePlus size={16}/><span>Generate reference image</span></div><div className="ps-form-grid"><label><span>Reference name</span><input value={referenceName} onChange={event => setReferenceName(event.target.value)} placeholder="Main character · night wardrobe"/></label><label><span>Image provider</span><select value={referenceProvider} onChange={event => setReferenceProvider(event.target.value as 'auto'|'codex'|'agy')}><option value="auto">Auto · Codex then AGY fallback</option><option value="codex">Codex ImageGen</option><option value="agy">AGY ImageGen</option></select></label></div><label><span>Complete image brief</span><textarea value={referencePrompt} onChange={event => setReferencePrompt(event.target.value)} placeholder="Describe identity, wardrobe, location, lighting, camera and composition…"/></label><button className="ps-primary" onClick={() => void generateReference()} disabled={referenceGenerating || !!active || !referenceName.trim() || !referencePrompt.trim()}>{referenceGenerating ? <LoaderCircle className="spin" size={16}/> : <ImagePlus size={16}/>} {referenceGenerating ? 'Generating and reviewing…' : 'Generate reference image'}</button>{active && <small>Pause or stop this production to generate a manual reference.</small>}</div><label className="ps-reference-upload"><Upload size={16} /> Add image, video, or audio<input type="file" accept="image/*,video/*,audio/*" onChange={event => { void uploadReference(event.target.files?.[0] || null); event.currentTarget.value='' }} /></label><div className="ps-reference-list">{production.references?.map(reference => <article key={reference.id}>{reference.kind === 'image' && <img className="ps-reference-thumb" src={reference.url} alt={reference.name} loading="lazy" />}<a href={reference.url} target="_blank" rel="noreferrer"><b>{reference.kind}</b><span>{reference.name}</span></a><button onClick={() => void removeReference(reference)}><Trash2 size={13} /></button></article>)}{!production.references?.length && <p>No reference media uploaded yet.</p>}</div><div className="ps-import-jobs"><span>Import completed generations</span>{jobsLoading ? <small className="ps-inline-loading"><LoaderCircle className="spin" size={13} /> Loading completed generations…</small> : <>{regularJobs.slice(0, 20).map(job => <label key={job.id}><input type="checkbox" checked={importIds.split(',').filter(Boolean).includes(job.id)} onChange={() => { const current=importIds.split(',').filter(Boolean); setImportIds(current.includes(job.id)?current.filter(id=>id!==job.id).join(','):[...current,job.id].join(',')) }}/><b>{job.duration}s · {job.mode}</b><small>{job.prompt}</small></label>)}{!regularJobs.length && <small>No completed regular jobs are available.</small>}</>}<button onClick={() => void importJobs()} disabled={!importIds}>Import selected results</button></div></details>
 
@@ -1159,16 +1369,20 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
           <main className="ps-panel ps-conversation">
             <div className="ps-panel-title">
               <MessageSquare size={18} />
-              <div><h3>Production council</h3><p>User, Codex and AGY · live CLI activity is available here</p></div>
+              <div><h3>Production council</h3><p>{production.pipeline === 'council_music_video_v1' ? `${production.council?.seats?.length || 0} configured seat${production.council?.seats?.length === 1 ? '' : 's'} · durable role sessions` : 'User, Codex and AGY · Legacy live CLI activity'}</p></div>
               <button type="button" className="ps-trace-toggle" aria-pressed={showLivePrints} onClick={toggleLivePrints}>{showLivePrints ? 'Hide live prints' : 'Show live prints'}</button>
             </div>
-            {active && !controllerMissing && <div className={`ps-agent-activity ${generationIsActive ? 'generation' : production.status}`} role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><b>{generationIsActive ? 'GENERATION IN PROGRESS' : production.status === 'queued' ? 'PRODUCTION QUEUED' : agentActivity?.process_alive ? `${(agentActivity.participant || 'agent').toUpperCase()} WORKING IN BACKGROUND` : 'PRODUCTION CONTROLLER WORKING'}</b><span>{generationIsActive ? generationProgressText : production.status === 'queued' ? 'Waiting for the scheduler to resume from the saved checkpoint.' : agentActivity?.process_alive ? agentActivityText : `Controller is processing ${production.stage.replaceAll('_', ' ')}; no agent CLI process is currently running.`}</span></div><small>{generationIsActive && generationProgress?.shot_index ? `SHOT ${generationProgress.shot_index}` : production.stage.replaceAll('_', ' ')}</small></div>}
+            {active && !controllerMissing && <div className={`ps-agent-activity ${generationIsActive ? 'generation' : production.status}`} role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><b>{generationIsActive ? 'GENERATION IN PROGRESS' : councilActivity?.worker_type === 'agent' && councilActivity.state === 'running' ? `${councilActivity.message.toUpperCase()}` : production.status === 'queued' ? 'PRODUCTION QUEUED' : agentActivity?.process_alive ? `${(agentActivity.participant || 'agent').toUpperCase()} WORKING IN BACKGROUND` : 'PRODUCTION CONTROLLER WORKING'}</b><span>{generationIsActive ? generationProgressText : councilActivity ? councilActivity.message : production.status === 'queued' ? 'Waiting for the scheduler to resume from the saved checkpoint.' : agentActivity?.process_alive ? agentActivityText : `Controller is processing ${production.stage.replaceAll('_', ' ')}; no agent CLI process is currently running.`}</span></div><small>{generationIsActive && generationProgress?.shot_index ? `SHOT ${generationProgress.shot_index}` : councilActivity?.role_id ? humanizeAgentKey(councilActivity.role_id) : production.stage.replaceAll('_', ' ')}</small></div>}
             {controllerMissing && <div className="ps-agent-activity paused" role="status" aria-live="polite"><LoaderCircle className="spin" size={17} /><div><b>CONTROLLER RECOVERY</b><span>No agent process is active for this production. The checkpoint is being preserved and the controller is recovering it; no new generation is running.</span></div><small>{production.stage.replaceAll('_', ' ')}</small></div>}
             <SectionError message={sectionErrors.chat} className="ps-section-error" onDismiss={() => clearSectionError('chat')} />
             <div className="ps-messages" ref={messagesRef}>{production.messages_has_older && <button type="button" className="ps-load-older" onClick={() => void loadOlderMessages()} disabled={olderMessagesLoading}>{olderMessagesLoading ? <><LoaderCircle className="spin" size={13} /> Loading older council messages…</> : `Load older council messages · ${Math.max(0, (production.message_total || 0) - (production.messages?.length || 0))} remaining`}</button>}{conversationMessages.map(message => {
               const trace = message.kind === 'agent_trace'
               const responseTrace = trace && message.metadata?.stream === 'response'
-              const result = message.kind === 'agent' && (message.participant === 'agy' || message.participant === 'codex')
+              // Legacy agents use kind="agent"; Council seats persist the same
+              // contract as kind="agent_response". Treat both as structured
+              // agent results so Council decisions/issues are rendered with the
+              // same cards as the legacy flow.
+              const result = (message.kind === 'agent' || message.kind === 'agent_response') && (message.participant === 'agy' || message.participant === 'codex')
               const decision = typeof message.metadata?.decision === 'string' ? message.metadata.decision : ''
               const nextAction = typeof message.metadata?.next_action === 'string' ? message.metadata.next_action : ''
               const structuredContent = result ? extractStructuredAgentContent(message.content) : null
@@ -1176,15 +1390,22 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
               const details = schemaEcho ? null : (message.metadata?.content ?? structuredContent)
               const issues = result ? concreteAgentIssues(message.metadata?.issues) : []
               const interventionState = message.kind === 'intervention' && typeof message.metadata?.execution_status === 'string' ? String(message.metadata.execution_status) : ''
-              return <article key={message.id} className={`ps-message ${message.participant}${trace ? ' trace' : ''}${responseTrace ? ' response' : ''}${result ? ' result' : ''}`}><div className="ps-avatar"><ParticipantIcon participant={message.participant} /></div><div className="ps-message-card"><header><b>{message.participant === 'user' ? 'YOU' : message.participant.toUpperCase()}{trace && <em>{responseTrace ? 'REPLY' : 'LIVE'}</em>}</b><span>{new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></header>{structuredContent ? <p>{agentVisibleSummary(message, structuredContent)}</p> : <p>{message.content}</p>}{interventionState && <small className="ps-trace-meta">Request {interventionState.replaceAll('_', ' ')}</small>}{message.metadata && typeof message.metadata.model === 'string' && <small>{message.metadata.model} · {String(message.metadata.effort || '')}</small>}{trace && message.metadata?.stream === 'response' && <small className="ps-trace-meta">Agent response</small>}{trace && message.metadata?.stream !== 'response' && message.metadata?.heartbeat !== true && <small className="ps-trace-meta">Live activity</small>}{schemaEcho && <p className="ps-agent-callout negative"><b>Provider response issue:</b> AGY echoed its output schema instead of returning the requested task result.</p>}{result && decision && !schemaEcho && <p className={'ps-agent-callout ' + agentDecisionTone(decision)}><b>Decision:</b> {decision}</p>}{result && nextAction && !schemaEcho && <p className={'ps-agent-callout ' + agentStatusTone('next_action', nextAction)}><b>Intent / next action:</b> {nextAction}</p>}{result && details !== undefined && details !== null && <details className="ps-agent-details"><summary>{message.participant === 'agy' ? 'Detailed analysis' : 'Structured plan details'}</summary><AgentReadableDetail value={details} /></details>}{result && issues.length > 0 && <details className="ps-agent-issues"><summary>{issues.length} issue{issues.length === 1 ? '' : 's'}</summary><AgentReadableDetail value={issues} /></details>}</div></article>
+              const currentCouncilSeat = result && production.pipeline === 'council_music_video_v1' && typeof message.metadata?.seat_id === 'string'
+                ? production.council?.seats?.find(seat => seat.id === message.metadata?.seat_id)
+                : undefined
+              const historicalModel = !!(result && currentCouncilSeat && typeof message.metadata?.model === 'string' && currentCouncilSeat.model !== message.metadata.model)
+              const modelLabel = message.metadata && typeof message.metadata.model === 'string'
+                ? `${historicalModel ? 'Historical task · model used: ' : 'Model used: '}${message.metadata.model}${typeof message.metadata.config_revision === 'number' ? ` · Council revision ${message.metadata.config_revision}` : ''} · ${String(message.metadata.effort || '')}`
+                : ''
+              return <article key={message.id} className={`ps-message ${message.participant}${trace ? ' trace' : ''}${responseTrace ? ' response' : ''}${result ? ' result' : ''}`}><div className="ps-avatar"><ParticipantIcon participant={message.participant} /></div><div className="ps-message-card"><header><b>{message.participant === 'user' ? 'YOU' : message.participant.toUpperCase()}{trace && <em>{responseTrace ? 'REPLY' : 'LIVE'}</em>}</b><span>{new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></header>{structuredContent ? <p>{agentVisibleSummary(message, structuredContent)}</p> : <p>{message.content}</p>}{interventionState && <small className="ps-trace-meta">Request {interventionState.replaceAll('_', ' ')}</small>}{modelLabel && <small>{modelLabel}</small>}{trace && message.metadata?.stream === 'response' && <small className="ps-trace-meta">Agent response</small>}{trace && message.metadata?.stream !== 'response' && message.metadata?.heartbeat !== true && <small className="ps-trace-meta">Live activity</small>}{schemaEcho && <p className="ps-agent-callout negative"><b>Provider response issue:</b> AGY echoed its output schema instead of returning the requested task result.</p>}{result && decision && !schemaEcho && <p className={'ps-agent-callout ' + agentDecisionTone(decision)}><b>Decision:</b> {decision}</p>}{result && nextAction && !schemaEcho && <p className={'ps-agent-callout ' + agentStatusTone('next_action', nextAction)}><b>Intent / next action:</b> {nextAction}</p>}{result && details !== undefined && details !== null && <details className="ps-agent-details"><summary>{message.participant === 'agy' ? 'Detailed analysis' : 'Structured plan details'}</summary><AgentReadableDetail value={details} /></details>}{result && issues.length > 0 && <details className="ps-agent-issues"><summary>{issues.length} issue{issues.length === 1 ? '' : 's'}</summary><AgentReadableDetail value={issues} /></details>}</div></article>
             })}</div>
           {finalVideo && <section className="ps-final-video"><div><Clapperboard size={18} /><b>Final music video</b></div><video controls playsInline preload="none" src={finalVideo.url} /><a href={finalVideo.url} download>Download final video</a></section>}
-          <div className="ps-composer"><select value={recipient} onChange={event => setRecipient(event.target.value)}><option value="both">Both agents</option><option value="codex">Codex only</option><option value="agy">AGY only</option></select><textarea value={intervention} onChange={event => setIntervention(event.target.value)} placeholder="Guide Codex and AGY, correct a decision, or intervene…" /><button onClick={() => void sendIntervention()} disabled={busy || !intervention.trim()}><Send size={17} /></button></div>
+          <div className="ps-composer"><select value={recipient} onChange={event => setRecipient(event.target.value)}><option value="both">All agents</option>{production.pipeline === 'council_music_video_v1' ? production.council?.seats?.map(seat => <option key={seat.id} value={seat.id}>{seat.label} · {seat.role_ids.map(humanizeAgentKey).join(', ')}</option>) : <><option value="codex">Codex only</option><option value="agy">AGY only</option></>}</select><textarea value={intervention} onChange={event => setIntervention(event.target.value)} placeholder="Guide the Council, correct a decision, or intervene…" /><button onClick={() => void sendIntervention()} disabled={busy || !intervention.trim()}><Send size={17} /></button></div>
          </main>
          <aside className="ps-panel ps-reference-panel"><div className="ps-panel-title"><ImagePlus size={18} /><div><h3>Session references</h3><p>{production.references?.length || 0} reference{production.references?.length === 1 ? '' : 's'} · generated and supplied for this production</p></div></div><div className="ps-session-reference-list">{production.references?.length ? production.references.map(reference => <SessionReferenceCard key={reference.id} reference={reference} onOpen={setPreviewReference} />) : <div className="ps-empty"><ImagePlus size={24} /><p>No references in this production yet.</p></div>}</div></aside>
       </div>
       {production.error && <SectionError message={production.error} className="ps-section-error" onDismiss={() => {}} />}
-      {editingShot && <div className="ps-modal-backdrop"><section className="ps-panel ps-shot-editor"><SectionError message={sectionErrors.shotModal} className="ps-modal-error" onDismiss={() => clearSectionError('shotModal')} /><div className="ps-panel-title"><Pencil size={18}/><div><h3>Edit shot {editingShot.shot_index}</h3><p>Set the essentials below. Prompt and references are under Advanced.</p></div><button onClick={closeShotEditor}><X size={16}/></button></div><div className="ps-form-grid"><label><span>Title</span><input value={editingShot.title} onChange={event => setEditingShot(current => current && ({...current,title:event.target.value}))}/></label><label><span>Mode</span><select value={editingShot.mode} onChange={event => { const mode=event.target.value as Shot['mode']; setEditingShot(current => current && ({...current,mode,audio_mode:mode==='reference'?'silent':current.audio_mode})) }}><option value="text">T2V</option><option value="opening">I2V</option><option value="reference" disabled>R2V · future production support</option></select></label></div><details className="ps-advanced-settings"><summary>Prompt (optional)</summary><label><span>Complete prompt</span><textarea value={editingShot.prompt} onChange={event => setEditingShot(current => current && ({...current,prompt:event.target.value}))}/></label></details><div className="ps-form-grid"><label><span>Continuity</span><select value={editingShot.continuity} onChange={event => setEditingShot(current => current && ({...current,continuity:event.target.value as Shot['continuity']}))}><option value="hard_cut">Hard cut / independent</option><option value="sequential">Previous last frame</option></select></label><label><span>Aspect ratio</span><select value={editingShot.aspect_ratio} onChange={event => setEditingShot(current => current && ({...current,aspect_ratio:event.target.value}))}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label><label><span>Turbo LoRA / profile</span><select value={editingShot.turbo_profile || 'v1'} disabled={editingShot.engine !== 'turbo'} onChange={event => setEditingTurboProfile(event.target.value as 'v1' | 'v4')}><option value="v1">Turbo v1</option><option value="v4">Turbo v4</option></select></label><label><span>Steps · whole number</span><input type="number" min="4" max={(editingShot.turbo_profile || 'v1') === 'v4' ? 8 : 12} step="1" value={editingShot.steps || 4} onChange={event => setEditingSteps(event.target.value)}/></label><label><span>Duration seconds</span><input type="number" min="0.5" max="15" step="0.5" value={editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,duration:Number(event.target.value),audio_duration:current.audio_duration || Number(event.target.value)}))}/></label><label><span>Megapixels</span><input type="number" min="0.1" max="2" step="0.05" value={editingShot.megapixels} onChange={event => setEditingShot(current => current && ({...current,megapixels:Number(event.target.value)}))}/></label></div><div className="ps-form-grid ps-shot-audio-controls"><label><span>Audio</span><select value={editingShot.audio_mode || 'silent'} onChange={event => setEditingShot(current => current && ({...current,audio_mode:event.target.value as Shot['audio_mode'],audio_source:event.target.value==='silent'?'song':current.audio_source}))}><option value="silent">Silent generation</option><option value="lip_sync" disabled={editingShot.mode === 'reference'}>Lip-sync · song or reference audio</option></select></label>{editingShot.audio_mode === 'lip_sync' && <label><span>Audio source</span><select value={editingShot.audio_source || 'song'} onChange={event => setEditingShot(current => current && ({...current,audio_source:event.target.value as Shot['audio_source']}))}><option value="song">Production song segment</option><option value="reference" disabled={!production.references?.some(reference => reference.kind === 'audio')}>Assigned audio reference</option></select></label>}</div>{editingShot.audio_mode === 'lip_sync' && <div className="ps-form-grid ps-shot-audio-timing"><label><span>Audio start (seconds)</span><input type="number" min="0" max="3600" step="0.1" value={editingShot.audio_start || 0} onChange={event => setEditingShot(current => current && ({...current,audio_start:Number(event.target.value)}))}/></label><label><span>Audio duration</span><input type="number" min="0.5" max="60" step="0.1" value={editingShot.audio_duration || editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,audio_duration:Number(event.target.value)}))}/></label>{editingShot.audio_source === 'reference' && <label><span>Audio reference</span><select value={editingShot.audio_reference_id || ''} onChange={event => setEditingShot(current => current && ({...current,audio_reference_id:event.target.value || null}))}><option value="">Choose audio reference</option>{production.references?.filter(reference => reference.kind === 'audio').map(reference => <option key={reference.id} value={reference.id}>{reference.name}</option>)}</select></label>}</div>}<details className="ps-advanced-settings"><summary>Assigned references (optional)</summary><div className="ps-reference-checks"><span>Use assigned images as creative anchors for Codex and AGY to build this shot&apos;s opening scene. The generated scene frame is sent to I2V; original references are not sent directly. R2V is not used in production yet.</span><ShotReferenceAssignments shot={editingShot} references={production.references || []} onOpen={setPreviewReference}/>{production.references?.map(reference => <label key={reference.id}><input type="checkbox" checked={editingShot.reference_ids.includes(reference.id)} onChange={() => setEditingShot(current => current && ({...current,reference_ids:current.reference_ids.includes(reference.id)?current.reference_ids.filter(id=>id!==reference.id):[...current.reference_ids,reference.id]}))}/>{reference.kind}: {reference.name}</label>)}</div></details><div className="ps-create-actions"><button className="ps-secondary" onClick={closeShotEditor}>Cancel</button><button className="ps-primary" onClick={() => void saveShot()} disabled={busy}>Save shot</button></div></section></div>}
+      {editingShot && <div className="ps-modal-backdrop"><section className="ps-panel ps-shot-editor"><SectionError message={sectionErrors.shotModal} className="ps-modal-error" onDismiss={() => clearSectionError('shotModal')} /><div className="ps-panel-title"><Pencil size={18}/><div><h3>Edit shot {editingShot.shot_index}</h3><p>Set the essentials below. Prompt and references are under Advanced.</p></div><button onClick={closeShotEditor}><X size={16}/></button></div><div className="ps-form-grid"><label><span>Title</span><input value={editingShot.title} onChange={event => setEditingShot(current => current && ({...current,title:event.target.value}))}/></label><label><span>Mode</span><select value={editingShot.mode} onChange={event => { const mode=event.target.value as Shot['mode']; setEditingShot(current => current && ({...current,mode,audio_mode:mode==='reference'?'silent':current.audio_mode})) }}><option value="text">T2V</option><option value="opening">I2V</option><option value="reference" disabled>R2V · future production support</option></select></label></div><details className="ps-advanced-settings"><summary>Prompt (optional)</summary><label><span>Complete prompt</span><textarea value={editingShot.prompt} onChange={event => setEditingShot(current => current && ({...current,prompt:event.target.value}))}/></label></details><div className="ps-form-grid"><label><span>Continuity</span><select value={editingShot.continuity} onChange={event => setEditingShot(current => current && ({...current,continuity:event.target.value as Shot['continuity']}))}><option value="hard_cut">Hard cut / independent</option><option value="sequential">Previous last frame</option></select></label><label><span>Aspect ratio</span><select value={editingShot.aspect_ratio} onChange={event => setEditingShot(current => current && ({...current,aspect_ratio:event.target.value}))}><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option></select></label><label><span>Turbo LoRA / profile</span><select value={editingShot.turbo_profile || 'v1'} disabled={editingShot.engine !== 'turbo'} onChange={event => setEditingTurboProfile(event.target.value as 'v1' | 'v4')}><option value="v1">Turbo v1</option><option value="v4">Turbo v4</option></select></label><label><span>Steps · whole number</span><input type="number" min="4" max={(editingShot.turbo_profile || 'v1') === 'v4' ? 8 : 12} step="1" value={editingShot.steps || 4} onChange={event => setEditingSteps(event.target.value)}/></label><label><span>Duration seconds · whole number</span><input type="number" min="1" max="15" step="1" value={editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,duration:Number(event.target.value),audio_duration:current.audio_duration || Number(event.target.value)}))}/></label><label><span>Megapixels</span><input type="number" min="0.1" max="2" step="0.05" value={editingShot.megapixels} onChange={event => setEditingShot(current => current && ({...current,megapixels:Number(event.target.value)}))}/></label></div><div className="ps-form-grid ps-shot-audio-controls"><label><span>Audio</span><select value={editingShot.audio_mode || 'silent'} onChange={event => setEditingShot(current => current && ({...current,audio_mode:event.target.value as Shot['audio_mode'],audio_source:event.target.value==='silent'?'song':current.audio_source}))}><option value="silent">Silent generation</option><option value="lip_sync" disabled={editingShot.mode === 'reference'}>Lip-sync · song or reference audio</option></select></label>{editingShot.audio_mode === 'lip_sync' && <label><span>Audio source</span><select value={editingShot.audio_source || 'song'} onChange={event => setEditingShot(current => current && ({...current,audio_source:event.target.value as Shot['audio_source']}))}><option value="song">Production song segment</option><option value="reference" disabled={!production.references?.some(reference => reference.kind === 'audio')}>Assigned audio reference</option></select></label>}</div>{editingShot.audio_mode === 'lip_sync' && <div className="ps-form-grid ps-shot-audio-timing"><label><span>Audio start (seconds)</span><input type="number" min="0" max="3600" step="0.1" value={editingShot.audio_start || 0} onChange={event => setEditingShot(current => current && ({...current,audio_start:Number(event.target.value)}))}/></label><label><span>Audio duration</span><input type="number" min="0.5" max="60" step="0.1" value={editingShot.audio_duration || editingShot.duration} onChange={event => setEditingShot(current => current && ({...current,audio_duration:Number(event.target.value)}))}/></label>{editingShot.audio_source === 'reference' && <label><span>Audio reference</span><select value={editingShot.audio_reference_id || ''} onChange={event => setEditingShot(current => current && ({...current,audio_reference_id:event.target.value || null}))}><option value="">Choose audio reference</option>{production.references?.filter(reference => reference.kind === 'audio').map(reference => <option key={reference.id} value={reference.id}>{reference.name}</option>)}</select></label>}</div>}<details className="ps-advanced-settings"><summary>Assigned references (optional)</summary><div className="ps-reference-checks"><span>Use assigned images as creative anchors for Codex and AGY to build this shot&apos;s opening scene. The generated scene frame is sent to I2V; original references are not sent directly. R2V is not used in production yet.</span><ShotReferenceAssignments shot={editingShot} references={production.references || []} onOpen={setPreviewReference}/>{production.references?.map(reference => <label key={reference.id}><input type="checkbox" checked={editingShot.reference_ids.includes(reference.id)} onChange={() => setEditingShot(current => current && ({...current,reference_ids:current.reference_ids.includes(reference.id)?current.reference_ids.filter(id=>id!==reference.id):[...current.reference_ids,reference.id]}))}/>{reference.kind}: {reference.name}</label>)}</div></details><div className="ps-create-actions"><button className="ps-secondary" onClick={closeShotEditor}>Cancel</button><button className="ps-primary" onClick={() => void saveShot()} disabled={busy}>Save shot</button></div></section></div>}
       {showShotPlan && production.shots?.length ? <ShotPlanModal shots={production.shots} references={production.references || []} active={!!active} autonomous={production.participation_mode === 'autonomous'} onClose={() => setShowShotPlan(false)} onEdit={openShotEditor} onRetry={shot => void retryShot(shot)} onOpenReference={setPreviewReference} /> : null}
       {previewReference && <div className="ps-modal-backdrop ps-reference-preview-backdrop" role="presentation" onClick={() => setPreviewReference(null)}><section className="ps-panel ps-reference-preview" role="dialog" aria-modal="true" aria-labelledby="reference-preview-title" onClick={event => event.stopPropagation()}><div className="ps-panel-title"><ImagePlus size={18}/><div><h3 id="reference-preview-title">{previewReference.name}</h3><p>{previewReference.kind.toUpperCase()} reference from this production</p></div><button type="button" aria-label="Close reference preview" onClick={() => setPreviewReference(null)}><X size={16}/></button></div><div className="ps-reference-preview-media">{previewReference.kind === 'image' && <img src={previewReference.url} alt={previewReference.name}/>} {previewReference.kind === 'video' && <video controls playsInline preload="metadata" src={previewReference.url}/>} {previewReference.kind === 'audio' && <audio controls src={previewReference.url}/>}</div><a className="ps-reference-preview-open" href={previewReference.url} target="_blank" rel="noreferrer">Open original file</a></section></div>}
     </>}

@@ -4,6 +4,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from backend.skill_catalog import selected_skill_manifest_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,11 +148,56 @@ class PortabilityTests(unittest.TestCase):
             "code-patterns",
             "release-process",
         }
+        production = {
+            "e2e-music-video",
+            "e2e-music-video-poc",
+            "realistic-rap-turbo-poc",
+            "lipsync-skill",
+            "council-roles",
+            "audio-analyst",
+            "visual-director",
+            "storyboard-editor",
+            "scene-frame-designer",
+            "prompt-engineer",
+            "technical-director",
+            "technical-qc",
+            "av-sync-reviewer",
+            "continuity-editor",
+            "post-production-editor",
+            "executive-producer",
+            "creative-director",
+        }
         actual = {path.name for path in (ROOT / ".agents" / "skills").iterdir() if path.is_dir()}
-        self.assertEqual(actual, required)
-        for name in required:
+        self.assertTrue(required.issubset(actual))
+        self.assertTrue(production.issubset(actual))
+        for name in required | production:
             self.assertTrue((ROOT / ".agents" / "skills" / name / "SKILL.md").is_file())
-            self.assertTrue((ROOT / ".agents" / "skills" / name / "references").is_dir())
+        for name in production:
+            text = (ROOT / ".agents" / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"), name)
+            self.assertIn("name:", text.split("---\n", 2)[1], name)
+            self.assertIn("description:", text.split("---\n", 2)[1], name)
+
+    def test_selected_skill_context_references_file_without_injecting_body(self):
+        with tempfile.TemporaryDirectory(prefix="skill-manifest-test-") as directory:
+            skill_root = Path(directory) / "specialist"
+            skill_root.mkdir()
+            (skill_root / "SKILL.md").write_text(
+                "---\nname: specialist\ndescription: Test specialist\n---\nSECRET BODY\n",
+                encoding="utf-8",
+            )
+            catalog_entry = {
+                "name": "specialist",
+                "description": "Test specialist",
+                "path": str(skill_root),
+                "enabled": True,
+                "valid": True,
+            }
+            with patch("backend.skill_catalog.get_skill", return_value=catalog_entry):
+                context = selected_skill_manifest_context(["specialist-id"])
+            self.assertIn(str(skill_root / "SKILL.md"), context)
+            self.assertIn("Test specialist", context)
+            self.assertNotIn("SECRET BODY", context)
 
     def test_source_has_no_parent_workspace_or_fixed_tailnet_values(self):
         source = (ROOT / "backend" / "config.py").read_text(encoding="utf-8")

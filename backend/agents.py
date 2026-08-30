@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable
 from PIL import Image, UnidentifiedImageError
 
 from .config import (AGENT_HEARTBEAT_SECONDS, AGENT_TIMEOUT_SECONDS, AGY_COMMAND, CODEX_COMMAND,
-                     AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, PRODUCTIONS, ROOT)
+                     AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, CODEX_GENERATED_IMAGES, PRODUCTIONS, ROOT)
 
 
 REFERENCE_ASPECT_RATIOS = {
@@ -34,6 +34,11 @@ CODEX_FALLBACK_MODELS = [
     {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
     {"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
 ]
+
+# The bridge runs local production work.  Keep unrelated global Codex MCP
+# servers out of these child processes; an enabled but unauthenticated server
+# can emit fatal startup noise and obscure the actual production activity.
+CODEX_DISABLED_MCP_SERVERS = ("runpod",)
 
 AGENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -123,6 +128,28 @@ AgentOutputCallback = Callable[[str, str], Awaitable[None]]
 AgentHeartbeatCallback = Callable[[float, float, str, str], Awaitable[None]]
 
 
+def _transport_event_label(line: str) -> str | None:
+    """Classify Codex's recoverable stream transport messages.
+
+    Codex emits these messages as either plain stderr or JSON error events.  A
+    transport retry is not a completed task error, but it is important live
+    activity because each retry can add a substantial delay.
+    """
+    normalized = str(line or "").casefold()
+    if not normalized:
+        return None
+    attempt = re.search(r"\b(?:reconnecting|retrying).*?(\d+\s*/\s*\d+)", normalized)
+    if "stream disconnected" in normalized and (
+        "websocket" in normalized or "os error 10053" in normalized
+    ):
+        if attempt:
+            return f"transport reconnecting ({attempt.group(1).replace(' ', '')})"
+        return "transport retry"
+    if "falling back" in normalized and ("https" in normalized or "http" in normalized) and "websocket" in normalized:
+        return "transport fallback to HTTPS"
+    return None
+
+
 def _event_label(channel: str, line: str) -> str:
     """Return a safe event label for timeout diagnostics.
 
@@ -133,6 +160,9 @@ def _event_label(channel: str, line: str) -> str:
     stripped = line.strip()
     if not stripped:
         return "no CLI output"
+    transport_label = _transport_event_label(stripped)
+    if transport_label:
+        return transport_label
     try:
         event = json.loads(stripped)
     except json.JSONDecodeError:
@@ -538,8 +568,11 @@ class AgentProcessManager:
 
     def has_active_process(self, production_id: str) -> bool:
         """Return whether this manager still owns an agent subprocess."""
-        process = self.processes.get(production_id)
-        return bool(process and process.returncode is None)
+        return any(
+            key == production_id or key.startswith(f"{production_id}:")
+            for key, process in self.processes.items()
+            if process.returncode is None
+        )
 
     def update_activity(self, production_id: str, **values: Any) -> None:
         activity = self.activities.get(production_id)
@@ -547,13 +580,24 @@ class AgentProcessManager:
             activity.update(values)
 
     def get_activity(self, production_id: str) -> dict[str, Any] | None:
-        activity = self.activities.get(production_id)
+        activity_key = production_id
+        activity = self.activities.get(activity_key)
+        if activity is None:
+            # Council tracks one provider process per seat using
+            # ``<production>:<seat>`` execution keys.  The legacy lookup is
+            # exact, which made the bridge report no live Codex/AGY activity
+            # while the subprocess was genuinely running.
+            activity_key, activity = next(
+                ((key, value) for key, value in self.activities.items()
+                 if key.startswith(f"{production_id}:")),
+                (production_id, None),
+            )
         if not activity:
             return None
         now = time.monotonic()
         started_at = float(activity.get("started_at") or now)
         last_output_at = float(activity.get("last_output_at") or started_at)
-        process = self.processes.get(production_id)
+        process = self.processes.get(activity_key)
         process_alive = bool(process and process.returncode is None)
         state = activity.get("state", "working")
         last_event = activity.get("last_event") or ""
@@ -671,10 +715,16 @@ class AgentProcessManager:
         be ignored.  ``taskkill /T`` is deliberately scoped to this tracked
         process PID so it cannot affect ComfyUI or another production.
         """
-        process = self.processes.get(production_id)
-        if not process:
+        processes = [
+            process for key, process in list(self.processes.items())
+            if key == production_id or key.startswith(f"{production_id}:")
+        ]
+        if not processes:
             return False
-        await self._terminate_process_tree(process)
+        await asyncio.gather(
+            *(self._terminate_process_tree(process) for process in processes),
+            return_exceptions=True,
+        )
         return True
 
     async def _run(
@@ -852,6 +902,7 @@ class AgentProcessManager:
         on_output: AgentOutputCallback | None = None,
         on_heartbeat: AgentHeartbeatCallback | None = None,
         extra_dirs: list[Path] | None = None,
+        execution_key: str | None = None,
     ) -> AgentResult:
         executable = _command_path(CODEX_COMMAND)
         if not executable:
@@ -870,6 +921,8 @@ class AgentProcessManager:
                        "--sandbox", "read-only",
                        "--skip-git-repo-check", "-C", str(PRODUCTIONS / production_id)]
         command.extend(["--model", model, "-c", f'model_reasoning_effort="{effort}"'])
+        for server in CODEX_DISABLED_MCP_SERVERS:
+            command.extend(["-c", f"mcp_servers.{server}.enabled=false"])
         for directory in extra_dirs or []:
             resolved = Path(directory).resolve()
             # ``codex exec resume`` has a narrower option set than a new
@@ -893,7 +946,7 @@ in Markdown fences or add commentary outside the JSON.
         recovered_session: str | None = None
         try:
             raw = await self._run(
-                production_id, command, prompt, PRODUCTIONS / production_id, on_output, on_heartbeat,
+                execution_key or production_id, command, prompt, PRODUCTIONS / production_id, on_output, on_heartbeat,
             )
         except AgentExecutionError as exc:
             recovered = _recover_structured_result_from_error(exc, session_id)
@@ -916,6 +969,7 @@ in Markdown fences or add commentary outside the JSON.
         on_output: AgentOutputCallback | None = None,
         on_heartbeat: AgentHeartbeatCallback | None = None,
         extra_dirs: list[Path] | None = None,
+        execution_key: str | None = None,
     ) -> AgentResult:
         executable = _command_path(AGY_COMMAND)
         if not executable:
@@ -944,7 +998,7 @@ in Markdown fences or add commentary outside the JSON.
         recovered_session: str | None = None
         try:
             raw = await self._run(
-                production_id, command, cwd=PRODUCTIONS / production_id,
+                execution_key or production_id, command, cwd=PRODUCTIONS / production_id,
                 on_output=on_output, on_heartbeat=on_heartbeat,
             )
         except AgentExecutionError as exc:
@@ -969,9 +1023,11 @@ in Markdown fences or add commentary outside the JSON.
         on_output: AgentOutputCallback | None = None,
         on_heartbeat: AgentHeartbeatCallback | None = None,
         extra_dirs: list[Path] | None = None,
+        execution_key: str | None = None,
     ) -> AgentResult:
+        activity_key = execution_key or production_id
         started_at = time.monotonic()
-        self.activities[production_id] = {
+        self.activities[activity_key] = {
             "participant": participant, "runtime": runtime, "model": model,
             "effort": effort, "state": "starting", "started_at": started_at,
             "last_output_at": started_at, "last_event": "",
@@ -979,7 +1035,8 @@ in Markdown fences or add commentary outside the JSON.
         try:
             if runtime == "codex":
                 result = await self.invoke_codex(
-                    production_id, prompt, model, effort, session_id, images, on_output, on_heartbeat, extra_dirs,
+                    production_id, prompt, model, effort, session_id, images, on_output, on_heartbeat,
+                    extra_dirs, execution_key=activity_key,
                 )
             elif runtime == "agy":
                 # AGY reads media by path from the production directory. Image
@@ -987,45 +1044,51 @@ in Markdown fences or add commentary outside the JSON.
                 if images:
                     prompt += "\n\nAttached image paths:\n" + "\n".join(str(path) for path in images)
                 result = await self.invoke_agy(
-                    production_id, prompt, model, effort, session_id, on_output, on_heartbeat, extra_dirs,
+                    production_id, prompt, model, effort, session_id, on_output, on_heartbeat,
+                    extra_dirs, execution_key=activity_key,
                 )
             else:
                 raise RuntimeError(f"Unsupported agent runtime: {runtime}")
             result.participant = participant
             return result
         finally:
-            self.activities.pop(production_id, None)
+            self.activities.pop(activity_key, None)
 
     async def generate_reference_image(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
         provider: str = "auto", agy_model: str | None = None, agy_effort: str | None = None,
         source_images: list[Path] | None = None, aspect_ratio: str = "16:9",
+        on_output: AgentOutputCallback | None = None,
+        on_heartbeat: AgentHeartbeatCallback | None = None,
+        preferred_provider: str | None = None,
     ) -> Path:
         """Generate a project-bound still with Codex ImageGen or AGY fallback."""
         if provider not in {"auto", "codex", "agy"}:
             raise ValueError("Image provider must be auto, codex, or agy")
         aspect_ratio = self._normalize_reference_aspect_ratio(aspect_ratio)
         failures: list[str] = []
-        if provider in {"auto", "codex"}:
+        if provider == "auto":
+            preferred = preferred_provider if preferred_provider in {"codex", "agy"} else "codex"
+            providers = [preferred, "agy" if preferred == "codex" else "codex"]
+        else:
+            providers = [provider]
+        for selected in providers:
             try:
-                return await self._generate_reference_image_codex(
-                    production_id, prompt, output_path, model, effort, source_images or [], aspect_ratio,
-                )
-            except Exception as exc:
-                if provider == "codex":
-                    raise
-                failures.append(f"Codex ImageGen: {exc}")
-        if provider in {"auto", "agy"}:
-            try:
+                if selected == "codex":
+                    return await self._generate_reference_image_codex(
+                        production_id, prompt, output_path, model, effort, source_images or [], aspect_ratio,
+                        on_output=on_output, on_heartbeat=on_heartbeat,
+                    )
                 return await self._generate_reference_image_agy(
                     production_id, prompt, output_path,
                     agy_model or AGY_DEFAULT_MODEL, agy_effort or AGY_DEFAULT_EFFORT,
                     source_images or [], aspect_ratio,
+                    on_output=on_output, on_heartbeat=on_heartbeat,
                 )
             except Exception as exc:
-                if provider == "agy":
+                if provider != "auto":
                     raise
-                failures.append(f"AGY ImageGen: {exc}")
+                failures.append(f"{selected.upper()} ImageGen: {exc}")
         raise RuntimeError("No image provider completed the reference still. " + " | ".join(failures))
 
     @staticmethod
@@ -1064,7 +1127,24 @@ in Markdown fences or add commentary outside the JSON.
         return target
 
     @staticmethod
-    def _image_snapshot(root: Path, excluded: list[Path]) -> dict[Path, tuple[int, int]]:
+    def _image_roots(root: Path, extra_roots: list[Path] | None = None) -> list[Path]:
+        roots = [root / "references", root / "agent-context"]
+        try:
+            roots.extend(path for path in root.iterdir() if path.is_file())
+        except OSError:
+            pass
+        known = {Path(item).resolve() for item in roots}
+        for extra_root in extra_roots or []:
+            resolved = Path(extra_root).resolve()
+            if resolved not in known:
+                roots.append(resolved)
+                known.add(resolved)
+        return roots
+
+    @classmethod
+    def _image_snapshot(
+        cls, root: Path, excluded: list[Path], extra_roots: list[Path] | None = None,
+    ) -> dict[Path, tuple[int, int]]:
         """Record image files before a provider starts writing.
 
         Image-capable CLIs do not all honor the requested filename. A snapshot
@@ -1072,13 +1152,8 @@ in Markdown fences or add commentary outside the JSON.
         reusing an older rejected attempt or a user-supplied reference.
         """
         excluded_paths = {path.resolve() for path in excluded}
-        roots = [root / "references", root / "agent-context"]
-        try:
-            roots.extend(path for path in root.iterdir() if path.is_file())
-        except OSError:
-            pass
         snapshot: dict[Path, tuple[int, int]] = {}
-        for candidate_root in roots:
+        for candidate_root in cls._image_roots(root, extra_roots):
             paths = [candidate_root] if candidate_root.is_file() else candidate_root.rglob("*") if candidate_root.is_dir() else []
             for path in paths:
                 if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -1093,16 +1168,14 @@ in Markdown fences or add commentary outside the JSON.
                     continue
         return snapshot
 
-    @staticmethod
-    def _image_candidates(root: Path, before: dict[Path, tuple[int, int]], started_at: int, target: Path) -> list[Path]:
+    @classmethod
+    def _image_candidates(
+        cls, root: Path, before: dict[Path, tuple[int, int]], started_at: int,
+        target: Path, extra_roots: list[Path] | None = None,
+    ) -> list[Path]:
         candidates: list[Path] = []
-        roots = [root / "references", root / "agent-context"]
-        try:
-            roots.extend(path for path in root.iterdir() if path.is_file())
-        except OSError:
-            pass
         seen: set[Path] = set()
-        for candidate_root in roots:
+        for candidate_root in cls._image_roots(root, extra_roots):
             paths = [candidate_root] if candidate_root.is_file() else candidate_root.rglob("*") if candidate_root.is_dir() else []
             for path in paths:
                 if not path.is_file() or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -1138,6 +1211,7 @@ in Markdown fences or add commentary outside the JSON.
     def _finalize_generated_image(
         self, target: Path, provider: str, production_root: Path,
         before: dict[Path, tuple[int, int]], started_at: int, aspect_ratio: str = "16:9",
+        extra_roots: list[Path] | None = None,
     ) -> Path | None:
         """Find and atomically normalize a provider result, if one exists."""
         if target.is_file() and target.stat().st_size:
@@ -1145,7 +1219,9 @@ in Markdown fences or add commentary outside the JSON.
                 return self._materialize_png(target, target, aspect_ratio)
             except (UnidentifiedImageError, OSError):
                 target.unlink(missing_ok=True)
-        for candidate in self._image_candidates(production_root, before, started_at, target):
+        for candidate in self._image_candidates(
+            production_root, before, started_at, target, extra_roots,
+        ):
             try:
                 with Image.open(candidate) as image:
                     image.verify()
@@ -1154,9 +1230,29 @@ in Markdown fences or add commentary outside the JSON.
                 continue
         return None
 
+    async def _finalize_generated_image_after_run(
+        self, target: Path, provider: str, production_root: Path,
+        before: dict[Path, tuple[int, int]], started_at: int,
+        aspect_ratio: str = "16:9", extra_roots: list[Path] | None = None,
+    ) -> Path | None:
+        """Materialize a provider result during a short bounded handoff window."""
+        deadline = time.monotonic() + 8.0
+        while True:
+            finalized = self._finalize_generated_image(
+                target, provider, production_root, before, started_at,
+                aspect_ratio, extra_roots,
+            )
+            if finalized:
+                return finalized
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.25)
+
     async def _generate_reference_image_codex(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
         source_images: list[Path], aspect_ratio: str = "16:9",
+        on_output: AgentOutputCallback | None = None,
+        on_heartbeat: AgentHeartbeatCallback | None = None,
     ) -> Path:
         executable = _command_path(CODEX_COMMAND)
         if not executable:
@@ -1166,12 +1262,18 @@ in Markdown fences or add commentary outside the JSON.
         if production_root not in target.parents:
             raise RuntimeError("Generated reference target is outside the production folder")
         target.parent.mkdir(parents=True, exist_ok=True)
-        before = self._image_snapshot(production_root, source_images)
+        # Codex ImageGen writes its raster result to CODEX_HOME/generated_images
+        # before the CLI agent tries to copy it into the production folder.
+        # Include that provider-owned directory in the handoff snapshot so the
+        # bridge can materialize the result itself if the nested shell runner
+        # times out during the copy step.
+        provider_roots = [CODEX_GENERATED_IMAGES]
+        before = self._image_snapshot(production_root, source_images, provider_roots)
         started_at = time.time_ns()
         target.unlink(missing_ok=True)
         task = f"""
-Use the installed imagegen skill and its default built-in image generation tool to create exactly one
-production reference still from the specification below. This is a project-bound raster asset.
+Use the built-in image-generation tool directly to create exactly one production
+reference still from the specification below. This is a project-bound raster asset.
 
 SPECIFICATION:
 {prompt}
@@ -1186,9 +1288,14 @@ Requirements:
 - Do not add visible text, logos, license-plate characters, captions, or watermarks unless the specification
   contains exact required text in quotation marks.
 - Inspect the generated image for obvious anatomy, identity, composition, and text defects.
-- Copy the selected final image to this exact PNG path: {target}
+- Do not use shell commands to copy or move the generated image. The bridge
+  owns the handoff and will materialize the newest valid provider image into
+  the production folder after this process returns.
+- Do not read a skill file or run a shell command for the image handoff; the
+  source images are already attached to this request.
 - Do not modify any other project file.
-- Finish only after that exact file exists.
+- Finish after the image-generation tool has produced the still and you have
+  completed your visual inspection; do not wait for a project-local copy.
 """.strip()
         command = [
             executable, "exec", "--json", "--sandbox", "workspace-write",
@@ -1196,19 +1303,25 @@ Requirements:
             "-C", str(production_root), "--model", model,
             "-c", f'model_reasoning_effort="{effort}"',
         ]
+        for server in CODEX_DISABLED_MCP_SERVERS:
+            command.extend(["-c", f"mcp_servers.{server}.enabled=false"])
         for image in source_images:
             command.extend(["--image", str(image)])
         command.append("-")
         run_error: Exception | None = None
         try:
-            await self._run(production_id, command, task, cwd=PRODUCTIONS / production_id)
+            await self._run(
+                production_id, command, task, cwd=PRODUCTIONS / production_id,
+                on_output=on_output, on_heartbeat=on_heartbeat,
+            )
         except Exception as exc:
             # Image generation can finish and write the file immediately before
             # the CLI connection closes. Verify the handoff before discarding
             # that useful result.
             run_error = exc
-        finalized = self._finalize_generated_image(
+        finalized = await self._finalize_generated_image_after_run(
             target, "Codex ImageGen", production_root, before, started_at, aspect_ratio,
+            provider_roots,
         )
         if finalized:
             return finalized
@@ -1219,6 +1332,8 @@ Requirements:
     async def _generate_reference_image_agy(
         self, production_id: str, prompt: str, output_path: Path, model: str, effort: str,
         source_images: list[Path], aspect_ratio: str = "16:9",
+        on_output: AgentOutputCallback | None = None,
+        on_heartbeat: AgentHeartbeatCallback | None = None,
     ) -> Path:
         executable = _command_path(AGY_COMMAND)
         if not executable:
@@ -1257,10 +1372,13 @@ Requirements:
         ]
         run_error: Exception | None = None
         try:
-            await self._run(production_id, command, cwd=PRODUCTIONS / production_id)
+            await self._run(
+                production_id, command, cwd=PRODUCTIONS / production_id,
+                on_output=on_output, on_heartbeat=on_heartbeat,
+            )
         except Exception as exc:
             run_error = exc
-        finalized = self._finalize_generated_image(
+        finalized = await self._finalize_generated_image_after_run(
             target, "AGY ImageGen", production_root, before, started_at, aspect_ratio,
         )
         if finalized:

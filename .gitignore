@@ -23,3 +23,5 @@ install-report.json
 *.sqlite3-wal
 *.sqlite3-shm
 *.bak
+.codex-remote-attachments/
+session_history/

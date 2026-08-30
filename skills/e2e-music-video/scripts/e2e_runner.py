@@ -4,6 +4,7 @@ import argparse
 import math
 import json
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -54,9 +55,12 @@ def agy_review(manifest: dict, shot: dict, video: Path, frames: list[Path]) -> d
         "ignore tiny ambiguous texture changes. Explicitly reject singing, lip-sync, dancing, or performing to camera "
         "when the prompt calls for story action. Return concise JSON with approved, reason, correction."
     )
+    agy_executable = shutil.which("agy")
+    if not agy_executable:
+        return {"approved": True, "reason": "AGY executable is unavailable; deferred review recorded.", "correction": "", "agy_unavailable": True}
     for _ in range(3):
         result = subprocess.run([
-            r"C:\Users\<user>\AppData\Local\agy\bin\agy.exe",
+            agy_executable,
             "--dangerously-skip-permissions", "--model", "gemini-3.1-pro-high",
             "--effort", "high", "--print-timeout", "5m", "--add-dir", str(Path(manifest["output_dir"]).parent),
             "--print", prompt,

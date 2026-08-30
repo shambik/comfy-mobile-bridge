@@ -171,6 +171,7 @@ def init_production_db() -> None:
                 generation_steps INTEGER NOT NULL DEFAULT 4,
                 generation_megapixels REAL NOT NULL DEFAULT 0.7,
                 generation_aspect_ratio TEXT NOT NULL DEFAULT '16:9',
+                generation_audio_mode TEXT NOT NULL DEFAULT 'auto',
                 generation_megapixel_rules_json TEXT NOT NULL DEFAULT '[]',
                 skills_json TEXT NOT NULL DEFAULT '[]',
                 approval_gates_json TEXT NOT NULL DEFAULT '[]',
@@ -240,6 +241,10 @@ def init_production_db() -> None:
                 audio_duration REAL,
                 audio_reference_id TEXT,
                 duration REAL NOT NULL,
+                editorial_start REAL,
+                editorial_end REAL,
+                trim_in REAL NOT NULL DEFAULT 0,
+                trim_out REAL NOT NULL DEFAULT 0,
                 megapixels REAL NOT NULL,
                 aspect_ratio TEXT NOT NULL DEFAULT '16:9',
                 steps INTEGER NOT NULL DEFAULT 6,
@@ -338,6 +343,8 @@ def init_production_db() -> None:
             db.execute("ALTER TABLE productions ADD COLUMN generation_megapixels REAL NOT NULL DEFAULT 0.7")
         if "generation_aspect_ratio" not in columns:
             db.execute("ALTER TABLE productions ADD COLUMN generation_aspect_ratio TEXT NOT NULL DEFAULT '16:9'")
+        if "generation_audio_mode" not in columns:
+            db.execute("ALTER TABLE productions ADD COLUMN generation_audio_mode TEXT NOT NULL DEFAULT 'auto'")
         if "generation_megapixel_rules_json" not in columns:
             db.execute("ALTER TABLE productions ADD COLUMN generation_megapixel_rules_json TEXT NOT NULL DEFAULT '[]'")
         if "intervention_requested" not in columns:
@@ -355,6 +362,14 @@ def init_production_db() -> None:
             db.execute("ALTER TABLE production_shots ADD COLUMN audio_duration REAL")
         if "audio_reference_id" not in shot_columns:
             db.execute("ALTER TABLE production_shots ADD COLUMN audio_reference_id TEXT")
+        if "editorial_start" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN editorial_start REAL")
+        if "editorial_end" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN editorial_end REAL")
+        if "trim_in" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN trim_in REAL NOT NULL DEFAULT 0")
+        if "trim_out" not in shot_columns:
+            db.execute("ALTER TABLE production_shots ADD COLUMN trim_out REAL NOT NULL DEFAULT 0")
 
 
 def ensure_agent_settings(defaults: dict[str, str]) -> None:
@@ -424,6 +439,7 @@ def _decode_generation_fields(item: dict[str, Any]) -> dict[str, Any]:
         }]
     item["generation_megapixel_rules"] = parsed_rules
     item["generation_aspect_ratio"] = item.get("generation_aspect_ratio") or "16:9"
+    item["generation_audio_mode"] = item.get("generation_audio_mode") or "auto"
     return item
 
 
@@ -469,9 +485,9 @@ def create_production(values: dict[str, Any]) -> dict[str, Any]:
                (id,title,pipeline,status,stage,participation_mode,continuity_mode,
                 concept,lyrics,song_path,song_name,codex_runtime,codex_model,codex_effort,
                 agy_runtime,agy_model,agy_effort,generation_turbo_profile,generation_steps,
-                generation_megapixels,generation_aspect_ratio,generation_megapixel_rules_json,
+                generation_megapixels,generation_aspect_ratio,generation_audio_mode,generation_megapixel_rules_json,
                 skills_json,approval_gates_json,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 production_id, values["title"], values.get("pipeline", "music_video_v1"),
                 "draft", "intake", values["participation_mode"], values["continuity_mode"],
@@ -481,6 +497,7 @@ def create_production(values: dict[str, Any]) -> dict[str, Any]:
                 values.get("generation_turbo_profile", "v1"), values.get("generation_steps", 4),
                 values.get("generation_megapixels", 0.7),
                 values.get("generation_aspect_ratio", "16:9"),
+                values.get("generation_audio_mode", "auto"),
                 _json(values.get("generation_megapixel_rules", DEFAULT_GENERATION_MP_RULES)),
                 _json(values.get("skills", [])), _json(values.get("approval_gates", [])), now, now,
             ),
@@ -693,6 +710,7 @@ def recover_productions(
     exclude_ids: set[str] | None = None,
     *,
     reason: str = "Recovered after bridge restart",
+    pipeline: str | None = None,
 ) -> list[str]:
     """Pause productions whose controller is no longer active.
 
@@ -707,15 +725,18 @@ def recover_productions(
     """
     excluded = {str(value) for value in (exclude_ids or set()) if value}
     status_clause = "status IN ('running','pausing','retrying','stopping')"
-    select_params: tuple[str, ...] = ()
+    select_values: list[str] = []
+    if pipeline:
+        status_clause += " AND pipeline=?"
+        select_values.append(str(pipeline))
     if excluded:
         placeholders = ",".join("?" for _ in excluded)
         status_clause += f" AND id NOT IN ({placeholders})"
-        select_params = tuple(excluded)
+        select_values.extend(sorted(excluded))
 
     with connect() as db:
         rows = db.execute(
-            f"SELECT id,intervention_requested FROM productions WHERE {status_clause}", select_params,
+            f"SELECT id,intervention_requested FROM productions WHERE {status_clause}", tuple(select_values),
         ).fetchall()
         now = now_iso()
         for row in rows:
@@ -764,13 +785,15 @@ def replace_shot_plan(production_id: str, shots: list[dict[str, Any]]) -> list[d
                 """INSERT INTO production_shots
                    (id,production_id,shot_index,title,prompt,mode,continuity,
                     audio_mode,audio_source,audio_start,audio_duration,audio_reference_id,duration,
-                    megapixels,aspect_ratio,steps,engine,turbo_profile,reference_ids_json,status,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)""",
+                    editorial_start,editorial_end,trim_in,trim_out,megapixels,aspect_ratio,steps,engine,
+                    turbo_profile,reference_ids_json,status,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'planned',?,?)""",
                 (
                     uuid.uuid4().hex, production_id, index, shot["title"], shot["prompt"], shot["mode"],
                     shot.get("continuity", "hard_cut"), shot.get("audio_mode", "silent"),
                     shot.get("audio_source", "song"), shot.get("audio_start", 0), shot.get("audio_duration"),
-                    shot.get("audio_reference_id"), shot["duration"], shot["megapixels"],
+                    shot.get("audio_reference_id"), shot["duration"], shot.get("editorial_start"),
+                    shot.get("editorial_end"), shot.get("trim_in", 0), shot.get("trim_out", 0), shot["megapixels"],
                     shot.get("aspect_ratio", "16:9"), shot.get("steps", 6), shot.get("engine", "turbo"),
                     shot.get("turbo_profile", "v1"), _json(shot.get("reference_ids", [])), now, now,
                 ),

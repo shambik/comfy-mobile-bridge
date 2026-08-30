@@ -1,0 +1,81 @@
+{
+  "execution_profile": {
+    "aspect_ratio": "1:1",
+    "target_megapixels": 1,
+    "raw_generation_duration": 5
+  },
+  "shots": [
+    {
+      "id": "S01",
+      "section": "verse",
+      "editorial_start": 0,
+      "editorial_end": 5,
+      "editorial_duration": 5,
+      "model_audio_start": 0,
+      "model_audio_end": 5,
+      "model_audio_duration": 5,
+      "generation_duration": 5,
+      "overlap_seconds": 0,
+      "trim_in_seconds": 0,
+      "trim_out_seconds": 0,
+      "model": "turbo_lipsync",
+      "performance_owner": "main_mc",
+      "opening_frame_path": "references/frames/S01_opening.png",
+      "previous_shot_id": null,
+      "next_shot_id": "S02",
+      "transition_in": "cold_open",
+      "transition_out": "hard_cut_with_overlap",
+      "artifact_status": "user_approved",
+      "approved_artifact_id": "S01_attempt_02",
+      "raw_clip": "shots/S01/attempt_02/S01_attempt_02.mp4"
+    },
+    {
+      "id": "S02",
+      "section": "phantom_chorus",
+      "editorial_start": 5,
+      "editorial_end": 10,
+      "editorial_duration": 5,
+      "model_audio_start": 4,
+      "model_audio_end": 9,
+      "model_audio_duration": 5,
+      "generation_duration": 5,
+      "overlap_seconds": 1,
+      "trim_in_seconds": 1,
+      "trim_out_seconds": 0,
+      "model": "turbo_lipsync",
+      "performance_owner": "phantom",
+      "opening_frame_path": "references/frames/S02_opening.png",
+      "previous_shot_id": "S01",
+      "next_shot_id": null,
+      "transition_in": "hard_cut_with_incoming_overlap_lead_in",
+      "transition_out": "end_of_test",
+      "artifact_status": "user_approved",
+      "approved_artifact_id": "S02_attempt_01",
+      "raw_clip": "shots/S02/attempt_01/S02_attempt_01.mp4"
+    }
+  ],
+  "clips": [
+    {
+      "id": "S01",
+      "artifact_status": "user_approved",
+      "gap_fill_method": "none"
+    },
+    {
+      "id": "S02",
+      "artifact_status": "user_approved",
+      "gap_fill_method": "use_incoming_overlap_lead_in"
+    }
+  ],
+  "approval_ledger": {
+    "S01_attempt_02": {
+      "shot_id": "S01",
+      "status": "user_approved",
+      "path": "shots/S01/attempt_02/S01_attempt_02.mp4"
+    },
+    "S02_attempt_01": {
+      "shot_id": "S02",
+      "status": "user_approved",
+      "path": "shots/S02/attempt_01/S02_attempt_01.mp4"
+    }
+  }
+}

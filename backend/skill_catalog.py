@@ -162,6 +162,13 @@ def remove_skill(skill_id: str, mode: str) -> None:
 
 
 def selected_skill_context(skill_ids: list[str], limit: int = 80_000) -> str:
+    """Return full skill bodies for legacy callers.
+
+    New production paths must use :func:`selected_skill_manifest_context`
+    instead.  Keeping this helper preserves the external skill-catalog API
+    while preventing the bridge from copying large instruction files into
+    every agent turn.
+    """
     chunks: list[str] = []
     used = 0
     for skill_id in skill_ids:
@@ -179,6 +186,41 @@ def selected_skill_context(skill_ids: list[str], limit: int = 80_000) -> str:
         excerpt = text[:remaining]
         chunks.append(f"\n## Enabled skill: {skill['name']}\n{excerpt}")
         used += len(excerpt)
+    return "\n".join(chunks)
+
+
+def _project_skill_file(skill: dict[str, Any]) -> Path:
+    """Resolve a catalog entry to its project-native skill file when present."""
+    source = Path(str(skill.get("path") or "")).resolve()
+    native = ROOT / ".agents" / "skills" / source.name / "SKILL.md"
+    if native.is_file():
+        return native.resolve()
+    return (source / "SKILL.md").resolve()
+
+
+def selected_skill_manifest_context(skill_ids: list[str]) -> str:
+    """Describe selected skills without injecting their instruction bodies.
+
+    Codex and AGY receive the project-native file path and are instructed to
+    read the selected skill when it is relevant.  This keeps skill selection
+    user-controlled while avoiding a large, repeated prompt payload on every
+    resumed or independent turn.
+    """
+    chunks: list[str] = [
+        "Project-scoped skills are installed under the repository's .agents/skills directory.",
+        "Only the entries below are enabled for this production; do not activate unselected specialist skills.",
+    ]
+    for skill_id in skill_ids:
+        skill = get_skill(skill_id)
+        if not skill or not skill["enabled"] or not skill["valid"]:
+            continue
+        path = _project_skill_file(skill)
+        chunks.append(
+            f"- {skill['name']}: {skill.get('description') or 'Selected production skill.'}\n"
+            f"  Read this file before acting when the task matches it: {path}"
+        )
+    if len(chunks) == 2:
+        chunks.append("- None selected.")
     return "\n".join(chunks)
 
 

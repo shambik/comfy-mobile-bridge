@@ -1,84 +1,50 @@
 ---
 name: council-roles
-description: Bundled role-skill package for the multi-agent production council. Contains specialist and supervisor role definitions that scope each agent seat's context, responsibilities, deliverables, and boundaries. Roles are pipeline-agnostic and work across music videos, short films, commercials, trailers, and any media production built on ComfyUI generation.
+description: Index for reusable specialist and supervisor skills used by a media-production council. Use when configuring, auditing, or extending role-scoped production work; pipeline sequencing remains the controller's responsibility.
 ---
 
-# Council Roles — Skill Package
+# Council Roles
 
-This package contains the role skills that power the multi-agent
-production council. Each role is assigned to an agent seat and controls
-what the agent sees, does, and delivers.
+This package groups reusable media-production roles. The package itself is not an assignable production role. A production may use one solo seat or several seats. Assign one or more role entries from `manifest.json` to each seat and load only the corresponding active role `SKILL.md` for that seat's current task.
 
-## Package contents
+## Operating contract
 
-### Specialist roles
+- The controller owns state transitions, retries, dependencies, gates, and artifact paths.
+- Role skills guide analysis or review; they do not advance the workflow.
+- One seat may perform several roles across separate role-scoped turns. Record the active role on every deliverable and never represent a solo self-review as independent multi-agent consensus.
+- Inputs arrive as versioned deliverables and artifact IDs selected by a tested context policy.
+- Every role returns the canonical council envelope requested by the controller. Role-specific content belongs in `deliverable`.
+- Media claims require evidence from files actually inspected by a seat with verified capability.
+- User references are optional. When absent or partial, the assigned visual roles must design and jointly review the missing reference set before shot-scene frames are created.
+- Prepare the complete planning-reference bundle and every shot-specific scene frame before releasing any video-generation task. Never alternate one reference and one video while later scene references are still pending.
+- Editorial boundaries may be fractional, but every submitted generation duration must be a positive whole number of seconds.
+- A delivered user intervention is a binding production constraint for the affected task versions; acknowledge it and revise the relevant deliverable instead of silently continuing the stale plan.
+- The user remains the final authority.
 
-Specialists do focused work. They receive only the data slice their
-domain requires and produce structured deliverables. They do not
-approve or reject the production — that is the supervisor's job.
+## Specialist roles
 
-| Role | Directory | Domain |
-|---|---|---|
-| Audio Analyst | `roles/audio-analyst/` | Song/audio structure, timing, BPM, sections, vocal analysis (first vocal onsets) |
-| Visual Director | `roles/visual-director/` | Treatment, visual language, character/location bible, composition |
-| Prompt Engineer | `roles/prompt-engineer/` | Generation prompts, camera direction, action choreography, lip-sync vs non-lip-sync decisions |
-| Technical Director| `roles/technical-director/`| Generation math, integer durations, overlap/trim, legal resolutions (multiples of 32) |
-| Technical QC | `roles/technical-qc/` | Frame defect detection, anatomy, artifacts, text bleed |
-| Continuity Editor | `roles/continuity-editor/` | Cross-shot flow, identity consistency, wardrobe, props |
-| Post-Production Editor | `roles/post-production-editor/` | Trimming model lead-ins, concatenating clips, syncing master audio |
+| Role | Purpose |
+|---|---|
+| Audio Analyst | Decode audio, map structure, vocals, lyrics, energy, and edit points |
+| Visual Director | Define treatment and reusable character/location/prop bibles |
+| Storyboard Editor | Convert treatment and timing into an editorial shot plan |
+| Scene Frame Designer | Compose actual opening and optional closing frames from approved anchors |
+| Prompt Engineer | Write model-specific prompts for an already planned shot and its scene frames |
+| Technical Director | Resolve integer generation windows, overlap/trim, MP, and validated job parameters |
+| Technical QC | Inspect generated media for visible rendering/physics/text defects |
+| A/V Sync Reviewer | Inspect source audio and generated video for lip-sync and timing quality |
+| Continuity Editor | Review identity, action, camera, and spatial flow across shots |
+| Post-Production Editor | Trim, assemble, mix audio according to policy, and validate the master |
 
-### Supervisor roles
+## Supervisor roles
 
-Supervisors review structured deliverables from specialists. They
-catch cross-domain conflicts, challenge weak reasoning, and make
-approval or escalation decisions. They do not redo specialist work.
+| Role | Purpose |
+|---|---|
+| Executive Producer | Review feasibility, cross-domain consistency, constraints, and escalation needs |
+| Creative Director | Review narrative, emotion, style, and audience impact |
 
-| Role | Directory | Domain |
-|---|---|---|
-| Executive Producer | `roles/executive-producer/` | Cross-domain coherence, budget, feasibility, final authority |
-| Creative Director | `roles/creative-director/` | Narrative quality, emotional arc, brand, audience |
+## Routing
 
-## How roles work
+The application reads `manifest.json` for role metadata. A role's `SKILL.md` is instructions for the assigned agent, not a replacement for the manifest, response schema, or context builder.
 
-1. Each agent seat in a production is assigned exactly one role skill.
-2. The orchestrator uses the role skill to build a scoped context for
-   that seat — only the data the role needs.
-3. The role skill defines the structured output schema the seat must
-   return.
-4. Specialists produce deliverables; supervisors review them.
-5. A seat without a role skill receives the full production context
-   (legacy behavior).
-
-## Pipeline agnosticism
-
-These roles are deliberately not tied to music videos. The same
-Audio Analyst role works whether the production is a music video, a
-podcast visualization, a commercial with a jingle, or a film trailer
-with a score. The orchestrator maps pipeline-specific stages to
-role-agnostic task types:
-
-| Pipeline stage | Task type | Primary role |
-|---|---|---|
-| Song/audio analysis | `media_analysis` | Audio Analyst |
-| Treatment development | `creative_proposal` | Visual Director |
-| Reference development | `asset_planning` | Visual Director |
-| Prompt writing | `generation_spec` | Prompt Engineer |
-| Shot generation QC | `media_inspection` | Technical QC |
-| Cross-shot review | `continuity_check` | Continuity Editor |
-| Stage approval | `supervisor_review` | Executive Producer / Creative Director |
-
-## Assigning roles in the GUI
-
-When a user adds an agent seat in the production configurator, they
-select a role from a dropdown populated by this package. The role
-determines:
-- Which capability checkboxes are pre-checked
-- Which context slice the seat receives
-- What model tier is recommended (shown as a hint, not enforced)
-- What structured output the seat must return
-
-## Extensibility
-
-Custom roles can be added by placing a new directory under `roles/`
-with a `SKILL.md` following the same frontmatter and section structure.
-The skill catalog discovers them automatically on the next scan.
+Do not infer capabilities from a role name or user checkbox. The controller must intersect role requirements with verified runtime/model/tool capabilities.

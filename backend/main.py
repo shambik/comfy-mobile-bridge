@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import ctypes
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -11,6 +13,7 @@ import traceback
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
+from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +21,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Response, Uploa
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
@@ -38,11 +41,19 @@ from .library import (assign_asset, create_folder, create_project, delete_folder
                       validate_location)
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog, process_manager
+from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
+from .council.capabilities import verify_council_config
+from .council.contracts import COUNCIL_REQUIRED_ROLE_IDS, CouncilConfig, role_manifest
+from .council.controller import council_controller
+from .council.db import (add_intervention as add_council_intervention,
+                         council_shot_prompt_projection, council_snapshot, get_intervention,
+                         init_council_db, retarget_unstarted_tasks, save_config as save_council_config,
+                         update_intervention)
 from .production import production_orchestrator
 from .production_db import (add_config_revision, add_event, add_message, add_reference,
                             create_production, create_shot_attempt, delete_reference, ensure_agent_settings,
                             get_agent_settings, get_artifact, get_attempt_for_production,
-                            get_production, get_reference, init_production_db, list_events,
+                            get_production, get_reference, init_production_db, list_decisions, list_events,
                             import_completed_jobs, list_productions, list_references, list_shots,
                             normalize_production_generation, replace_shot_plan, resolve_decision, update_agent_settings,
                             update_production, update_shot, update_shot_attempt)
@@ -52,6 +63,7 @@ from .skill_catalog import (discover_skills, get_skill, install_skill_zip,
 from .worker import QueueWorker
 
 worker = QueueWorker()
+logger = logging.getLogger(__name__)
 
 
 def fortnite_running() -> bool:
@@ -82,13 +94,235 @@ def stop_fortnite() -> bool:
         return False
 
 
-def lock_windows() -> bool:
-    if os.name != "nt":
-        return False
+_INVALID_SESSION_ID = 0xFFFFFFFF
+_CREATE_NO_WINDOW = 0x08000000
+_WTS_ACTIVE = 0
+_WTS_SESSION_INFO_LEVEL = 1
+_TASK_RUN_USE_SESSION_ID = 0x4
+
+
+def _win32_error(operation: str) -> str:
+    code = ctypes.get_last_error()
     try:
-        return bool(ctypes.windll.user32.LockWorkStation())
-    except (AttributeError, OSError):
-        return False
+        message = ctypes.WinError(code).strerror or "unknown error"
+    except (OSError, ValueError):
+        message = "unknown error"
+    return f"{operation} (WinError {code}: {message})"
+
+
+def _windows_dll(name: str):
+    return ctypes.WinDLL(name, use_last_error=True)
+
+
+def _active_console_session_id() -> int | None:
+    kernel32 = _windows_dll("kernel32")
+    get_session = kernel32.WTSGetActiveConsoleSessionId
+    get_session.argtypes = []
+    get_session.restype = wintypes.DWORD
+    session_id = int(get_session())
+    return None if session_id == _INVALID_SESSION_ID else session_id
+
+
+class _WTSSessionInfo(ctypes.Structure):
+    _fields_ = [
+        ("session_id", wintypes.DWORD),
+        ("station_name", wintypes.LPWSTR),
+        ("state", wintypes.DWORD),
+    ]
+
+
+def _active_interactive_session_ids() -> list[int]:
+    """Return active, non-service Windows sessions.
+
+    The bridge may run in Session 0, while the desktop user is in a console or
+    Remote Desktop session.  WTS enumeration is the authoritative way to see
+    all currently active interactive sessions; the console-session API alone
+    does not cover an RDP-only desktop.
+    """
+    try:
+        wtsapi32 = _windows_dll("wtsapi32")
+        enumerate_sessions = wtsapi32.WTSEnumerateSessionsW
+        enumerate_sessions.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(ctypes.POINTER(_WTSSessionInfo)),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        enumerate_sessions.restype = wintypes.BOOL
+        free_memory = wtsapi32.WTSFreeMemory
+        free_memory.argtypes = [wintypes.LPVOID]
+        free_memory.restype = None
+
+        sessions = ctypes.POINTER(_WTSSessionInfo)()
+        count = wintypes.DWORD()
+        if not enumerate_sessions(None, 0, _WTS_SESSION_INFO_LEVEL,
+                                  ctypes.byref(sessions), ctypes.byref(count)):
+            return []
+        try:
+            return sorted({
+                int(sessions[index].session_id)
+                for index in range(int(count.value))
+                if int(sessions[index].state) == _WTS_ACTIVE
+                and int(sessions[index].session_id) > 0
+            })
+        finally:
+            if sessions:
+                free_memory(sessions)
+    except (AttributeError, OSError, TypeError, ValueError):
+        logger.debug("Unable to enumerate active Windows sessions", exc_info=True)
+        return []
+
+
+def _process_session_id(pid: int) -> int | None:
+    kernel32 = _windows_dll("kernel32")
+    process_to_session = kernel32.ProcessIdToSessionId
+    process_to_session.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    process_to_session.restype = wintypes.BOOL
+    session_id = wintypes.DWORD()
+    if not process_to_session(wintypes.DWORD(pid), ctypes.byref(session_id)):
+        return None
+    return int(session_id.value)
+
+
+def _target_interactive_session_id() -> int | None:
+    """Select the desktop session that should receive a lock request.
+
+    Prefer the bridge's own session when it is active and interactive.  When
+    the bridge is in Session 0, prefer the active physical console, then an
+    active RDP session.  If session enumeration is unavailable, the two
+    single-session APIs remain safe fallbacks.
+    """
+    active_sessions = _active_interactive_session_ids()
+    current_session = _process_session_id(os.getpid())
+    if current_session is not None and current_session > 0 and (
+        not active_sessions or current_session in active_sessions
+    ):
+        return current_session
+
+    console_session = _active_console_session_id()
+    if console_session is not None and console_session > 0 and (
+        not active_sessions or console_session in active_sessions
+    ):
+        return console_session
+
+    if active_sessions:
+        return active_sessions[0]
+    if current_session is not None and current_session > 0:
+        return current_session
+    if console_session is not None and console_session > 0:
+        return console_session
+    return None
+
+
+_INTERACTIVE_LOCK_TASK_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$targetSessionId = __H3_TARGET_SESSION_ID__
+if ($targetSessionId -le 0) { throw 'An interactive session ID is required' }
+$taskName = 'H3BridgeLock_' + [Guid]::NewGuid().ToString('N')
+$folder = $null
+try {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $folder = $service.GetFolder('\')
+    $definition = $service.NewTask(0)
+    $definition.RegistrationInfo.Description = 'H3 Bridge temporary interactive workstation lock'
+    $definition.Principal.LogonType = 3
+    $definition.Principal.RunLevel = 1
+    $definition.Settings.Enabled = $true
+    $definition.Settings.Hidden = $true
+    $definition.Settings.StartWhenAvailable = $true
+    $definition.Settings.AllowDemandStart = $true
+    $trigger = $definition.Triggers.Create(1)
+    $trigger.StartBoundary = (Get-Date).ToString('s')
+    $trigger.Enabled = $true
+    $action = $definition.Actions.Create(0)
+    $action.Path = Join-Path $env:WINDIR 'System32\rundll32.exe'
+    $action.Arguments = 'user32.dll,LockWorkStation'
+    $registered = $folder.RegisterTaskDefinition($taskName, $definition, 6, $null, $null, 3, $null)
+    [void]$registered.RunEx($null, 4, $targetSessionId, $null)
+    Start-Sleep -Milliseconds 1000
+    [Console]::WriteLine("started:$targetSessionId")
+} finally {
+    if ($folder -and $taskName) {
+        try { $folder.DeleteTask($taskName, 0) } catch { }
+    }
+}
+"""
+
+
+def _powershell_executable() -> str:
+    system_root = os.environ.get("WINDIR", r"C:\Windows")
+    bundled = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(bundled) if bundled.is_file() else "powershell.exe"
+
+
+def _launch_interactive_lock_task(session_id: int) -> tuple[bool, str]:
+    """Run LockWorkStation through Task Scheduler's interactive token.
+
+    The bridge can be launched in Session 0 when started by a service or a
+    detached launcher. CreateProcessWithTokenW looks successful in that case,
+    but Windows deliberately keeps the child in the caller's session. A
+    one-shot Task Scheduler task with TASK_LOGON_INTERACTIVE_TOKEN and
+    TASK_RUN_USE_SESSION_ID dispatches the request to the selected desktop.
+    """
+    try:
+        target_session = int(session_id)
+    except (TypeError, ValueError):
+        return False, f"Invalid interactive Windows session ID: {session_id!r}"
+    if target_session <= 0:
+        return False, "An interactive Windows session ID greater than zero is required."
+    script = _INTERACTIVE_LOCK_TASK_SCRIPT.replace(
+        "__H3_TARGET_SESSION_ID__", str(target_session), 1
+    )
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    try:
+        result = subprocess.run(
+            [
+                _powershell_executable(),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Interactive Windows lock dispatch failed: {exc}"
+    if result.returncode != 0:
+        detail = " ".join((result.stderr or result.stdout or "").split())
+        if len(detail) > 400:
+            detail = detail[:397] + "..."
+        suffix = f": {detail}" if detail else ""
+        return False, f"Interactive Windows lock task failed (exit code {result.returncode}){suffix}"
+    return True, f"Windows lock request dispatched to the active desktop session {session_id}."
+
+
+def lock_windows() -> tuple[bool, str]:
+    if os.name != "nt":
+        return False, "Windows workstation locking is only available on Windows."
+    try:
+        active_session = _target_interactive_session_id()
+        current_session = _process_session_id(os.getpid())
+        if active_session is None:
+            return False, "No active interactive Windows session is available."
+        if current_session == active_session:
+            user32 = _windows_dll("user32")
+            lock_workstation = user32.LockWorkStation
+            lock_workstation.argtypes = []
+            lock_workstation.restype = wintypes.BOOL
+            if lock_workstation():
+                return True, f"Windows lock request initiated in session {active_session}."
+            return False, _win32_error("LockWorkStation")
+        return _launch_interactive_lock_task(active_session)
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        return False, f"Windows lock dispatch failed: {exc}"
 
 
 @asynccontextmanager
@@ -96,6 +330,7 @@ async def lifespan(app: FastAPI):
     init_db()
     init_library_db()
     init_production_db()
+    init_council_db()
     ensure_agent_settings({
         "codex_runtime": CODEX_DEFAULT_RUNTIME,
         "codex_model": CODEX_DEFAULT_MODEL, "codex_effort": CODEX_DEFAULT_EFFORT,
@@ -126,8 +361,11 @@ async def lifespan(app: FastAPI):
     discover_skills()
     worker.start()
     production_orchestrator.bind_queue(worker)
+    council_controller.bind_queue(worker)
     production_orchestrator.start()
+    council_controller.start()
     yield
+    await council_controller.stop()
     await production_orchestrator.stop()
     await worker.stop()
 
@@ -203,6 +441,7 @@ class ProductionSettingsBody(BaseModel):
     generation_steps: int | None = None
     generation_megapixels: float | None = None
     generation_aspect_ratio: str | None = None
+    generation_audio_mode: str | None = None
     generation_megapixel_rules: list[dict[str, Any]] | None = None
     codex_runtime: str | None = None
     codex_model: str | None = None
@@ -211,7 +450,12 @@ class ProductionSettingsBody(BaseModel):
     agy_model: str | None = None
     agy_effort: str | None = None
     skills: list[str] | None = None
+    council_config: CouncilConfig | None = None
     reason: str = ""
+
+
+class CouncilConfigBody(BaseModel):
+    config: CouncilConfig
 
 
 class ShotEditBody(BaseModel):
@@ -393,9 +637,11 @@ async def stop_fortnite_route(request: Request):
 @app.post("/api/system/lock")
 async def lock_system(request: Request):
     require_csrf(request)
-    if not await asyncio.to_thread(lock_windows):
-        raise HTTPException(503, "Windows could not be locked")
-    return {"locked": True}
+    locked, detail = await asyncio.to_thread(lock_windows)
+    if not locked:
+        logger.error("Windows lock request failed: %s", detail)
+        raise HTTPException(503, detail)
+    return {"locked": True, "detail": detail}
 
 
 @app.get("/api/jobs")
@@ -614,8 +860,32 @@ async def productions():
     return {
         "productions": list_productions(),
         "active_production": production_orchestrator.current_production,
-        "active_productions": production_orchestrator.active_productions,
+        "active_productions": sorted(set(production_orchestrator.active_productions + council_controller.active_productions)),
     }
+
+
+@app.get("/api/council/roles")
+async def council_roles():
+    # Model discovery has its own cached endpoint. Keeping this endpoint to the
+    # static role manifest avoids querying and returning the same catalog twice
+    # while the production form loads.
+    return {"manifest": role_manifest(),
+            "required_role_ids": list(COUNCIL_REQUIRED_ROLE_IDS)}
+
+
+@app.post("/api/council/validate")
+async def validate_council_configuration(request: Request, body: CouncilConfigBody):
+    require_csrf(request)
+    validation = await asyncio.to_thread(verify_council_config, body.config)
+    return validation.model_dump()
+
+
+@app.get("/api/council/productions/{production_id}")
+async def council_production_snapshot(production_id: str):
+    production = get_production(production_id, private=True)
+    if not production or production.get("pipeline") != COUNCIL_PIPELINE:
+        raise HTTPException(404, "Council production not found")
+    return council_snapshot(production_id)
 
 
 def production_with_generation_progress(production: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -626,7 +896,19 @@ def production_with_generation_progress(production: dict[str, Any] | None) -> di
     # alive.  The in-memory orchestrator/process manager is the source of
     # truth for controller activity; this also lets the room show recovery
     # instead of replaying the last stale agent message.
-    production["controller_active"] = production_orchestrator.has_active_work(production["id"])
+    is_council = production.get("pipeline") == COUNCIL_PIPELINE
+    production["controller_active"] = (
+        council_controller.has_active_work(production["id"]) if is_council
+        else production_orchestrator.has_active_work(production["id"])
+    )
+    if is_council:
+        production["council"] = council_snapshot(production["id"])
+        council = production["council"] or {}
+        production["shots"] = council_shot_prompt_projection(
+            production["id"], production.get("shots", []),
+            deliverables=council.get("deliverables"), tasks=council.get("tasks"),
+        )
+        return production
     production["agent_activity"] = process_manager.get_activity(production["id"])
     current_job_id = production_orchestrator.current_jobs.get(production["id"])
     if not current_job_id:
@@ -690,13 +972,22 @@ async def update_production_settings_route(
     production = get_production(production_id, private=True)
     if not production:
         raise HTTPException(404, "Production not found")
-    if production["status"] not in {"draft", "paused", "stopped", "failed", "awaiting_user"}:
-        raise HTTPException(409, "Pause the production before changing its configuration")
-    values = {key: value for key, value in body.model_dump(exclude={"reason"}).items() if value is not None}
+    supplied_values = {
+        key: value for key, value in body.model_dump(exclude={"reason", "council_config"}).items()
+        if value is not None
+    }
+    # Configuration is intentionally live-editable. A provider process that
+    # already started keeps the model/effort it was launched with; queued,
+    # waiting, and subsequent turns use the newly saved revision. Do not force
+    # users to pause a production merely to change an agent model or thinking
+    # level.
+    values = supplied_values
     if values.get("participation_mode") not in {None, "autonomous", "interactive"}:
         raise HTTPException(400, "Unsupported participation mode")
     if values.get("continuity_mode") not in {None, "sequential", "hard_cut", "segmented", "hybrid"}:
         raise HTTPException(400, "Unsupported continuity mode")
+    if values.get("generation_audio_mode") not in {None, "auto", "lip_sync", "silent"}:
+        raise HTTPException(400, "Generation audio mode must be auto, lip_sync, or silent")
     merged = {**production, **values}
     try:
         generation_defaults = normalize_production_generation(
@@ -720,14 +1011,25 @@ async def update_production_settings_route(
     if merged.get("agy_runtime", "agy") != "agy":
         raise HTTPException(400, "The media-analysis seat must use AGY")
     catalog = await asyncio.to_thread(model_catalog)
-    for seat in ("codex", "agy"):
-        runtime = merged.get(f"{seat}_runtime") or seat
-        model = merged[f"{seat}_model"]
-        option = next((item for item in catalog[runtime] if item["id"] == model), None)
-        if not option:
-            raise HTTPException(400, f"Model {model} is unavailable through {runtime}")
-        if merged[f"{seat}_effort"] not in option.get("efforts", []):
-            raise HTTPException(400, f"Unsupported thinking level for {model}")
+    council_validation = None
+    if production.get("pipeline") == COUNCIL_PIPELINE:
+        if body.council_config is None:
+            raise HTTPException(400, "Council configuration is required when editing a Council production")
+        council_validation = verify_council_config(body.council_config, catalog=catalog)
+        if not council_validation.valid:
+            raise HTTPException(400, {
+                "message": "Council configuration is not runnable",
+                "validation": council_validation.model_dump(),
+            })
+    else:
+        for seat in ("codex", "agy"):
+            runtime = merged.get(f"{seat}_runtime") or seat
+            model = merged[f"{seat}_model"]
+            option = next((item for item in catalog[runtime] if item["id"] == model), None)
+            if not option:
+                raise HTTPException(400, f"Model {model} is unavailable through {runtime}")
+            if merged[f"{seat}_effort"] not in option.get("efforts", []):
+                raise HTTPException(400, f"Unsupported thinking level for {model}")
     if "skills" in values:
         for skill_id in values["skills"]:
             skill = get_skill(str(skill_id))
@@ -739,15 +1041,22 @@ async def update_production_settings_route(
             session_fields[f"{seat}_session_id"] = None
     revision_config = {key: merged[key] for key in (
         "participation_mode", "continuity_mode", "generation_turbo_profile", "generation_steps",
-        "generation_megapixels", "generation_aspect_ratio", "generation_megapixel_rules",
+        "generation_megapixels", "generation_aspect_ratio", "generation_audio_mode", "generation_megapixel_rules",
         "codex_runtime", "codex_model", "codex_effort",
         "agy_runtime", "agy_model", "agy_effort", "skills",
     )}
     revision = add_config_revision(production_id, revision_config, body.reason.strip())
+    retargeted_tasks = 0
+    council_revision = None
+    if body.council_config is not None and council_validation is not None:
+        council_revision = save_council_config(production_id, body.council_config, council_validation)
+        retargeted_tasks = retarget_unstarted_tasks(production_id, council_revision)
     update_production(production_id, **values, **session_fields)
     add_message(production_id, "user", "both", "configuration",
                 f"Updated production configuration (revision {revision}).",
-                {"revision": revision, "reason": body.reason.strip()})
+                {"revision": revision, "council_revision": council_revision,
+                 "reason": body.reason.strip(), "retargeted_unstarted_tasks": retargeted_tasks,
+                 "live_edit": production["status"] not in {"draft", "paused", "stopped", "failed", "awaiting_user", "completed"}})
     return get_production(production_id, include_messages=True)
 
 
@@ -1162,6 +1471,7 @@ async def delete_production_route(production_id: str, request: Request):
 @app.post("/api/productions")
 async def create_production_route(
     request: Request,
+    pipeline: str = Form(LEGACY_PIPELINE),
     title: str = Form(...),
     lyrics: str = Form(...),
     song: UploadFile = File(...),
@@ -1172,6 +1482,7 @@ async def create_production_route(
     generation_steps: int = Form(4),
     generation_megapixels: float = Form(0.7),
     generation_aspect_ratio: str = Form("16:9"),
+    generation_audio_mode: str = Form("auto"),
     generation_megapixel_rules_json: str = Form("[]"),
     codex_runtime: str = Form(""),
     codex_model: str = Form(""),
@@ -1181,17 +1492,24 @@ async def create_production_route(
     agy_effort: str = Form(""),
     skills_json: str = Form("[]"),
     approval_gates_json: str = Form("[]"),
+    council_config_json: str = Form(""),
     reference_files: list[UploadFile] = File(default=[]),
 ):
     require_csrf(request)
     if not title.strip() or len(title) > 160:
         raise HTTPException(400, "Production title is required and must be at most 160 characters")
-    if not lyrics.strip() or len(lyrics) > 200_000:
+    if pipeline != COUNCIL_PIPELINE and not lyrics.strip():
         raise HTTPException(400, "Lyrics are required and must be at most 200,000 characters")
+    if len(lyrics) > 200_000:
+        raise HTTPException(400, "Lyrics must be at most 200,000 characters")
     if participation_mode not in {"autonomous", "interactive"}:
         raise HTTPException(400, "Participation mode must be autonomous or interactive")
     if continuity_mode not in {"sequential", "hard_cut", "segmented", "hybrid"}:
         raise HTTPException(400, "Unsupported continuity mode")
+    if pipeline not in {LEGACY_PIPELINE, COUNCIL_PIPELINE}:
+        raise HTTPException(400, "Unsupported production pipeline")
+    if generation_audio_mode not in {"auto", "lip_sync", "silent"}:
+        raise HTTPException(400, "Generation audio mode must be auto, lip_sync, or silent")
     try:
         generation_megapixel_rules = json.loads(generation_megapixel_rules_json)
     except json.JSONDecodeError as exc:
@@ -1230,37 +1548,55 @@ async def create_production_route(
         if not skill or not skill["enabled"] or not skill["valid"]:
             raise HTTPException(400, f"Selected skill is unavailable: {skill_id}")
     settings = get_agent_settings()
-    selected_codex_runtime = codex_runtime.strip() or settings.get("codex_runtime", "codex")
-    selected_agy_runtime = agy_runtime.strip() or settings.get("agy_runtime", "agy")
-    if selected_codex_runtime not in {"codex", "agy"} or selected_agy_runtime not in {"codex", "agy"}:
-        raise HTTPException(400, "Agent runtime must be codex or agy")
-    if selected_agy_runtime != "agy":
-        raise HTTPException(400, "The media-analysis seat must use AGY")
     catalog = await asyncio.to_thread(model_catalog)
-    codex_options = {item["id"]: item for item in catalog[selected_codex_runtime]}
-    agy_options = {item["id"]: item for item in catalog[selected_agy_runtime]}
-    codex_available = set(codex_options)
-    agy_available = set(agy_options)
-    selected_codex_model = codex_model.strip() or settings["codex_model"]
-    selected_agy_model = agy_model.strip() or settings["agy_model"]
-    if not codex_model.strip() and selected_codex_model not in codex_available and catalog[selected_codex_runtime]:
-        selected_codex_model = catalog[selected_codex_runtime][0]["id"]
-    if not agy_model.strip() and selected_agy_model not in agy_available and catalog[selected_agy_runtime]:
-        selected_agy_model = catalog[selected_agy_runtime][0]["id"]
-    if selected_codex_model not in codex_available:
-        raise HTTPException(400, f"Model {selected_codex_model} is unavailable through {selected_codex_runtime}")
-    if selected_agy_model not in agy_available:
-        raise HTTPException(400, f"Model {selected_agy_model} is unavailable through {selected_agy_runtime}")
-    selected_codex_effort = codex_effort.strip() or settings["codex_effort"]
-    selected_agy_effort = agy_effort.strip() or settings["agy_effort"]
-    if selected_codex_effort not in codex_options[selected_codex_model].get("efforts", []):
-        if codex_effort.strip():
-            raise HTTPException(400, f"Unsupported thinking level for {selected_codex_model}")
-        selected_codex_effort = codex_options[selected_codex_model].get("default_effort") or codex_options[selected_codex_model]["efforts"][0]
-    if selected_agy_effort not in agy_options[selected_agy_model].get("efforts", []):
-        if agy_effort.strip():
-            raise HTTPException(400, f"Unsupported thinking level for {selected_agy_model}")
-        selected_agy_effort = agy_options[selected_agy_model].get("default_effort") or agy_options[selected_agy_model]["efforts"][0]
+    council_config: CouncilConfig | None = None
+    council_validation = None
+    if pipeline == COUNCIL_PIPELINE:
+        if not council_config_json.strip():
+            raise HTTPException(400, "Council configuration is required")
+        try:
+            council_config = CouncilConfig.model_validate_json(council_config_json)
+            council_validation = verify_council_config(council_config, catalog=catalog)
+        except (ValueError, ValidationError) as exc:
+            raise HTTPException(400, f"Invalid council configuration: {exc}") from exc
+        if not council_validation.valid:
+            raise HTTPException(400, {"message": "Council configuration is not runnable", "validation": council_validation.model_dump()})
+        primary = council_config.seats[0]
+        selected_codex_runtime = primary.runtime
+        selected_codex_model = primary.model
+        selected_codex_effort = primary.effort
+        selected_agy_runtime = primary.runtime
+        selected_agy_model = primary.model
+        selected_agy_effort = primary.effort
+    else:
+        selected_codex_runtime = codex_runtime.strip() or settings.get("codex_runtime", "codex")
+        selected_agy_runtime = agy_runtime.strip() or settings.get("agy_runtime", "agy")
+        if selected_codex_runtime not in {"codex", "agy"} or selected_agy_runtime not in {"codex", "agy"}:
+            raise HTTPException(400, "Agent runtime must be codex or agy")
+        if selected_agy_runtime != "agy":
+            raise HTTPException(400, "The media-analysis seat must use AGY")
+        codex_options = {item["id"]: item for item in catalog[selected_codex_runtime]}
+        agy_options = {item["id"]: item for item in catalog[selected_agy_runtime]}
+        selected_codex_model = codex_model.strip() or settings["codex_model"]
+        selected_agy_model = agy_model.strip() or settings["agy_model"]
+        if not codex_model.strip() and selected_codex_model not in codex_options and catalog[selected_codex_runtime]:
+            selected_codex_model = catalog[selected_codex_runtime][0]["id"]
+        if not agy_model.strip() and selected_agy_model not in agy_options and catalog[selected_agy_runtime]:
+            selected_agy_model = catalog[selected_agy_runtime][0]["id"]
+        if selected_codex_model not in codex_options:
+            raise HTTPException(400, f"Model {selected_codex_model} is unavailable through {selected_codex_runtime}")
+        if selected_agy_model not in agy_options:
+            raise HTTPException(400, f"Model {selected_agy_model} is unavailable through {selected_agy_runtime}")
+        selected_codex_effort = codex_effort.strip() or settings["codex_effort"]
+        selected_agy_effort = agy_effort.strip() or settings["agy_effort"]
+        if selected_codex_effort not in codex_options[selected_codex_model].get("efforts", []):
+            if codex_effort.strip():
+                raise HTTPException(400, f"Unsupported thinking level for {selected_codex_model}")
+            selected_codex_effort = codex_options[selected_codex_model].get("default_effort") or codex_options[selected_codex_model]["efforts"][0]
+        if selected_agy_effort not in agy_options[selected_agy_model].get("efforts", []):
+            if agy_effort.strip():
+                raise HTTPException(400, f"Unsupported thinking level for {selected_agy_model}")
+            selected_agy_effort = agy_options[selected_agy_model].get("default_effort") or agy_options[selected_agy_model]["efforts"][0]
     production_id = uuid.uuid4().hex
     intake = PRODUCTIONS / production_id / "intake"
     intake.mkdir(parents=True, exist_ok=False)
@@ -1268,7 +1604,7 @@ async def create_production_route(
     song_path.write_bytes(data)
     try:
         created = create_production({
-            "id": production_id, "title": title.strip(), "lyrics": lyrics.strip(),
+            "id": production_id, "pipeline": pipeline, "title": title.strip(), "lyrics": lyrics.strip(),
             "song_path": str(song_path), "song_name": song.filename or song_path.name,
             "concept": concept.strip(), "participation_mode": participation_mode,
             "continuity_mode": continuity_mode,
@@ -1278,10 +1614,13 @@ async def create_production_route(
             "agy_runtime": selected_agy_runtime,
             "agy_model": selected_agy_model,
             "agy_effort": selected_agy_effort,
+            "generation_audio_mode": generation_audio_mode,
             **generation_defaults,
             "skills": [str(value) for value in selected_skills],
             "approval_gates": [str(value) for value in approval_gates],
         })
+        if council_config and council_validation:
+            save_council_config(production_id, council_config, council_validation)
         for reference_file in reference_files:
             await _store_production_reference_upload(production_id, reference_file)
         return get_production(production_id, include_messages=True) or created
@@ -1298,13 +1637,14 @@ async def start_production(production_id: str, request: Request):
         raise HTTPException(404, "Production not found")
     if production["status"] not in {"draft", "paused", "stopped", "failed"}:
         raise HTTPException(409, "Production cannot be started from its current state")
+    is_council = production.get("pipeline") == COUNCIL_PIPELINE
     stage = "song_analysis" if production["status"] == "draft" else production["stage"]
     update_production(
         production_id, status="queued", stage=stage, pause_requested=0,
         stop_requested=0, intervention_requested=0, error=None,
     )
     add_message(production_id, "user", "both", "control", "Start or resume production.")
-    production_orchestrator.notify()
+    (council_controller if is_council else production_orchestrator).notify()
     return get_production(production_id, include_messages=True)
 
 
@@ -1317,7 +1657,10 @@ async def pause_production(production_id: str, request: Request):
     if production["status"] in {"queued", "running", "retrying"}:
         update_production(production_id, status="pausing" if production["status"] == "running" else "paused", pause_requested=1 if production["status"] == "running" else 0)
         if production["status"] == "running":
-            await production_orchestrator.cancel_agents(production_id)
+            if production.get("pipeline") == COUNCIL_PIPELINE:
+                await council_controller.cancel(production_id)
+            else:
+                await production_orchestrator.cancel_agents(production_id)
     return get_production(production_id, include_messages=True)
 
 
@@ -1334,7 +1677,7 @@ async def resume_production(production_id: str, request: Request):
         stop_requested=0, intervention_requested=0, error=None,
     )
     add_message(production_id, "user", "both", "control", "Resume from the last checkpoint.")
-    production_orchestrator.notify()
+    (council_controller if production.get("pipeline") == COUNCIL_PIPELINE else production_orchestrator).notify()
     return get_production(production_id, include_messages=True)
 
 
@@ -1346,9 +1689,13 @@ async def stop_production(production_id: str, request: Request, body: Production
         raise HTTPException(404, "Production not found")
     active = production["status"] in {"running", "retrying", "pausing"}
     update_production(production_id, status="stopping" if active else "stopped", stop_requested=1 if active else 0)
+    is_council = production.get("pipeline") == COUNCIL_PIPELINE
     if active:
-        await production_orchestrator.cancel_agents(production_id)
-    if body.cancel_generation:
+        if is_council:
+            await council_controller.cancel(production_id)
+        else:
+            await production_orchestrator.cancel_agents(production_id)
+    if body.cancel_generation and not is_council:
         await production_orchestrator.cancel_generation(production_id)
     add_message(production_id, "user", "both", "control", "Stop production and preserve the current checkpoint.")
     return get_production(production_id, include_messages=True)
@@ -1357,14 +1704,88 @@ async def stop_production(production_id: str, request: Request, body: Production
 @app.post("/api/productions/{production_id}/interventions")
 async def production_intervention(production_id: str, request: Request, body: InterventionBody):
     require_csrf(request)
-    if body.recipient not in {"both", "codex", "agy"}:
-        raise HTTPException(400, "Recipient must be both, codex or agy")
     if not body.content.strip() or len(body.content) > 20_000:
         raise HTTPException(400, "Message is required and must be at most 20,000 characters")
     production = get_production(production_id, private=True)
     if not production:
         raise HTTPException(404, "Production not found")
     content = body.content.strip()
+    if production.get("pipeline") == COUNCIL_PIPELINE:
+        snapshot = council_snapshot(production_id) or {}
+        seats = snapshot.get("seats") or []
+        seat_ids = {str(seat["id"]) for seat in seats}
+        if body.recipient == "both":
+            targets = sorted(seat_ids)
+        elif body.recipient in {"codex", "agy"}:
+            targets = [str(seat["id"]) for seat in seats if seat.get("runtime") == body.recipient]
+        elif body.recipient in seat_ids:
+            targets = [body.recipient]
+        else:
+            raise HTTPException(400, "Recipient must be all seats, a runtime, or a configured Council seat")
+        if not targets:
+            raise HTTPException(400, "No Council seat matches the selected recipient")
+        comfy_active = await council_controller.comfy_generation_running(production_id)
+        controller_active = council_controller.has_active_work(production_id)
+        intervention = add_council_intervention(
+            production_id, content, targets,
+            queued_reason=("ComfyUI generation is active; deliver at the next safe checkpoint"
+                           if comfy_active else
+                           "current Council work will be cancelled and resumed from the saved checkpoint"
+                           if controller_active else "Council is idle"),
+        )
+        message = add_message(
+            production_id, "user", body.recipient, "intervention", content,
+            {"pipeline": COUNCIL_PIPELINE, "intervention_id": intervention["id"],
+             "target_seat_ids": targets,
+             "execution_status": "queued" if comfy_active else "accepted"},
+        )
+        if comfy_active:
+            # Never interrupt an actively sampled Comfy job. The next Council
+            # turn consumes the durable intervention after the safe checkpoint.
+            update_production(
+                production_id, status="running", pause_requested=0, stop_requested=0,
+                intervention_requested=1, error=None,
+            )
+            add_message(
+                production_id, "system", "all", "intervention_status",
+                "Council intervention queued for the active ComfyUI generation. It will be delivered at the next safe checkpoint; the current generation is not being interrupted.",
+                {"pipeline": COUNCIL_PIPELINE, "intervention_id": intervention["id"],
+                 "target_seat_ids": targets, "state": "queued",
+                 "comfy_generation_running": True},
+            )
+        else:
+            # Match Legacy: an agent/controller turn is cancellable immediately
+            # when Comfy is idle or stopped.  The durable Council intervention
+            # remains acknowledged (rather than falsely applied) until the
+            # addressed saved session consumes it on its next turn.
+            cancelled = {"controller": False, "agent": False, "generation": False}
+            if controller_active:
+                try:
+                    cancelled["controller"] = await council_controller.cancel(production_id)
+                except Exception as exc:
+                    cancelled["cancel_error"] = type(exc).__name__
+            update_intervention(
+                intervention["id"], "acknowledged",
+                acknowledged_at=now_iso(),
+                queued_reason="Accepted immediately; no active ComfyUI generation was running",
+            )
+            update_production(
+                production_id, status="queued", pause_requested=0, stop_requested=0,
+                intervention_requested=0, error=None,
+            )
+            add_message(
+                production_id, "system", "all", "intervention_status",
+                "Council intervention accepted immediately because ComfyUI is not actively generating. The cancelled or idle controller will resume from the saved checkpoint and the addressed sessions will receive your guidance.",
+                {"pipeline": COUNCIL_PIPELINE, "intervention_id": intervention["id"],
+                 "target_seat_ids": targets, "state": "acknowledged",
+                 "applied_immediately": True, "comfy_generation_running": False,
+                 "cancelled": cancelled},
+            )
+        council_controller.notify()
+        return {"message": message, "intervention": get_intervention(intervention["id"]) or intervention,
+                "production": production_with_generation_progress(get_production(production_id, include_messages=True))}
+    if body.recipient not in {"both", "codex", "agy"}:
+        raise HTTPException(400, "Recipient must be both, codex or agy")
     autonomous = production.get("participation_mode") == "autonomous"
     message = add_message(
         production_id, "user", body.recipient, "intervention", content,
@@ -1510,8 +1931,28 @@ async def approve_production_decision(production_id: str, decision_id: str, requ
     production = get_production(production_id, private=True)
     if not production:
         raise HTTPException(404, "Production not found")
+    pending_decision = next(
+        (item for item in list_decisions(production_id) if item["id"] == decision_id and item["status"] == "pending"),
+        None,
+    )
+    if not pending_decision:
+        raise HTTPException(409, "Decision is not pending")
     if not resolve_decision(production_id, decision_id, "approved", "user", body.resolution):
         raise HTTPException(409, "Decision is not pending")
+    if production.get("pipeline") == COUNCIL_PIPELINE:
+        if production["stage"] == "user_review":
+            update_production(production_id, status="completed", stage="completed", progress=1,
+                              finished_at=now_iso(), error=None)
+        elif production["stage"] == "planning_review":
+            council_controller.approve_planning(production_id)
+        elif production["stage"] == "shot_review":
+            if not council_controller.approve_waiting_shot(production_id, pending_decision.get("payload") or {}):
+                raise HTTPException(409, "No preserved Council shot is waiting for user approval")
+        else:
+            if not council_controller.approve_waiting_task(production_id, pending_decision.get("payload") or {}):
+                raise HTTPException(409, "No Council task is waiting for user approval")
+        add_message(production_id, "user", "all", "decision", body.resolution.strip() or "Approved.")
+        return get_production(production_id, include_messages=True)
     if production["stage"] == "user_review":
         update_production(production_id, status="completed", stage="completed", progress=1,
                           finished_at=now_iso(), error=None)
@@ -1534,6 +1975,10 @@ async def reject_production_decision(production_id: str, decision_id: str, reque
     if not resolve_decision(production_id, decision_id, "rejected", "user", body.resolution.strip()):
         raise HTTPException(409, "Decision is not pending")
     production = get_production(production_id, private=True)
+    if production and production.get("pipeline") == COUNCIL_PIPELINE:
+        update_production(production_id, status="paused", error=None)
+        add_message(production_id, "user", "all", "decision", "Rejected: " + body.resolution.strip())
+        return get_production(production_id, include_messages=True)
     stage = {
         "treatment_review": "treatment_consultation",
         "reference_review": "reference_development",
@@ -1827,6 +2272,7 @@ async def create_jobs(
     reference_audio: UploadFile | None = File(None),
     audio: UploadFile | None = File(None),
     audio_start: float = Form(0),
+    audio_duration: float | None = Form(None),
     no_audio: bool = Form(False),
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
     project_id: str = Form(""), folder_id: str = Form(""),
@@ -1864,6 +2310,16 @@ async def create_jobs(
         raise HTTPException(400, "Uploaded audio is available in lip-sync mode only")
     if mode == "lip_sync" and (isinstance(audio_start, bool) or audio_start < 0):
         raise HTTPException(400, "Audio start must be zero or a positive number")
+    selected_audio_duration = duration
+    if mode == "lip_sync":
+        if audio_duration is not None:
+            if isinstance(audio_duration, bool) or not math.isfinite(audio_duration):
+                raise HTTPException(400, "Audio duration must be a finite number")
+            selected_audio_duration = audio_duration
+        if not 0.5 <= selected_audio_duration <= 60:
+            raise HTTPException(400, "Audio duration must be between 0.5 and 60 seconds")
+    elif audio_duration is not None:
+        raise HTTPException(400, "Audio duration is available in lip-sync mode only")
     if mode == "frames" and (image or not first_frame):
         raise HTTPException(400, "I2V mode requires an opening image; the closing image is optional")
     if mode in ("opening", "closing") and not image:
@@ -1930,8 +2386,8 @@ async def create_jobs(
                 saved_paths.append(source_audio_path)
                 reference_audio_path, reference_audio_name = source_audio_path, source_audio_name
                 source_duration = probe_audio_duration(Path(source_audio_path))
-                if audio_start > 0.01 or source_duration > duration + 0.08 or source_duration < audio_start + duration - 0.08:
-                    trimmed_path, trimmed_name = trim_audio(Path(source_audio_path), audio_start, duration)
+                if audio_start > 0.01 or source_duration > selected_audio_duration + 0.08 or source_duration < audio_start + selected_audio_duration - 0.08:
+                    trimmed_path, trimmed_name = trim_audio(Path(source_audio_path), audio_start, selected_audio_duration)
                     saved_paths.append(trimmed_path)
                     reference_audio_path, reference_audio_name = trimmed_path, trimmed_name
         if first_frame:
@@ -1979,14 +2435,14 @@ async def create_jobs(
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,audio_start,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,audio_start,audio_duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    source_audio_path,source_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, audio_start, generation.engine, generation.turbo_profile, generation.encoder,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (job_id, text, mode, duration, audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),

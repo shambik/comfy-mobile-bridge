@@ -911,7 +911,7 @@ function App() {
       const response = await fetch('/api/system/lock', { method: 'POST', headers: { 'X-CSRF-Token': sessionToken } })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.detail || 'The PC could not be locked')
-      feedback.notify('success', 'Windows lock command sent')
+      feedback.notify('success', data.detail || 'Windows lock request initiated')
     } catch (e) { setMainError('system', e instanceof Error ? e.message : 'The PC could not be locked'); feedback.notify('error', e instanceof Error ? e.message : 'The PC could not be locked') }
   }
 
