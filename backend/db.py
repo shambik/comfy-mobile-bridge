@@ -33,6 +33,7 @@ def _create_jobs_table(db):
         mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync')),
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         audio_start REAL NOT NULL DEFAULT 0,
+        audio_duration REAL,
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
@@ -161,7 +162,7 @@ def _rebuild_jobs_table(db):
     _create_jobs_table(db)
 
     columns = [
-        "id", "prompt", "mode", "duration", "audio_start", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+        "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
@@ -181,6 +182,7 @@ def _rebuild_jobs_table(db):
         "megapixels": "0.31",
         "aspect_ratio": "'16:9'",
         "audio_start": "0",
+        "audio_duration": "NULL",
         "progress": "0",
         "phase": "'queued'",
         "step": "0",
@@ -237,6 +239,7 @@ def init_db():
                 "phase", "step", "total_steps", "eta_seconds",
                 "engine", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
                 "audio_start",
+                "audio_duration",
                 "sequence_id", "sequence_index", "sequence_total",
                 "reference_audio_path", "reference_audio_name",
                 "source_audio_path", "source_audio_name",

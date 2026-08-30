@@ -1,6 +1,6 @@
 ---
 name: e2e-music-video-poc
-description: Co-produce complete music videos with Codex and AGY as a professional production agency: analyze songs, choose sequential/hard-cut/hybrid continuity, develop storyboards, create references, co-write prompts, generate and QC shots, assemble the final song video, and obtain user approval. Use when a user requests an end-to-end music video from audio, lyrics, and optional creative ideas.
+description: "Co-produce complete music videos with Codex and AGY as a professional production agency: analyze songs, choose sequential/hard-cut/hybrid continuity, develop storyboards, create references, co-write prompts, generate and QC shots, assemble the final song video, and obtain user approval. Use when a user requests an end-to-end music video from audio, lyrics, and optional creative ideas."
 ---
 
 # E2E Music Video POC

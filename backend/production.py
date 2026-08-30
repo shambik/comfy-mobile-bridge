@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .agents import (AgentExecutionError, AgentHeartbeatCallback, AgentOutputCallback, AgentResult,
-                     _decode_structured_value, discover_codex_models, process_manager)
-from .config import AGENT_TIMEOUT_SECONDS, INPUT, PRODUCTIONS, PRODUCTION_CONCURRENCY
+                     _decode_structured_value, _transport_event_label, discover_codex_models, process_manager)
+from .config import AGENT_TIMEOUT_SECONDS, INPUT, PRODUCTIONS, PRODUCTION_CONCURRENCY, ROOT
 from .db import connect, get_job, next_position, now_iso
 from .generation import normalize_generation_settings
 from .library import resolve_asset_path
@@ -24,7 +24,7 @@ from .production_db import (add_artifact, add_decision, add_event, add_message, 
                             get_reference, list_references, recover_productions, replace_shot_plan, resolve_decision,
                              normalize_production_generation, megapixels_for_duration,
                              update_message_metadata, update_production, update_shot, update_shot_attempt)
-from .skill_catalog import selected_skill_context, selected_skill_summary_context
+from .skill_catalog import selected_skill_manifest_context
 
 
 class ReferenceGenerationError(RuntimeError):
@@ -200,12 +200,12 @@ class ProductionOrchestrator:
             if excluded:
                 placeholders = ",".join("?" for _ in excluded)
                 row = db.execute(
-                    f"SELECT id FROM productions WHERE status='queued' AND id NOT IN ({placeholders}) "
+                    f"SELECT id FROM productions WHERE status='queued' AND pipeline!='council_music_video_v1' AND id NOT IN ({placeholders}) "
                     "ORDER BY updated_at LIMIT 1", tuple(excluded),
                 ).fetchone()
             else:
                 row = db.execute(
-                    "SELECT id FROM productions WHERE status='queued' ORDER BY updated_at LIMIT 1"
+                    "SELECT id FROM productions WHERE status='queued' AND pipeline!='council_music_video_v1' ORDER BY updated_at LIMIT 1"
                 ).fetchone()
         return get_production(row["id"], private=True) if row else None
 
@@ -229,6 +229,7 @@ class ProductionOrchestrator:
             recovered = recover_productions(
                 set(self.production_tasks),
                 reason="Production controller lost its active process",
+                pipeline="legacy_music_video_v1",
             )
             if recovered:
                 self.wake.set()
@@ -315,10 +316,11 @@ class ProductionOrchestrator:
         self, production: dict[str, Any], participant: str | None = None,
         compact_skills: bool = False,
     ) -> str:
-        skills = (
-            selected_skill_summary_context(production.get("skills", []))
-            if compact_skills else selected_skill_context(production.get("skills", []))
-        )
+        # Skills are project-native files.  Send only their selected manifest;
+        # the agent reads the relevant SKILL.md through its normal tool flow.
+        # ``compact_skills`` remains in the signature for call-site
+        # compatibility with Legacy review turns.
+        skills = selected_skill_manifest_context(production.get("skills", []))
         references = list_references(production["id"], private=True)
         reference_context = json.dumps([
             {
@@ -376,7 +378,7 @@ Latest user instructions and decisions (highest priority):
 Intervention handling:
 {intervention_note}
 
-Enabled production skills:
+Selected project production skills (read the listed files when relevant):
 {skills or '(none)'}
 """.strip()
 
@@ -389,9 +391,18 @@ Enabled production skills:
         ]
 
     @staticmethod
+    def _codex_image_budget_error(error: BaseException) -> bool:
+        """Recognize the provider's single-request image-input limit error."""
+        message = str(error).casefold()
+        return (
+            "total image data" in message
+            and ("byte limit" in message or "536870912" in message)
+        )
+
+    @staticmethod
     def _agent_dirs(paths: list[Path] | None) -> list[Path]:
         """Return unique parent directories that contain media being reviewed."""
-        directories: dict[str, Path] = {}
+        directories: dict[str, Path] = {str(ROOT.resolve()).casefold(): ROOT.resolve()}
         for value in paths or []:
             path = Path(value)
             directory = path if path.is_dir() else path.parent
@@ -487,7 +498,18 @@ Enabled production skills:
         fresh_session: bool = False, compact_context: bool = False,
     ) -> AgentResult:
         runtime = production.get("codex_runtime") or "codex"
-        images = self._reference_image_paths(production) if images is None else images
+        if images is None:
+            # A resumed or compact turn already has the production references
+            # in its text context. Re-attaching every raster file on each
+            # resumed request makes the provider count the old and new image
+            # payloads together until it crosses the 512 MiB request limit.
+            # Keep attachments for the first/fresh turn, and let the agent
+            # inspect the project-local reference paths on later turns.
+            images = (
+                []
+                if compact_context or (not fresh_session and production.get("codex_session_id"))
+                else self._reference_image_paths(production)
+            )
         prepared_media = list(media_paths or [])
         if runtime == "agy":
             prepared_media, media_handoff = await asyncio.to_thread(
@@ -506,15 +528,46 @@ Enabled production skills:
                 trace, heartbeat, self._agent_dirs([*(images or []), *prepared_media]),
             )
         except Exception as exc:
-            if self._control_pending(production["id"]):
+            # A resumed Codex conversation can retain earlier image payloads
+            # even when this turn did not add new files. Once the provider
+            # rejects that accumulated request, preserve the text/context
+            # contract but restart only this turn without binary attachments.
+            # This is a bounded transport recovery, not a second creative
+            # generation request.
+            if (
+                runtime == "codex"
+                and not self._control_pending(production["id"])
+                and self._codex_image_budget_error(exc)
+            ):
+                add_message(
+                    production["id"], "codex", "all", "agent_trace",
+                    "CODEX request exceeded the provider image-input limit; retrying this turn with a fresh text-only context while keeping all project files available.",
+                    {"live": True, "runtime": runtime, "model": production["codex_model"], "effort": production["codex_effort"], "stream": "agent_update", "reason": "image_input_limit"},
+                )
+                try:
+                    result = await process_manager.invoke(
+                        runtime, "codex", production["id"], self._base_context(production, "codex", compact_context) + "\n\nTASK:\n" + request,
+                        production["codex_model"], production["codex_effort"], None, [],
+                        trace, heartbeat, self._agent_dirs(prepared_media),
+                    )
+                except Exception as retry_error:
+                    add_message(
+                        production["id"], "codex", "all", "agent_trace",
+                        f"CODEX failed after image-input recovery: {str(retry_error)[:1600]}",
+                        {"live": True, "runtime": runtime, "model": production["codex_model"], "effort": production["codex_effort"], "stream": "error", "reason": "image_input_limit_recovery_failed"},
+                    )
+                    self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_codex", retry_error)
+                    raise
+            elif self._control_pending(production["id"]):
                 raise
-            add_message(
-                production["id"], "codex", "all", "agent_trace",
-                f"CODEX failed: {str(exc)[:1600]}",
-                {"live": True, "runtime": runtime, "model": production["codex_model"], "effort": production["codex_effort"], "stream": "error"},
-            )
-            self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_codex", exc)
-            raise
+            else:
+                add_message(
+                    production["id"], "codex", "all", "agent_trace",
+                    f"CODEX failed: {str(exc)[:1600]}",
+                    {"live": True, "runtime": runtime, "model": production["codex_model"], "effort": production["codex_effort"], "stream": "error"},
+                )
+                self._record_agent_failure(production["id"], f"{production.get('stage', 'agent')}_codex", exc)
+                raise
         if not fresh_session:
             update_production(production["id"], codex_session_id=result.session_id)
         add_message(production["id"], "codex", "all", "agent", result.content.get("summary", ""), {
@@ -721,6 +774,23 @@ Your previous turn did not produce the requested task result. Perform the task n
         if not stripped:
             return None
         normalized_line = stripped.lower()
+        transport_label = _transport_event_label(stripped)
+        if transport_label:
+            if transport_label.startswith("transport reconnecting"):
+                attempt = transport_label.removeprefix("transport reconnecting ")
+                return (
+                    f"{seat} ({cli}) provider stream interrupted; retrying connection {attempt} before response completion.",
+                    "agent_update",
+                )
+            if transport_label == "transport fallback to HTTPS":
+                return (
+                    f"{seat} ({cli}) switched from WebSockets to HTTPS after transport retries; waiting for the provider response.",
+                    "agent_update",
+                )
+            return (
+                f"{seat} ({cli}) provider stream interrupted; retrying the request before response completion.",
+                "agent_update",
+            )
         if channel == "stderr":
             if any(marker in normalized_line for marker in (
                 "responses_retry", "stream disconnected", "websocket closed by server",
@@ -1926,7 +1996,8 @@ Put the conversational result in content using this application contract:
   "actions": [
     {"type": "analyze_song_audio"},
     {"type": "update_shot", "shot_index": 2, "changes": {"duration": 5, "megapixels": 1.0}},
-    {"type": "regenerate_shot", "shot_index": 2, "prompt": "complete corrected prompt", "regenerate_downstream": true},
+    {"type": "accept_shot", "shot_index": 2, "attempt": 3, "output_path": "optional-existing-video.mp4"},
+    {"type": "regenerate_shot", "shot_index": 2, "prompt": "complete corrected prompt", "reuse_prompt": false, "regenerate_downstream": true},
     {"type": "update_production_config", "changes": {"generation_turbo_profile": "v4"}},
     {"type": "add_production_note", "note": "a durable creative instruction"},
     {"type": "ask_user", "question": "one necessary clarification"},
@@ -1941,9 +2012,20 @@ execution results. Use ask_user only when a missing answer materially changes th
 prefer a clear question over inventing the user's creative choice. In autonomous mode, make reversible creative
 decisions when safe and do not pause for a recoverable creative or quality issue. If a shot needs another image,
 use regenerate_shot so the controller queues it automatically; never tell the user to click a Retry or
-Regenerate button. In autonomous mode, prefer resume after applying the user's guidance. preserve means
+Regenerate button. A regenerate_shot action MUST include the complete executable prompt that should be
+sent to ComfyUI. The only exception is an intentional same-prompt rerun: set reuse_prompt to true and
+say that the saved prompt is being reused. Never omit both prompt and reuse_prompt, because that silently
+resumes an old suggestion. In autonomous mode, prefer resume after applying the user's guidance. preserve means
 answer/apply the request but keep the production in the state it had before the message. resume explicitly
-continues the saved pipeline checkpoint after successful action execution.
+continues the saved pipeline checkpoint after successful action execution. When the user says to keep, accept,
+lock, preserve, skip, or stop regenerating an existing shot, use accept_shot (or update_shot with
+changes.status="accepted" for compatibility) and identify the exact attempt or existing output filename when
+possible. This selects an existing playable attempt; it does not create a new generation. Never use
+regenerate_shot after that instruction unless the user explicitly asks for regeneration.
+If the user supplied a complete prompt or exact wording, preserve it verbatim in the executable action;
+do not silently replace it with an earlier suggestion. If you intentionally revise the wording, put the
+actual revised prompt in the action and say that it was revised. An acknowledgement without an executable
+action is not a completed change and must not be followed by resume.
 """.strip()
 
     def _intervention_request(
@@ -1993,6 +2075,57 @@ OTHER PRODUCER'S CONSULTATION:
             "requires_user": bool(result.content.get("requires_user")),
             "issues": result.content.get("issues", []) if isinstance(result.content.get("issues"), list) else [],
         }
+
+    @staticmethod
+    def _intervention_requests_executable_action(instruction: str) -> bool:
+        """Detect intervention messages that must change persisted work.
+
+        Agent replies are advisory; only an executed bridge action can change
+        the next ComfyUI prompt.  This predicate is intentionally conservative
+        for ordinary questions, but treats an explicit correction or complaint
+        about a stale/incorrect shot as a mutation request.  It is used as a
+        safety gate so an acknowledgement cannot resume an old prompt.
+        """
+        text = " ".join(str(instruction or "").casefold().split())
+        if not text:
+            return False
+        target = re.search(
+            r"\b(?:shot|scene|prompt|generation|video|clip|image|frame|character|reference|"
+            r"production|flow|camera|movement|audio|lyrics?|settings?|config)\b",
+            text,
+        )
+        if not target:
+            return False
+        question_lead = re.match(
+            r"^(?:what|why|how|where|when|which|who|can|could|does|do|is|are)\b",
+            text,
+        )
+        complaint = re.search(
+            r"\b(?:wrong|old|stale|ignored|missing|broken|bad|incorrect|instead|again|still|"
+            r"doesn't|didn't|isn't|aren't|not|back to)\b",
+            text,
+        )
+        if question_lead and not complaint:
+            return False
+        return bool(re.search(
+            r"\b(?:change|fix|correct|revise|rewrite|replace|remove|add|use|avoid|make|keep|"
+            r"preserve|stop|regenerate|rerun|redo|retry|try|don't|do not|must|should|want|"
+            r"needs?)\b",
+            text,
+        ) or complaint)
+
+    @staticmethod
+    def _has_effective_intervention_action(action_results: list[dict[str, Any]]) -> bool:
+        """Return whether the intervention changed an executable checkpoint."""
+        effective = {
+            "analyze_song_audio", "update_shot", "accept_shot",
+            "regenerate_shot", "update_production_config",
+        }
+        return any(
+            item.get("status") in {"completed", "queued"}
+            and str(item.get("type") or "").casefold() in effective
+            for item in action_results
+        )
 
     @staticmethod
     def _validated_intervention_shot_changes(
@@ -2051,6 +2184,250 @@ OTHER PRODUCER'S CONSULTATION:
             normalized["reference_ids"] = list(map(str, normalized["reference_ids"]))
         return normalized
 
+    @staticmethod
+    def _shot_change_requires_regeneration(changes: dict[str, Any]) -> bool:
+        """Return whether a shot edit invalidates an existing render."""
+        return bool(set(changes) & {
+            "prompt", "mode", "continuity", "audio_mode", "audio_source",
+            "audio_start", "audio_duration", "duration", "megapixels",
+            "aspect_ratio", "steps", "engine", "turbo_profile", "reference_ids",
+        })
+
+    @staticmethod
+    def _invalidate_shot_generation(shot: dict[str, Any], reason: str) -> list[str]:
+        """Make an intervention edit unable to resume an old attempt."""
+        interrupted: list[str] = []
+        for attempt in shot.get("attempts", []):
+            if attempt.get("status") in {"queued", "generating", "reviewing", "review_pending"}:
+                update_shot_attempt(
+                    attempt["id"], status="interrupted", error=reason,
+                )
+                interrupted.append(attempt["id"])
+        update_shot(shot["id"], status="planned", accepted_attempt=None)
+        return interrupted
+
+    @staticmethod
+    def _intervention_shot(production_id: str, shot_index: Any) -> dict[str, Any]:
+        try:
+            requested_index = int(shot_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("An intervention shot_index must be a whole number") from exc
+        shot = next(
+            (item for item in list_shots(production_id, private=True)
+             if int(item["shot_index"]) == requested_index),
+            None,
+        )
+        if not shot:
+            raise ValueError(f"Shot {requested_index} does not exist")
+        return shot
+
+    def _select_intervention_attempt(
+        self, shot: dict[str, Any], action: dict[str, Any],
+    ) -> tuple[dict[str, Any], Path]:
+        """Resolve an explicit user/agent acceptance to a playable attempt.
+
+        Acceptance is deliberately stricter than the generation loop: an
+        attempt must resolve to a real file now.  If a stored accepted path is
+        stale, an explicit acceptance may select another existing attempt, but
+        the normal resume loop must never make that choice implicitly.
+        """
+        attempts = list(shot.get("attempts") or [])
+        attempt_selector = (
+            action.get("attempt")
+            if action.get("attempt") is not None
+            else action.get("attempt_number")
+        )
+        if attempt_selector is None:
+            attempt_selector = action.get("selected_attempt")
+        requested_attempt: int | None = None
+        if attempt_selector is not None and str(attempt_selector).strip() != "":
+            try:
+                requested_attempt = int(attempt_selector)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("The selected shot attempt must be a whole number") from exc
+
+        output_selector = (
+            action.get("output_path")
+            or action.get("selected_output_path")
+            or action.get("filename")
+        )
+        selected_name = Path(str(output_selector)).name.casefold() if output_selector else ""
+        playable: list[tuple[dict[str, Any], Path]] = []
+        if requested_attempt is not None or selected_name:
+            for attempt in attempts:
+                try:
+                    attempt_number = int(attempt.get("attempt"))
+                except (TypeError, ValueError):
+                    continue
+                if requested_attempt is not None and attempt_number != requested_attempt:
+                    continue
+                path = self._current_attempt_video(attempt)
+                if not path:
+                    continue
+                if selected_name:
+                    recorded_name = Path(str(attempt.get("output_path") or "")).name.casefold()
+                    if path.name.casefold() != selected_name and recorded_name != selected_name:
+                        continue
+                playable.append((attempt, path))
+
+        if requested_attempt is not None and not playable:
+            raise ValueError(
+                f"Could not accept Shot {shot['shot_index']}: selected attempt "
+                f"{requested_attempt} has no existing output file"
+            )
+        if selected_name and not playable:
+            raise ValueError(
+                f"Could not accept Shot {shot['shot_index']}: selected output "
+                f"{Path(str(output_selector)).name} was not found"
+            )
+        if not playable:
+            # An acceptance action without a selector is allowed to recover a
+            # stale accepted pointer by choosing the newest playable attempt.
+            # This is safe because the caller explicitly requested acceptance;
+            # the regular shot loop does not use this fallback.
+            accepted_number = shot.get("accepted_attempt")
+            if accepted_number is not None:
+                for attempt in attempts:
+                    if str(attempt.get("attempt")) != str(accepted_number):
+                        continue
+                    path = self._current_attempt_video(attempt)
+                    if path:
+                        playable.append((attempt, path))
+                        break
+        if not playable:
+            for attempt in sorted(
+                attempts,
+                key=lambda item: int(item.get("attempt") or 0),
+                reverse=True,
+            ):
+                path = self._current_attempt_video(attempt)
+                if path:
+                    playable.append((attempt, path))
+                    break
+        if not playable:
+            raise ValueError(
+                f"Could not accept Shot {shot['shot_index']}: it has no existing playable attempt"
+            )
+        return playable[0]
+
+    def _infer_user_acceptance_actions(
+        self, production: dict[str, Any], instruction: str,
+    ) -> tuple[list[dict[str, Any]], set[int]]:
+        """Turn unambiguous user keep/skip instructions into durable locks.
+
+        The council still receives the complete message and can explain the
+        decision, but a clear user instruction must not depend on an agent
+        remembering to emit a particular JSON action.  This intentionally
+        recognizes only preservation language; normal creative feedback still
+        goes through the council.
+        """
+        text = str(instruction or "").strip()
+        if not text:
+            return [], set()
+        lowered = text.casefold()
+        preservation_markers = (
+            "already ok", "already good", "already fine", "already accepted",
+            "already have", "already done", "no need", "dont need", "don't need", "do not need",
+            "can be accepted", "use this file", "keep this", "keep it",
+            "preserve", "lock", "skip", "move to the next", "stop about",
+            "not to do", "do not do", "don't do", "dont do",
+            "stop regenerat", "stop retry", "do not regenerat", "don't regenerat",
+            "dont regenerat", "do not retry", "don't retry", "dont retry",
+        )
+        filename_tokens = re.findall(
+            r"(?i)(?<![\w.-])(?:h3_bridge_[a-z0-9]+_00001_(?:\.mp4)?|[a-z0-9][a-z0-9_.-]*\.mp4)(?![\w.-])",
+            text,
+        )
+        preserve_intent = any(marker in lowered for marker in preservation_markers)
+        if not preserve_intent and not filename_tokens:
+            return [], set()
+
+        shots = list_shots(production["id"], private=True)
+        by_index = {int(shot["shot_index"]): shot for shot in shots}
+        actions: dict[int, dict[str, Any]] = {}
+
+        # An exact existing output filename is the strongest possible user
+        # selector. Resolve it against all attempts in this production so it
+        # remains valid after files are moved by the Studio library.
+        for token in filename_tokens:
+            token_name = Path(token).name.casefold()
+            for shot in shots:
+                for attempt in shot.get("attempts", []):
+                    names = {Path(str(attempt.get("output_path") or "")).name.casefold()}
+                    path = self._current_attempt_video(attempt)
+                    if path:
+                        names.add(path.name.casefold())
+                    # Some old user messages omitted the .mp4 suffix.
+                    matches = token_name in names or (
+                        "." not in token_name
+                        and any(name.startswith(token_name) for name in names if name)
+                    )
+                    if matches:
+                        actions[int(shot["shot_index"])] = {
+                            "type": "accept_shot",
+                            "shot_index": int(shot["shot_index"]),
+                            "output_path": str(path) if path else token,
+                        }
+                        break
+                if int(shot["shot_index"]) in actions:
+                    break
+
+        shot_matches = {
+            int(match.group(1))
+            for match in re.finditer(r"(?i)\b(?:s|shot)\s*0*(\d{1,3})\b", text)
+        }
+        if preserve_intent:
+            for shot_index in shot_matches:
+                if shot_index in by_index:
+                    actions.setdefault(shot_index, {
+                        "type": "accept_shot", "shot_index": shot_index,
+                    })
+            # "The previous one is fine" is meaningful when exactly one shot
+            # is currently active. Do not guess if several shots are active.
+            if not shot_matches and not actions:
+                active = [
+                    shot for shot in shots
+                    if shot.get("status") in {"preparing", "generating", "reviewing", "retrying", "review_pending"}
+                ]
+                if len(active) == 1:
+                    index = int(active[0]["shot_index"])
+                    actions[index] = {"type": "accept_shot", "shot_index": index}
+
+        # Keep intervention execution deterministic when the user's message
+        # names several shots in one sentence.  The set is retained as the
+        # authoritative filter for council actions below.
+        return [actions[index] for index in sorted(actions)], set(actions)
+
+    def _accept_intervention_shot(
+        self, production: dict[str, Any], action: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist an explicit acceptance and make it a resume-safe lock."""
+        shot = self._intervention_shot(production["id"], action.get("shot_index"))
+        selected, path = self._select_intervention_attempt(shot, action)
+        selected_attempt = int(selected["attempt"])
+        for attempt in shot.get("attempts", []):
+            if attempt["id"] == selected["id"]:
+                continue
+            if attempt.get("status") in {"queued", "generating", "reviewing"}:
+                update_shot_attempt(
+                    attempt["id"], status="interrupted",
+                    error="Superseded by an explicit shot acceptance",
+                )
+        update_shot_attempt(selected["id"], status="accepted", output_path=str(path), error=None)
+        update_shot(
+            shot["id"], status="accepted", accepted_attempt=selected_attempt,
+        )
+        add_event(production["id"], "shot.accepted_by_intervention", {
+            "shot_id": shot["id"], "shot_index": int(shot["shot_index"]),
+            "attempt": selected_attempt, "output_path": str(path),
+        })
+        return {
+            "shot_index": int(shot["shot_index"]),
+            "shot_id": shot["id"],
+            "attempt": selected_attempt,
+            "output_path": str(path),
+        }
+
     async def _execute_intervention_actions(
         self, production: dict[str, Any], actions: list[dict[str, Any]], message_id: str,
     ) -> tuple[list[dict[str, Any]], str | None]:
@@ -2074,19 +2451,73 @@ OTHER PRODUCER'S CONSULTATION:
                     })
                 elif action_type == "update_shot":
                     shot_index = int(action.get("shot_index"))
-                    shot = next((item for item in list_shots(production["id"], private=True)
-                                 if int(item["shot_index"]) == shot_index), None)
-                    if not shot:
-                        raise ValueError(f"Shot {shot_index} does not exist")
+                    shot = self._intervention_shot(production["id"], shot_index)
                     if shot.get("status") in {"generating", "reviewing", "completed"}:
-                        raise ValueError(f"Shot {shot_index} is already {shot.get('status')} and cannot be edited here")
+                        changes = action.get("changes")
+                        if not (
+                            isinstance(changes, dict)
+                            and str(changes.get("status") or "").casefold() == "accepted"
+                        ):
+                            raise ValueError(f"Shot {shot_index} is already {shot.get('status')} and cannot be edited here")
                     changes = action.get("changes")
                     if not isinstance(changes, dict) or not changes:
                         raise ValueError("update_shot requires a non-empty changes object")
+                    if str(changes.get("status") or "").casefold() == "accepted":
+                        # Older agent sessions emitted status=accepted through
+                        # update_shot. Treat it as the explicit acceptance
+                        # operation so it cannot be rejected by the editable
+                        # field allowlist or accidentally followed by a retry.
+                        accept_action = dict(action)
+                        for selector in (
+                            "attempt", "attempt_number", "selected_attempt",
+                            "output_path", "selected_output_path", "filename",
+                        ):
+                            if selector not in accept_action and selector in changes:
+                                accept_action[selector] = changes[selector]
+                        accepted = self._accept_intervention_shot(production, accept_action)
+                        remaining = {
+                            key: value for key, value in changes.items()
+                            if key not in {
+                                "status", "attempt", "attempt_number", "selected_attempt",
+                                "output_path", "selected_output_path", "filename",
+                            }
+                        }
+                        normalized = self._validated_intervention_shot_changes(
+                            production, shot, remaining,
+                        ) if remaining else {}
+                        if normalized:
+                            update_shot(shot["id"], **normalized)
+                        interrupted = (
+                            self._invalidate_shot_generation(
+                                shot, "Superseded by an intervention shot update",
+                            ) if self._shot_change_requires_regeneration(normalized) else []
+                        )
+                        results.append({
+                            "type": action_type, "status": "completed",
+                            "shot_index": shot_index, "changes": {"status": "accepted", **normalized},
+                            "accepted_attempt": accepted["attempt"],
+                            "output_path": accepted["output_path"],
+                            "requeued": bool(interrupted),
+                            "compatibility_action": "accept_shot",
+                        })
+                        continue
                     normalized = self._validated_intervention_shot_changes(production, shot, changes)
                     update_shot(shot["id"], **normalized)
+                    interrupted = (
+                        self._invalidate_shot_generation(
+                            shot, "Superseded by an intervention shot update",
+                        ) if self._shot_change_requires_regeneration(normalized) else []
+                    )
                     results.append({"type": action_type, "status": "completed",
-                                    "shot_index": shot_index, "changes": normalized})
+                                    "shot_index": shot_index, "changes": normalized,
+                                    "requeued": bool(interrupted),
+                                    "interrupted_attempt_ids": interrupted})
+                elif action_type == "accept_shot":
+                    accepted = self._accept_intervention_shot(production, action)
+                    update_production(
+                        production["id"], status="running", stage="shot_generation", error=None,
+                    )
+                    results.append({"type": action_type, "status": "completed", **accepted})
                 elif action_type == "regenerate_shot":
                     shot_index = int(action.get("shot_index"))
                     shot = next((item for item in list_shots(production["id"], private=True)
@@ -2096,6 +2527,19 @@ OTHER PRODUCER'S CONSULTATION:
                     prompt = action.get("prompt")
                     if prompt is not None and not str(prompt).strip():
                         raise ValueError("regenerate_shot prompt cannot be empty")
+                    reuse_prompt = action.get("reuse_prompt") is True
+                    if prompt is None and not reuse_prompt:
+                        # Do not leave an old queued/reviewing attempt alive
+                        # after rejecting an underspecified correction.  A
+                        # later resume must wait for a concrete prompt rather
+                        # than silently reusing that stale render.
+                        self._invalidate_shot_generation(
+                            shot, "Blocked promptless intervention regeneration",
+                        )
+                        raise ValueError(
+                            "regenerate_shot requires a complete new prompt; "
+                            "set reuse_prompt=true only for an intentional same-prompt rerun"
+                        )
                     if prompt is not None:
                         update_shot(shot["id"], prompt=str(prompt).strip())
                     for attempt in shot.get("attempts", []):
@@ -2120,6 +2564,8 @@ OTHER PRODUCER'S CONSULTATION:
                         "type": action_type, "status": "completed",
                         "shot_index": shot_index, "affected_shots": affected,
                         "prompt_updated": prompt is not None,
+                        "reuse_prompt": reuse_prompt,
+                        "prompt": str(prompt).strip() if prompt is not None else shot.get("prompt"),
                     })
                 elif action_type == "update_production_config":
                     changes = action.get("changes")
@@ -2239,6 +2685,9 @@ production moving, record the warning, and let the controller retry or choose th
         for message in pending:
             recipient = str(message.get("recipient") or "both").lower()
             instruction = str(message.get("content") or "").strip()
+            direct_actions, preservation_targets = self._infer_user_acceptance_actions(
+                production, instruction,
+            )
             update_message_metadata(message["id"], execution_status="executing")
             add_message(
                 production["id"], "system", "all", "status",
@@ -2246,19 +2695,135 @@ production moving, record the warning, and let the controller retry or choose th
                 {"intervention": True, "intervention_id": message["id"], "execution_status": "executing"},
             )
             try:
-                council_result = await self._intervention_council_turn(
-                    production, instruction, recipient,
-                )
-                plan = self._intervention_plan(council_result)
-                action_results, action_policy = await self._execute_intervention_actions(
-                    production, plan["actions"], message["id"],
-                )
-                final_result = council_result
-                if action_results:
-                    refreshed = get_production(production["id"], private=True) or production
-                    final_result = await self._intervention_followup(
-                        refreshed, instruction, recipient, action_results,
+                direct_results: list[dict[str, Any]] = []
+                if direct_actions:
+                    direct_results, _ = await self._execute_intervention_actions(
+                        production, direct_actions, message["id"],
                     )
+                    # Acceptance is a user safety decision. Refresh the
+                    # context before asking the council to interpret it.
+                    production = get_production(production["id"], private=True) or production
+                council_error: Exception | None = None
+                try:
+                    council_result = await self._intervention_council_turn(
+                        production, instruction, recipient,
+                    )
+                except Exception as exc:
+                    council_error = exc
+
+                if council_error is not None and not direct_results:
+                    # Without a deterministic local action there is no safe
+                    # way to resume after a failed council turn. Preserve the
+                    # old behavior for ordinary interventions and surface the
+                    # actual provider failure to the user.
+                    raise council_error
+
+                if council_error is not None:
+                    # A direct user preservation action has already changed
+                    # the checkpoint. A council timeout/transport/schema
+                    # failure must not undo that decision or send the whole
+                    # intervention back through the retry loop.
+                    direct_failed = [
+                        item for item in direct_results
+                        if item.get("status") == "failed"
+                    ]
+                    action_results = direct_results
+                    action_policy = "await_user" if direct_failed else "resume"
+                    final_result = AgentResult(
+                        "system",
+                        {
+                            "summary": (
+                                "The direct user preservation action was applied."
+                                if not direct_failed
+                                else "The direct user preservation action could not be applied."
+                            ),
+                            "decision": "PRESERVE" if not direct_failed else "BLOCK",
+                            "content": {
+                                "reply": (
+                                    "The explicit user preservation instruction was applied. "
+                                    "Council consultation did not complete, but the saved decision "
+                                    "remains authoritative."
+                                    if not direct_failed
+                                    else "The explicit user preservation instruction could not be applied."
+                                ),
+                                "actions": [],
+                                "resume_policy": action_policy,
+                            },
+                            "issues": (
+                                []
+                                if not direct_failed
+                                else [{
+                                    "severity": "blocking",
+                                    "description": str(direct_failed[0].get("error") or "Acceptance failed"),
+                                }]
+                            ),
+                            "next_action": "resume" if not direct_failed else "await_user",
+                            "confidence": None,
+                            "requires_user": bool(direct_failed),
+                        },
+                        "",
+                        None,
+                        "bridge",
+                        "n/a",
+                    )
+                    plan = {
+                        "actions": [],
+                        "resume_policy": action_policy,
+                        "issues": [],
+                        "requires_user": bool(direct_failed),
+                    }
+                    add_message(
+                        production["id"], "system", "all",
+                        "error" if direct_failed else "status",
+                        (
+                            "The explicit user preservation instruction was applied, but council "
+                            f"consultation did not complete: {council_error}. The saved decision "
+                            "remains authoritative."
+                            if not direct_failed
+                            else
+                            "The explicit user preservation instruction could not be applied, and "
+                            f"council consultation also failed: {council_error}."
+                        ),
+                        {
+                            "intervention": True,
+                            "intervention_id": message["id"],
+                            "council_error": str(council_error)[:2000],
+                            "direct_action_results": direct_results,
+                        },
+                    )
+                else:
+                    plan = self._intervention_plan(council_result)
+                    council_actions = []
+                    for action in plan["actions"]:
+                        action_type = str(action.get("type") or "").casefold()
+                        raw_index = action.get("shot_index")
+                        try:
+                            action_index = int(raw_index) if raw_index is not None else None
+                        except (TypeError, ValueError):
+                            action_index = None
+                        # A clear user preservation instruction is authoritative.
+                        # Do not let the council turn undo it by regenerating or
+                        # moving that shot back to the planned state.
+                        if action_index in preservation_targets and action_type in {
+                            "regenerate_shot", "update_shot",
+                        }:
+                            changes = action.get("changes")
+                            if action_type == "regenerate_shot" or not (
+                                isinstance(changes, dict)
+                                and str(changes.get("status") or "").casefold() == "accepted"
+                            ):
+                                continue
+                        council_actions.append(action)
+                    council_results, action_policy = await self._execute_intervention_actions(
+                        production, council_actions, message["id"],
+                    )
+                    action_results = [*direct_results, *council_results]
+                    final_result = council_result
+                    if action_results:
+                        refreshed = get_production(production["id"], private=True) or production
+                        final_result = await self._intervention_followup(
+                            refreshed, instruction, recipient, action_results,
+                        )
                 final_plan = self._intervention_plan(final_result)
                 blocking_issues = [
                     issue for issue in final_plan["issues"]
@@ -2266,11 +2831,34 @@ production moving, record the warning, and let the controller retry or choose th
                     and str(issue.get("severity") or "").casefold() in {"blocking", "critical", "error"}
                 ]
                 failed_actions = [item for item in action_results if item.get("status") == "failed"]
+                acceptance_failed = any(
+                    item.get("status") == "failed"
+                    and item.get("type") in {"accept_shot", "update_shot"}
+                    and "accept" in str(item.get("error") or "").casefold()
+                    for item in action_results
+                )
+                requires_executable_action = self._intervention_requests_executable_action(instruction)
+                effective_intervention_action = self._has_effective_intervention_action(action_results)
+                no_executable_action = requires_executable_action and not effective_intervention_action
                 previous_status = str(message.get("metadata", {}).get("previous_status") or "running")
                 policy = action_policy or final_plan["resume_policy"] or plan["resume_policy"]
                 current = get_production(production["id"], private=True) or production
                 autonomous = current.get("participation_mode") == "autonomous"
-                if autonomous and previous_status not in {"draft", "completed", "stopped"}:
+                if acceptance_failed:
+                    # A request to keep/accept an existing shot is a safety
+                    # decision, not a recoverable creative defect. Never let
+                    # autonomous mode resume into another generation when the
+                    # selected artifact could not be applied.
+                    target_status = "awaiting_user"
+                    result_state = "blocked"
+                elif no_executable_action:
+                    # An acknowledgement is not a mutation.  Resuming here
+                    # would make the next task read the previous saved prompt,
+                    # which makes the user's request appear to be ignored.
+                    target_status = "awaiting_user"
+                    result_state = "awaiting_action"
+                    policy = "await_user"
+                elif autonomous and previous_status not in {"draft", "completed", "stopped"}:
                     # Autonomous productions treat a user intervention as
                     # guidance, not as a new approval gate. The agents may
                     # report a recoverable issue or ask for clarification,
@@ -2310,11 +2898,21 @@ production moving, record the warning, and let the controller retry or choose th
                     "message_id": message["id"], "recipient": recipient,
                     "actions": [item.get("type") for item in action_results],
                     "blocking_issues": len(blocking_issues), "target_status": target_status,
-                    "autonomous": autonomous,
+                    "autonomous": autonomous, "no_executable_action": no_executable_action,
                 })
                 if target_status != current.get("status"):
                     update_production(production["id"], status=target_status, error=None)
-                if autonomous and (failed_actions or blocking_issues or final_plan["requires_user"]
+                if no_executable_action:
+                    add_message(
+                        production["id"], "system", "user", "status",
+                        "The agents acknowledged your change request but returned no executable shot or production action. "
+                        "No new generation was started and the previous prompt was not reused; the production is waiting "
+                        "for a concrete correction.",
+                        {"intervention": True, "intervention_id": message["id"],
+                         "execution_status": "completed", "awaiting_action": True,
+                         "no_executable_action": True, "action_results": action_results},
+                    )
+                elif autonomous and not acceptance_failed and (failed_actions or blocking_issues or final_plan["requires_user"]
                                    or policy in {"pause", "await_user"}):
                     details = []
                     if failed_actions:
@@ -2335,10 +2933,17 @@ production moving, record the warning, and let the controller retry or choose th
                 elif failed_actions or blocking_issues:
                     add_message(
                         production["id"], "system", "all", "status",
-                        "The agents handled your message, but a requested action or review found a blocking issue. "
-                        "The production is paused at the safe checkpoint.",
+                        (
+                            "The agents could not apply the requested shot acceptance because the selected existing "
+                            "video was not available. The production is waiting for a valid attempt selection."
+                            if acceptance_failed
+                            else
+                            "The agents handled your message, but a requested action or review found a blocking issue. "
+                            "The production is paused at the safe checkpoint."
+                        ),
                         {"intervention": True, "intervention_id": message["id"],
                          "execution_status": "completed", "resume_blocked": True,
+                         "acceptance_failed": acceptance_failed,
                          "action_results": action_results},
                     )
                 elif target_status == "awaiting_user":
@@ -2607,12 +3212,39 @@ Final package: {json.dumps(final.content, ensure_ascii=False)}
                 )
                 if latest_shot:
                     shot = latest_shot
-                if shot["status"] == "accepted" and shot.get("accepted_attempt"):
-                    accepted = next((item for item in shot["attempts"] if item["attempt"] == shot["accepted_attempt"]), None)
+                if shot["status"] == "accepted":
+                    accepted = next(
+                        (item for item in shot["attempts"]
+                         if str(item.get("attempt")) == str(shot.get("accepted_attempt"))),
+                        None,
+                    ) if shot.get("accepted_attempt") is not None else None
                     accepted_path = self._current_attempt_video(accepted) if accepted else None
                     if accepted_path:
                         previous_video = accepted_path
                         continue
+                    accepted_label = (
+                        f"attempt {shot.get('accepted_attempt')}"
+                        if shot.get("accepted_attempt") is not None
+                        else "the selected attempt"
+                    )
+                    reason = (
+                        f"{shot['title']} is marked accepted, but {accepted_label} has no resolvable video file. "
+                        "No new generation was queued; select an existing playable attempt or clear the accepted decision."
+                    )
+                    update_production(
+                        production_id, status="awaiting_user", stage="shot_review", error=reason,
+                    )
+                    add_message(production_id, "system", "user", "error", reason, {
+                        "shot_id": shot["id"], "shot_index": int(shot["shot_index"]),
+                        "accepted_attempt": shot.get("accepted_attempt"),
+                        "accepted_asset_missing": True,
+                    })
+                    add_event(production_id, "shot.accepted_asset_missing", {
+                        "shot_id": shot["id"], "shot_index": int(shot["shot_index"]),
+                        "accepted_attempt": shot.get("accepted_attempt"),
+                    })
+                    self._checkpoint(production_id)
+                    return
                 assigned_image_references = [
                     reference for reference_id in shot.get("reference_ids", [])
                     if (reference := get_reference(production_id, reference_id, private=True))

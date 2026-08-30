@@ -203,21 +203,36 @@ def attach_song(video: Path, song: Path, output: Path) -> dict:
     return {"output": str(output), "ffprobe": media_probe(output, require_audio=True)}
 
 
-def assemble_clips(clips: list[Path], output: Path) -> dict:
+def assemble_clips(
+    clips: list[Path], output: Path, segments: list[dict[str, float]] | None = None,
+) -> dict:
     """Normalize and join validated H3 clips with deterministic hard cuts.
 
     The first selected clip defines the output frame size. Every input is
     decoded, normalized to 24fps/stereo 48kHz, and re-encoded so history items
     with different H3 resolution presets can still be joined safely.
     """
-    if len(clips) < 2:
-        raise ValueError("At least two clips are required for assembly")
+    if not clips:
+        raise ValueError("At least one clip is required for assembly")
+    if segments is not None and len(segments) != len(clips):
+        raise ValueError("Assembly segments must match the number of clips")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required for final assembly")
 
     probes = [media_probe(path, require_audio=False) for path in clips]
-    durations = [_duration(probe) for probe in probes]
+    source_durations = [_duration(probe) for probe in probes]
+    normalized_segments: list[dict[str, float]] = []
+    durations: list[float] = []
+    for index, source_duration in enumerate(source_durations):
+        segment = (segments or [{} for _ in clips])[index]
+        trim_in = max(0.0, float(segment.get("trim_in", 0)))
+        trim_out = max(0.0, float(segment.get("trim_out", 0)))
+        duration = source_duration - trim_in - trim_out
+        if duration <= 0:
+            raise ValueError(f"Clip {index + 1} has no duration after editorial trims")
+        normalized_segments.append({"trim_in": trim_in, "trim_out": trim_out, "duration": duration})
+        durations.append(duration)
     first_stream = _video_stream(probes[0])
     width = int(first_stream.get("width") or 0)
     height = int(first_stream.get("height") or 0)
@@ -231,21 +246,27 @@ def assemble_clips(clips: list[Path], output: Path) -> dict:
         for probe in probes
     )
     for index, (clip, duration) in enumerate(zip(clips, durations)):
+        trim_in = normalized_segments[index]["trim_in"]
         inputs += ["-i", str(clip)]
         filters.append(
-            f"[{index}:v]fps=24,trim=duration={duration:.6f},"
+            f"[{index}:v]fps=24,trim=start={trim_in:.6f}:duration={duration:.6f},"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
             f"settb=AVTB,setpts=PTS-STARTPTS,format=yuv420p[v{index}]"
         )
         if has_any_audio:
             has_audio = any(stream.get("codec_type") == "audio" for stream in probes[index].get("streams", []))
-            audio_source = f"[{index}:a]" if has_audio else f"anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6f},"
-            filters.append(
-                f"{audio_source}aresample=48000,"
-                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
-                f"asetpts=PTS-STARTPTS[a{index}]"
-            )
+            if has_audio:
+                filters.append(
+                    f"[{index}:a]atrim=start={trim_in:.6f}:duration={duration:.6f},aresample=48000,"
+                    f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                    f"asetpts=PTS-STARTPTS[a{index}]"
+                )
+            else:
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6f},"
+                    f"asetpts=PTS-STARTPTS[a{index}]"
+                )
 
     if has_any_audio:
         concat_inputs = "".join(f"[v{index}][a{index}]" for index in range(len(clips)))
@@ -272,7 +293,8 @@ def assemble_clips(clips: list[Path], output: Path) -> dict:
     final_probe = media_probe(output, require_audio=False)
     return {
         "source_count": len(clips),
-        "source_durations": durations,
+        "source_durations": source_durations,
+        "segments": normalized_segments,
         "output": str(output),
         "ffprobe": final_probe,
     }

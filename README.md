@@ -147,6 +147,13 @@ Read `.agents/skills/h3-environment-bootstrap/SKILL.md` before setup and
 Read `.agents/skills/git-standards/SKILL.md` before Git work and
 `.agents/skills/release-process/SKILL.md` before releases.
 
+Bootstrap also installs the versioned production skills for Codex and AGY into
+`.agents/skills`. The Production UI still decides which production skills are
+enabled, and Council seats decide which specialist role is active; installed
+skill bodies are read natively by the agents rather than pasted into every
+request. To refresh only that project installation after editing a skill, run
+`scripts\install-project-skills.ps1`.
+
 ## Proof boundaries
 
 CI proves source build and tests. A hash report proves a downloaded file. API

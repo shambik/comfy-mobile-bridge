@@ -88,7 +88,7 @@ class JobApiTests(unittest.TestCase):
         data = {
             "prompt": "",
             "mode": "lip_sync", "duration": "5", "engine": "standard",
-            "encoder": "native", "audio_start": "2.5",
+            "encoder": "native", "audio_start": "2.5", "audio_duration": "6",
         }
         files = {
             "first_frame": ("face.png", b"image-placeholder", "image/png"),
@@ -107,11 +107,11 @@ class JobApiTests(unittest.TestCase):
         connection = sqlite3.connect(self.path)
         try:
             row = connection.execute(
-                "SELECT mode,engine,encoder,first_frame_name,reference_audio_name,no_audio FROM jobs"
+                "SELECT mode,engine,encoder,audio_start,audio_duration,first_frame_name,reference_audio_name,no_audio FROM jobs"
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual(row, ("lip_sync", "standard", "native", "face.png", "trimmed.wav", 0))
+        self.assertEqual(row, ("lip_sync", "standard", "native", 2.5, 6.0, "face.png", "trimmed.wav", 0))
 
     def test_lip_sync_requires_audio(self):
         response = self.post(mode="lip_sync", engine="standard", encoder="native")

@@ -182,6 +182,20 @@ AGY_COMMAND = str(agents_config.get("agy_command") or "agy").strip()
 AGENT_TIMEOUT_SECONDS = max(30, _as_int(agents_config.get("timeout_seconds"), 1800))
 AGENT_HEARTBEAT_SECONDS = max(5, min(120, _as_int(agents_config.get("heartbeat_seconds"), 15)))
 PRODUCTION_CONCURRENCY = max(1, min(8, _as_int(agents_config.get("production_concurrency"), 3)))
+_codex_home_value = os.environ.get("CODEX_HOME") or agents_config.get("codex_home")
+CODEX_HOME = _as_path(
+    str(_codex_home_value) if _codex_home_value else None,
+    Path.home() / ".codex",
+)
+_codex_generated_images_value = (
+    os.environ.get("CODEX_GENERATED_IMAGES")
+    or agents_config.get("codex_generated_images")
+)
+CODEX_GENERATED_IMAGES = _as_path(
+    str(_codex_generated_images_value) if _codex_generated_images_value else None,
+    CODEX_HOME / "generated_images",
+    relative_to=CODEX_HOME,
+)
 CODEX_DEFAULT_RUNTIME = str(agents_config.get("codex_runtime") or "codex").strip()
 CODEX_DEFAULT_MODEL = str(agents_config.get("codex_model") or "gpt-5.6-sol").strip()
 CODEX_DEFAULT_EFFORT = str(agents_config.get("codex_effort") or "high").strip()

@@ -30,6 +30,12 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts\validate-manifests.ps1')
     if ($LASTEXITCODE -ne 0) { throw 'Manifest validation failed.' }
 
+    # Install project-native Codex/AGY skills before runtime setup. This only
+    # copies versioned skill instructions into .agents\skills; it does not
+    # touch models, ComfyUI, state, or global agent configuration.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts\install-project-skills.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'Project skill installation failed.' }
+
     $dependencies = Get-JsonFile -Path (Join-Path $repo 'manifests\dependencies.json')
     $models = Get-JsonFile -Path (Join-Path $repo 'manifests\models.json')
     if ($DryRun) {

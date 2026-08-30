@@ -164,7 +164,13 @@ and selected skills.
 
 The application discovers repository and app-managed skills and can register
 external folders. Settings provides enable/disable checkboxes and per-project
-selection. Only enabled selected skills are injected into production context.
+selection. The selected skill IDs are persisted with each production and the
+bridge passes only their names, descriptions, and project-native file paths to
+the agents. The `SKILL.md` bodies are not copied into every request; Codex and
+AGY read the installed project skill through their normal file/skill mechanism.
+Council seat roles are selected separately and resolve to their own native role
+skill for the current task. Installed skills are not automatically active just
+because they exist in `.agents/skills`.
 
 Unregistering removes the catalog entry but preserves files. Complete deletion
 is available only for skills copied into `state/skills`; repository, system,
