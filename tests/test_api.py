@@ -118,6 +118,32 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("uploaded audio", response.text)
 
+    def test_fused_lip_sync_profile_is_persisted_with_direct_workflow(self):
+        files = {
+            "audio": ("voice.wav", b"audio-placeholder", "audio/wav"),
+        }
+        data = {
+            "prompt": "A singer performs naturally to the uploaded vocal",
+            "mode": "lip_sync", "duration": "5", "engine": "fused_sla",
+            "encoder": "native", "steps": "6", "audio_pretrimmed": "true",
+            "audio_original_start": "0",
+        }
+        with patch("backend.main.fused_sla_ready", return_value=True), \
+             patch("backend.main.fused_workflow_ready", return_value=True), \
+             patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/voice.wav", "voice.wav"))), \
+             patch("backend.main.probe_audio_duration", return_value=5.0):
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT mode,engine,workflow_variant,steps,reference_audio_name FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("lip_sync", "fused_sla", "direct", 6, "voice.wav"))
+
     def test_lip_sync_preserves_a_client_pretrimmed_audio_window(self):
         data = {
             "prompt": "",

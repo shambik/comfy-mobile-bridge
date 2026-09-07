@@ -9,7 +9,7 @@ import httpx
 
 from .comfy import (ComfyBusyError, ComfyCancellationError, ComfyClient,
                     find_video, gpu_sample, media_probe)
-from .config import (AUDIOLOCK_NODE_DIR, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
+from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
                      FUSED_WORKFLOW_FILES, INPUT, MODELS, REF2VA_MODEL,
@@ -18,7 +18,8 @@ from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
 from .library import finalize_completed_asset, resolve_asset_path
-from .workflows import (native_audio_lock_workflow, official_fused_workflow,
+from .workflows import (fused_sla_audio_lock_workflow, native_audio_lock_workflow,
+                        official_fused_workflow,
                         reference_workflow,
                         spectrum_workflow, standard_workflow, turbo_workflow)
 
@@ -662,12 +663,29 @@ class QueueWorker:
             required |= {"KSamplerSelect", "LoadAudio", "MiniMaxH3NativeAudioLock"}
             if job["engine"] == "turbo":
                 required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
+            elif job["engine"] == "fused_sla":
+                required |= {
+                    "MiniMaxH3SigmaShift", "MiniMaxChunkFeedForward", "H3SLAAttention",
+                    "VAEDecode", "SamplerCustomAdvanced", "BasicGuider",
+                    "BasicScheduler", "RandomNoise",
+                }
+                required_files = [
+                    MODELS / "diffusion_models" / FUSED_SLA_MODEL,
+                    MODELS / "vae" / FUSED_VIDEO_VAE,
+                    MODELS / "vae" / AUDIO_VAE,
+                    FUSED_SLA_NODE_DIR / "__init__.py",
+                    AUDIOLOCK_NODE_DIR / "__init__.py",
+                ]
             elif job["engine"] != "standard":
-                raise RuntimeError("Lip-sync supports only the Standard or Turbo engine")
+                raise RuntimeError("Lip-sync supports the Standard, Turbo or Fused SLA engine")
             if (job.get("encoder") or "native") != "native":
                 raise RuntimeError("Lip-sync requires the native 32B encoder")
             if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
                 raise RuntimeError("Native AudioLock node is not installed")
+            if job["engine"] == "fused_sla":
+                missing_files = [str(path) for path in required_files if not path.exists()]
+                if missing_files:
+                    raise RuntimeError("Fused H3 lip-sync is not fully installed: " + ", ".join(missing_files))
             if not job.get("reference_audio_name"):
                 raise RuntimeError("Lip-sync job has no uploaded audio")
         elif job["mode"] == "reference" and job["engine"] != "fused_sla":
@@ -733,16 +751,26 @@ class QueueWorker:
         image_name = job.get("input_name")
         workflow_builder = "unknown"
         if job["mode"] == "lip_sync":
-            workflow_builder = "native_audio_lock_workflow"
-            workflow = native_audio_lock_workflow(
-                job["prompt"], job["duration"], seed, prefix,
-                audio_name=job["reference_audio_name"],
-                first_frame_name=job.get("first_frame_name"),
-                steps=job["steps"], width=job["width"], height=job["height"],
-                megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
-                encoder=encoder,
-                turbo=job["engine"] == "turbo", turbo_profile=job.get("turbo_profile") or "v1",
-            )
+            if job["engine"] == "fused_sla":
+                workflow_builder = "fused_sla_audio_lock_workflow"
+                workflow = fused_sla_audio_lock_workflow(
+                    job["prompt"], job["duration"], seed, prefix,
+                    audio_name=job["reference_audio_name"],
+                    first_frame_name=job.get("first_frame_name"),
+                    steps=job["steps"], width=job["width"], height=job["height"],
+                    megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
+                )
+            else:
+                workflow_builder = "native_audio_lock_workflow"
+                workflow = native_audio_lock_workflow(
+                    job["prompt"], job["duration"], seed, prefix,
+                    audio_name=job["reference_audio_name"],
+                    first_frame_name=job.get("first_frame_name"),
+                    steps=job["steps"], width=job["width"], height=job["height"],
+                    megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
+                    encoder=encoder,
+                    turbo=job["engine"] == "turbo", turbo_profile=job.get("turbo_profile") or "v1",
+                )
         elif job["mode"] == "reference" and job["engine"] != "fused_sla":
             workflow_builder = "reference_workflow"
             reference_images = json.loads(job.get("reference_images_json") or "[]")

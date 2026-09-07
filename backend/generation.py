@@ -66,6 +66,8 @@ def normalize_generation_settings(
         raise ValueError("The Fused I2V/FL2V workflow requires an image-to-video mode")
     if resolved_engine == "fused_sla" and resolved_variant in {"derope", "dyrope"} and mode not in {"text", "opening", "closing", "frames"}:
         raise ValueError("Fused de-rope workflows use text or image-to-video mode")
+    if resolved_engine == "fused_sla" and mode == "lip_sync" and resolved_variant != "direct":
+        raise ValueError("Fused lip-sync uses the Direct SLA workflow")
     if resolved_engine == "turbo":
         step_min, step_max, default_steps = (*TURBO_STEP_RANGE, 4)
     elif resolved_engine == "spectrum":
@@ -108,8 +110,8 @@ def normalize_generation_settings(
     resolved_encoder = encoder or "native"
     if resolved_encoder not in ("native", "clipproj"):
         raise ValueError("Text encoder must be native or clipproj")
-    if mode == "lip_sync" and resolved_engine not in ("standard", "turbo"):
-        raise ValueError("Lip-sync supports only the Standard or Turbo engine")
+    if mode == "lip_sync" and resolved_engine not in ("standard", "turbo", "fused_sla"):
+        raise ValueError("Lip-sync supports the Standard, Turbo or Fused SLA engine")
     if resolved_engine == "fused_sla" and resolved_encoder != "native":
         raise ValueError("H3 Fused SLA uses the native 32B text encoder")
     if mode == "lip_sync" and resolved_encoder != "native":

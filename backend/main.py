@@ -2454,8 +2454,8 @@ async def create_jobs(
         raise HTTPException(400, "Reference mode supports up to 3 videos")
     if mode not in ("reference",) and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
-    if mode == "lip_sync" and generation.engine not in ("standard", "turbo"):
-        raise HTTPException(400, "Lip-sync supports only the Standard or Turbo engine")
+    if mode == "lip_sync" and generation.engine not in ("standard", "turbo", "fused_sla"):
+        raise HTTPException(400, "Lip-sync supports the Standard, Turbo or Fused SLA engine")
     if mode == "lip_sync" and generation.encoder != "native":
         raise HTTPException(400, "Lip-sync uses the native 32B encoder")
     if mode == "lip_sync" and batch:

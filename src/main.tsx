@@ -801,16 +801,16 @@ function App() {
   const paragraphCount = useMemo(() => batch ? prompt.trim().split(/\n\s*\n/).filter(Boolean).length : 1, [prompt, batch])
   const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady
     ? 'standard'
-    : mode === 'lip_sync' && preferences.engine === 'fused_sla'
-      ? 'standard'
-      : preferences.engine === 'fused_sla' && !fusedSlaReady
+    : preferences.engine === 'fused_sla' && !fusedSlaReady
         ? 'turbo'
       : preferences.engine
   const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
     ? 'direct'
     : mode === 'reference'
-      ? 'ref2va'
-      : mode === 'text'
+    ? 'ref2va'
+    : mode === 'lip_sync'
+      ? 'direct'
+    : mode === 'text'
         ? preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'i2v_fl2v' ? 'direct' : preferences.fusedWorkflow
         : preferences.fusedWorkflow === 'ref2va' ? 'i2v_fl2v' : preferences.fusedWorkflow
   const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' ? 'native' : preferences.encoder
@@ -1209,7 +1209,7 @@ function App() {
     else if (next === 'lip_sync') {
       setClosingFrame(null)
       setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setNoAudio(false)
-      setPreferences(current => ({ ...current, engine: 'standard', encoder: 'native', aspect: '16:9', megapixels: Math.max(current.megapixels, 0.41) }))
+      setPreferences(current => ({ ...current, engine: current.engine === 'fused_sla' ? 'fused_sla' : 'standard', fusedWorkflow: current.engine === 'fused_sla' ? 'direct' : current.fusedWorkflow, encoder: 'native', aspect: '16:9', megapixels: Math.max(current.megapixels, 0.41) }))
       setBatch(false)
     }
     else if (next === 'reference') {
@@ -1247,15 +1247,16 @@ function App() {
   const selectEngine = (engine: Engine) => {
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
-    if (engine === 'fused_sla' && (!fusedSlaReady || mode === 'lip_sync' || (mode === 'reference' && !fusedRef2vaReady))) return
+    if (engine === 'fused_sla' && (!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady))) return
     if (engine === 'fused_sla') setConnected(false)
     setPreferences(current => engine !== 'fused_sla'
       ? { ...current, engine }
-      : { ...current, engine, fusedWorkflow: mode === 'reference' ? 'ref2va' : mode === 'text' ? 'direct' : fusedI2vReady ? 'i2v_fl2v' : 'direct' })
+      : { ...current, engine, fusedWorkflow: mode === 'reference' ? 'ref2va' : mode === 'lip_sync' || mode === 'text' ? 'direct' : fusedI2vReady ? 'i2v_fl2v' : 'direct' })
   }
 
   const selectFusedWorkflow = (workflow: FusedWorkflow) => {
     if (!fusedSlaReady || !fusedWorkflowReady(workflow)) return
+    if (mode === 'lip_sync' && workflow !== 'direct') return
     if (mode === 'reference' && workflow !== 'ref2va') return
     if (mode !== 'reference' && workflow === 'ref2va') return
     if (mode === 'text' && workflow === 'i2v_fl2v') return
@@ -1617,20 +1618,20 @@ function App() {
               <button type="button" className={effectiveEngine === 'spectrum' ? 'active' : ''} aria-pressed={effectiveEngine === 'spectrum'} disabled={mode === 'lip_sync' || !spectrumReady} onClick={() => selectEngine('spectrum')}>
                 <Sparkles size={16} /><span><strong>Spectrum</strong><small>native + מהיר</small></span>
               </button>
-              <button type="button" className={effectiveEngine === 'fused_sla' ? 'active' : ''} aria-pressed={effectiveEngine === 'fused_sla'} disabled={mode === 'lip_sync' || !fusedSlaReady || (mode === 'reference' && !fusedRef2vaReady)} onClick={() => selectEngine('fused_sla')}>
+              <button type="button" className={effectiveEngine === 'fused_sla' ? 'active' : ''} aria-pressed={effectiveEngine === 'fused_sla'} disabled={!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady)} onClick={() => selectEngine('fused_sla')}>
                 <BrainCircuit size={16} /><span><strong>H3 Fused SLA</strong><small>INT8 · 4–8 steps</small></span>
               </button>
             </div>
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
             {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
-            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
+            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'fused_sla' ? 'Fused SLA INT8' : effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
             {effectiveEngine === 'fused_sla' && <p className="setting-note">Fused INT8 · SLA sparse attention · low VRAM chunking · 4 steps recommended; 8 is slower and can sharpen detail</p>}
             {effectiveEngine === 'fused_sla' && <div className="fused-workflow-picker">
               <div className="setting-title"><span>Fused workflow</span><small>{fusedWorkflowLabel(effectiveFusedWorkflow)}</small></div>
               <div className="fused-workflow-toggle">
                 {(['direct', 'i2v_fl2v', 'ref2va', 'derope', 'dyrope'] as FusedWorkflow[]).map(workflow => {
-                  const modeAllowed = mode === 'reference' ? workflow === 'ref2va' : workflow !== 'ref2va' && !(mode === 'text' && workflow === 'i2v_fl2v')
+                  const modeAllowed = mode === 'lip_sync' ? workflow === 'direct' : mode === 'reference' ? workflow === 'ref2va' : workflow !== 'ref2va' && !(mode === 'text' && workflow === 'i2v_fl2v')
                   const ready = fusedWorkflowReady(workflow)
                   return <button key={workflow} type="button" className={effectiveFusedWorkflow === workflow ? 'active' : ''} aria-pressed={effectiveFusedWorkflow === workflow} disabled={!modeAllowed || !ready} onClick={() => selectFusedWorkflow(workflow)}>
                     <strong>{fusedWorkflowLabel(workflow)}</strong><small>{workflow === 'direct' ? '01 · 4–8 steps' : workflow === 'i2v_fl2v' ? '04 · opening/closing frame' : workflow === 'ref2va' ? '05 · reference image' : workflow === 'derope' ? '02 · two-pass recovery' : '03 · temporal adapter'}</small>

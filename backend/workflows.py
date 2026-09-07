@@ -424,6 +424,68 @@ def native_audio_lock_workflow(
         nodes["104"]["inputs"]["first_frame"] = ["200", 0]
     return deepcopy(nodes)
 
+
+def fused_sla_audio_lock_workflow(
+    prompt: str,
+    duration: int,
+    seed: int,
+    prefix: str,
+    audio_name: str,
+    first_frame_name: str | None = None,
+    steps: int = 4,
+    width: int = 736,
+    height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
+):
+    """Fused INT8 H3 lip-sync with an exact user-supplied audio track."""
+    nodes = _common_decode(
+        "104", "21", {"id": "22", "scheduler": "9"},
+        seed, prefix, encoder="native", include_audio=False,
+    )
+    nodes.update({
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
+        **_duration_selector(duration),
+        "6": {"class_type": "UNETLoader", "inputs": {
+            "unet_name": FUSED_SLA_MODEL, "weight_dtype": "default",
+        }},
+        "18": {"class_type": "MiniMaxChunkFeedForward", "inputs": {
+            "model": ["6", 0], "chunks": 4, "seq_threshold": 4096,
+        }},
+        "19": {"class_type": "H3SLAAttention", "inputs": {
+            "model": ["18", 0], "sparsity_ratio": 0.90,
+            "block_size": "64", "min_seq_len": 8192,
+            "dense_last_steps": 0, "protect_audio": True, "enabled": True,
+        }},
+        "20": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
+            "model": ["19", 0], "shift_video": 12.0, "shift_audio": 3.0,
+        }},
+        "21": {"class_type": "MiniMaxH3NativeAudioLock", "inputs": {
+            "model": ["20", 0], "av_latent": ["104", 1],
+            "audio_vae": ["24", 0], "audio": ["23", 0],
+        }},
+        "22": {"class_type": "KSamplerSelect", "inputs": {
+            "sampler_name": "res_multistep",
+        }},
+        "9": {"class_type": "BasicScheduler", "inputs": {
+            "model": ["21", 0], "scheduler": "simple", "steps": steps,
+            "denoise": 1.0,
+        }},
+        "23": {"class_type": "LoadAudio", "inputs": {"audio": audio_name}},
+        "24": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["13", 0], "vae": ["11", 0], "prompt": prompt,
+            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1],
+        }},
+    })
+    nodes["11"] = {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}}
+    nodes["14"]["inputs"]["latent_image"] = ["21", 1]
+    nodes["91"]["inputs"]["audio"] = ["21", 2]
+    if first_frame_name:
+        nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
+        nodes["104"]["inputs"]["first_frame"] = ["200", 0]
+    return deepcopy(nodes)
+
 def spectrum_workflow(
     prompt: str,
     duration: int,
