@@ -134,6 +134,25 @@ def _create_sequence_tables(db):
     """)
 
 
+def _create_video_vault_table(db):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS video_vault_items (
+        id TEXT PRIMARY KEY,
+        original_name TEXT NOT NULL,
+        stored_name TEXT NOT NULL UNIQUE,
+        content_type TEXT NOT NULL,
+        size INTEGER NOT NULL CHECK(size > 0),
+        sha256 TEXT NOT NULL,
+        duration REAL NOT NULL CHECK(duration > 0),
+        width INTEGER NOT NULL CHECK(width > 0),
+        height INTEGER NOT NULL CHECK(height > 0),
+        frame_rate TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_video_vault_created ON video_vault_items(created_at DESC);
+    """)
+
+
 def _table_columns(db):
     return {row[1] for row in db.execute("PRAGMA table_info(jobs)").fetchall()}
 
@@ -256,6 +275,7 @@ def init_db():
         elif not table:
             _create_jobs_table(db)
         _create_sequence_tables(db)
+        _create_video_vault_table(db)
         db.execute(
             """
             UPDATE jobs

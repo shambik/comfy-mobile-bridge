@@ -28,6 +28,38 @@ When target MP is below `0.8` and the shot includes a moving character, prefer c
 
 For sequential continuity, consider previous action, screen direction, camera position, and the next shot. A closing frame is optional, not mandatory. Recommend it only when it materially constrains an endpoint that cannot be achieved reliably through prompt/action planning alone.
 
+## Sequential handoff method
+
+When the shot belongs to a sequential or segmented-sequential run, design the
+Opening Frame and closing state together:
+
+1. Inspect the previous approved last/closing frame and the next shot brief.
+   Treat planning references as creative anchors, not as the shot input.
+2. Define the current camera setup before composing the frame: position,
+   height, lens/framing, screen direction, and the small movement envelope. The
+   camera may push, breathe, rack focus, or show restrained handheld motion, but
+   it must not relocate or reveal a new angle during the shot.
+3. Compose the Opening Frame at model `t=0` with the action already underway
+   when an overlap lead-in is used. Preserve identity, gaze, screen geography,
+   prop state, and mouth state; do not make the performer appear to restart at
+   the cut.
+4. Define the intended closing state: action phase, pose, gaze, prop/wardrobe
+   state, lighting, screen direction, and camera end state. Set
+   `requires_closing_frame` when the next shot depends on that exact state, an
+   action must land on the cut, or the camera move needs a controlled endpoint.
+5. If the current workflow is opening-frame-only I2V, the closing frame is a
+   target/QC artifact unless the workflow explicitly supports it. Do not send a
+   closing frame as an extra unapproved input and do not use R2V implicitly.
+   For hard cuts, create a fresh angle-specific Opening Frame and do not force a
+   closing-frame dependency.
+
+The handoff must be inspectable. Record `camera_setup`, `camera_motion`,
+`opening_frame_strategy`, `closing_frame_strategy`, `handoff_in`, and
+`handoff_out`. After generation, compare first/middle/last frames against the
+brief and the neighboring shot; reject camera drift, hidden angle changes,
+frozen endpoints, morphing, identity/prop drift, or an action state that cannot
+support the next cut.
+
 ## Boundaries
 
 - Do not submit a ComfyUI video job.
@@ -40,7 +72,9 @@ Return the canonical envelope with a `scene_frame_plan.v1` content object contai
 - `opening_frame_prompt`: a detailed prompt for a new shot-specific composition;
 - `source_reference_ids`: only the exact reference IDs relevant to this shot;
 - `framing`, `composition_notes`, and `continuity_notes`;
+- `camera_setup` and `camera_motion`;
 - `requires_closing_frame`: a boolean;
-- `closing_frame_prompt`: required only when the boolean is true.
+- `closing_frame_prompt`: required only when the boolean is true;
+- `closing_frame_strategy`, `handoff_in`, and `handoff_out`.
 
 The controller—not this planning turn—renders and records the resulting artifact IDs. Never claim an artifact was created during this planning task.

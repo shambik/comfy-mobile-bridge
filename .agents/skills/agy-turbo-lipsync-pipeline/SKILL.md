@@ -151,6 +151,60 @@ The camera may change angle between shots through a new Opening Frame. During a 
 
 Use references to stabilize identity, wardrobe, location, lighting, props, and art direction. Do not blindly use the previous shot's last frame as the next Opening Frame; that is only valid for an explicitly approved sequential-continuity workflow. A hard cut receives a newly composed angle with the same approved visual bible.
 
+## Sequential camera and frame handoff
+
+When the continuity mode is sequential or segmented-sequential, treat every
+shot as a planned handoff between two visual states, not as an isolated prompt:
+
+- Define one camera setup per shot before writing the prompt: camera position,
+  height, lens/framing, screen direction, subject placement, and the permitted
+  movement envelope. A camera move must have a motivated start state, end state,
+  and maximum change (for example, a restrained push-in or a small handheld
+  drift). Do not let the model invent a pan into a new angle, a location change,
+  or a lens jump halfway through the shot.
+- The Opening Frame is the actual shot-specific composition at model `t=0`, not
+  a planning reference. For an overlapped lip-sync shot it must show the
+  performer already in the intended action during the hidden lead-in, with the
+  correct mouth state, gaze, screen direction, and camera setup.
+- Plan a closing state before generation: final pose/action phase, gaze,
+  prop/wardrobe state, screen geography, lighting, and the camera's end state.
+  Set `requires_closing_frame: true` when the next shot depends on an exact
+  handoff, an action must land on the cut, a prop must be handed off, or the
+  camera move must finish at a controlled endpoint. It may be false for a hard
+  cut, texture/b-roll shot, or a transition whose endpoint is intentionally
+  unconstrained.
+- When a closing frame is required, create a shot-specific closing-frame brief
+  (and frame when the workflow supports it) during the same approval gate as
+  the Opening Frame. If the current I2V workflow accepts only one opening image,
+  use the closing frame as a continuity target and QC artifact; do not pass it as
+  an unsupported second image and do not silently switch to R2V.
+- Even when no explicit closing frame is required, extract and inspect the
+  generated last frame for sequential shots. Compare it with the next Opening
+  Frame for identity, action phase, screen direction, prop state, lighting, and
+  camera drift. A generated last frame is evidence for continuity, not an
+  automatic replacement for the next shot's designed opening.
+- Major angle or location changes happen at the editorial cut through the next
+  Opening Frame. If a transition requires the camera to cross a large distance,
+  split it into separate setups or use a deliberate hard cut; never conceal the
+  relocation inside one I2V shot.
+
+Record these fields for each sequential shot:
+
+```text
+camera_setup: position, height, lens/framing, screen_direction
+camera_motion: type, start_state, end_state, max_delta, motivation
+opening_frame_strategy
+closing_frame_strategy: generated | extracted_qc_only | none
+requires_closing_frame
+handoff_in: inherited state and acceptable variation
+handoff_out: state the next shot may rely on
+```
+
+The QC pass must inspect first, middle, and last frames and explicitly report
+camera relocation, unmotivated zoom/pan, frozen motion, morphing at the
+endpoint, and whether the next shot can begin from the planned handoff. Do not
+approve a sequential shot solely because its first frame matches its prompt.
+
 ## Review and QC requirements
 
 Before generation, the user must be able to review a plan containing, for every shot:
@@ -179,6 +233,7 @@ shot_plan_review.md
 treatment.md
 reference_bible.json
 opening_frames/<shot_id>_brief.md
+closing_frames/<shot_id>_brief.md when `requires_closing_frame` is true
 generation_manifest.json
 shot_qc/<shot_id>.json
 assembly_manifest.json

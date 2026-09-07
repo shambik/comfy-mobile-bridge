@@ -118,6 +118,7 @@ STATE = ROOT / "state"
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
 PRODUCTIONS = STATE / "productions"
+VIDEO_VAULT = STATE / "video_vault"
 PROJECTS = _as_path(LOCAL_CONFIG.get("projects_dir"), STATE / "projects")
 MANAGED_SKILLS = STATE / "skills"
 DB_PATH = STATE / "jobs.sqlite3"
@@ -203,5 +204,5 @@ AGY_DEFAULT_RUNTIME = str(agents_config.get("agy_runtime") or "agy").strip()
 AGY_DEFAULT_MODEL = str(agents_config.get("agy_model") or "gemini-3.1-pro-high").strip()
 AGY_DEFAULT_EFFORT = str(agents_config.get("agy_effort") or "high").strip()
 
-for path in (STATE, INPUT, OUTPUT, TEMP, USER, LOGS, SEQUENCES, PRODUCTIONS, PROJECTS, MANAGED_SKILLS):
+for path in (STATE, INPUT, OUTPUT, TEMP, USER, LOGS, SEQUENCES, PRODUCTIONS, VIDEO_VAULT, PROJECTS, MANAGED_SKILLS):
     path.mkdir(parents=True, exist_ok=True)

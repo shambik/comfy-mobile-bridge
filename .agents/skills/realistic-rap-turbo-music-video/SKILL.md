@@ -132,6 +132,28 @@ vibration, breathing motion, or a small physically motivated adjustment. Change
 camera angle or location only between shots through a newly composed Opening
 Frame and a hard editorial cut.
 
+For sequential shots, plan the camera and frame handoff as one contract:
+
+- Record the camera position, height, lens/framing, screen direction, permitted
+  movement, and the motivated start/end state. A push, rack focus, breathing
+  motion, or restrained handheld move must stay inside that setup; it must not
+  become an unplanned pan, zoom, relocation, or angle change.
+- The Opening Frame is a newly composed shot-specific frame, not a selected
+  planning reference. With overlap, show the action already in progress at
+  model `t=0` so the performer does not restart at the editorial cut.
+- Define the closing state before generation: pose/action phase, gaze,
+  prop/wardrobe state, screen geography, lighting, and camera end state. Require
+  a closing frame when the next shot depends on an exact handoff, a prop/action
+  lands on the cut, or the camera move needs a controlled endpoint.
+- If the current production path is opening-frame-only I2V, keep the closing
+  frame as a target/QC artifact unless the workflow explicitly accepts it. Do
+  not send it as an unsupported second input or switch to R2V implicitly. For a
+  hard cut, compose a fresh next angle instead of forcing frame inheritance.
+- Inspect first, middle, and last frames after generation. Compare the last
+  frame to the next Opening Frame for identity, action phase, screen direction,
+  prop state, lighting, and camera drift; reject frozen/morphed endpoints or
+  hidden camera relocation.
+
 ## Review package before approval
 
 The user-facing plan must list for every shot:
@@ -142,6 +164,8 @@ The user-facing plan must list for every shot:
 - vocal/instrumental content and source-accurate phrase boundaries;
 - character action, Opening Frame requirement, camera angle, framing, lighting,
   character motion, and camera motion;
+- closing-frame requirement/strategy and the intended handoff-in/handoff-out
+  state;
 - what comes before and after it and how the cut joins;
 - unresolved choices and which items require user approval.
 

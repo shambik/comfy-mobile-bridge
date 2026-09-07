@@ -53,6 +53,12 @@ trim_out_seconds
 model: turbo_lipsync | turbo_regular
 performance_owner: main_mc | phantom | instrumental_only | both_nonvocal
 opening_frame_path
+closing_frame_path
+requires_closing_frame
+camera_setup
+camera_motion
+handoff_in
+handoff_out
 previous_shot_id
 next_shot_id
 transition_in
@@ -77,6 +83,21 @@ transition_out
 - Preserve the approved MC identity and cool rapper wardrobe. Preserve the approved Phantom identity as the larger muscular half-droid/science-fiction performer. Do not redesign either character during shot generation.
 - One shot has one stable camera position. Allow only micro handheld, breathing, rack-focus, or small push/pull movement that does not relocate the camera or introduce a hidden angle change. Make all major angle changes in the next opening frame.
 - If a brief is “scratch, then sing,” show the physical scratch action first and delay mouth performance until the vocal onset. If a brief is “close and moving,” put the close framing and restrained camera motion in the opening-frame brief; do not ask the model to discover a new angle halfway through the shot.
+
+For sequential continuity, add a camera/frame handoff to every shot brief:
+
+- State the camera setup, movement envelope, motivated start/end state, and the
+  exact action/prop/gaze state that should reach the cut.
+- Compose an actual shot-specific Opening Frame from the approved references;
+  with overlap, the performer is already in motion at model `t=0`. Planning
+  references are never silently used as the I2V scene frame.
+- Mark `requires_closing_frame` when the next shot depends on an exact pose,
+  prop/action handoff, screen direction, or controlled camera endpoint. If the
+  workflow accepts only an opening image, use the closing frame as a target and
+  QC artifact, not as an unsupported second input or implicit R2V input.
+- Compare the generated first/middle/last frames with the neighboring shot and
+  reject camera drift, hidden angle changes, frozen/morphed endpoints, or a
+  closing state that cannot support the next cut.
 
 ### Freeze-free assembly gate
 

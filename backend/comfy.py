@@ -22,6 +22,10 @@ class ComfyCancellationError(RuntimeError):
     """Raised when ComfyUI still owns a prompt after cancellation was requested."""
 
 
+class ComfyBusyError(RuntimeError):
+    """Raised when a ComfyUI process is present but its health endpoint is busy."""
+
+
 class ComfyClient:
     def __init__(self):
         self.process: subprocess.Popen | None = None
@@ -228,7 +232,25 @@ class ComfyClient:
         if self.process and self.process.poll() is None:
             return self.process.pid
         pids = self._windows_process_ids()
-        return pids[0] if pids else None
+        if pids:
+            return pids[0]
+        # The process command line can be unavailable while a manually
+        # restarted ComfyUI instance is still listening on the configured
+        # port.  The port owner is a stronger liveness signal than a failed
+        # command-line query and prevents a healthy GPU job from being
+        # mislabeled as dead.
+        return self._listening_pid()
+
+    def _present_process_ids(self) -> list[int]:
+        """Find every exact ComfyUI process/listener without changing state."""
+        process_ids: list[int] = []
+        if self.process and self.process.poll() is None:
+            process_ids.append(int(self.process.pid))
+        process_ids.extend(int(pid) for pid in self._windows_process_ids())
+        listening_pid = self._listening_pid()
+        if listening_pid:
+            process_ids.append(int(listening_pid))
+        return list(dict.fromkeys(process_ids))
 
     async def ensure_started(self):
         if await self.ready():
@@ -243,17 +265,19 @@ class ComfyClient:
         if not COMFY_PYTHON.exists() or not (COMFY_CODE / "main.py").exists():
             raise RuntimeError("ComfyUI installation is missing")
 
-        # The bridge can lose its Popen handle while a previous ComfyUI
-        # process tree remains alive. Starting another instance then causes
-        # port 8190 and ComfyUI's SQLite database to be locked. Remove only
-        # stale processes matching this exact installation and port.
-        if self._windows_process_ids():
-            await self.shutdown()
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if not self._windows_process_ids():
-                    break
-                await asyncio.sleep(0.5)
+        # A high-resolution H3 forward can block ComfyUI's HTTP event loop,
+        # making /system_stats time out even though the process and GPU job
+        # are alive. Never replace a process merely because that probe failed:
+        # it may be a valid manual run. An explicit Stop action remains the
+        # only path allowed to terminate an existing listener.
+        present = await asyncio.to_thread(self._present_process_ids)
+        if present:
+            pids = ", ".join(str(pid) for pid in present[:3])
+            suffix = "..." if len(present) > 3 else ""
+            raise ComfyBusyError(
+                "ComfyUI is already running but did not answer its health check; "
+                f"refusing to replace the existing process (PID {pids}{suffix})."
+            )
 
         self.log_handle = open(LOGS / "comfy-8190.log", "a", encoding="utf-8", buffering=1)
         command = [
@@ -376,16 +400,23 @@ class ComfyClient:
             response.raise_for_status()
 
     @staticmethod
-    def _queue_contains_prompt(payload: dict, prompt_id: str) -> bool:
-        """Handle ComfyUI's tuple-shaped queue entries and newer dict entries."""
+    def prompt_queue_state(payload: dict, prompt_id: str) -> str | None:
+        """Return whether a prompt is running or pending in Comfy's queue."""
+        if not isinstance(payload, dict):
+            return None
         for queue_name in ("queue_running", "queue_pending"):
             for item in payload.get(queue_name) or []:
                 if isinstance(item, (list, tuple)) and len(item) > 1:
                     if str(item[1]) == prompt_id:
-                        return True
+                        return queue_name
                 elif isinstance(item, dict) and str(item.get("prompt_id")) == prompt_id:
-                    return True
-        return False
+                    return queue_name
+        return None
+
+    @staticmethod
+    def _queue_contains_prompt(payload: dict, prompt_id: str) -> bool:
+        """Handle ComfyUI's tuple-shaped queue entries and newer dict entries."""
+        return ComfyClient.prompt_queue_state(payload, prompt_id) is not None
 
     async def wait_for_prompt_clear(self, prompt_id: str, timeout: float = 20.0) -> bool:
         """Wait until a canceled prompt is absent from both ComfyUI queues.
@@ -418,14 +449,46 @@ class ComfyClient:
         )
 
     async def cancel(self, prompt_id: str | None):
+        if not prompt_id:
+            # /interrupt is global in ComfyUI. Calling it without a prompt ID
+            # could stop an unrelated manual generation that the bridge does
+            # not own. Explicit ComfyUI shutdown is handled by shutdown().
+            return
+        try:
+            payload = await self.queue()
+        except Exception as exc:
+            raise ComfyCancellationError(
+                f"Cannot safely cancel prompt {prompt_id} while the ComfyUI queue is unreachable"
+            ) from exc
+
+        state = self.prompt_queue_state(payload, prompt_id)
+        if state is None:
+            # The prompt already left the active queue. Never issue a global
+            # interrupt that could affect a separate manual prompt.
+            return
+        if state == "queue_pending":
+            # Removing a pending prompt is targeted and does not touch the
+            # prompt currently using the GPU.
+            await self.delete_queued([prompt_id])
+            await self.wait_for_prompt_clear(prompt_id)
+            return
+
+        running_ids = []
+        for item in payload.get("queue_running") or []:
+            if isinstance(item, (list, tuple)) and len(item) > 1:
+                running_ids.append(str(item[1]))
+            elif isinstance(item, dict) and item.get("prompt_id"):
+                running_ids.append(str(item["prompt_id"]))
+        if running_ids != [prompt_id]:
+            raise ComfyCancellationError(
+                "Refusing global ComfyUI interrupt because the owned prompt is not the sole running prompt"
+            )
         async with httpx.AsyncClient(timeout=20) as client:
             (await client.post(COMFY_URL + "/interrupt")).raise_for_status()
-            if prompt_id:
-                (await client.post(
-                    COMFY_URL + "/queue", json={"delete": [prompt_id]}
-                )).raise_for_status()
-        if prompt_id:
-            await self.wait_for_prompt_clear(prompt_id)
+            (await client.post(
+                COMFY_URL + "/queue", json={"delete": [prompt_id]}
+            )).raise_for_status()
+        await self.wait_for_prompt_clear(prompt_id)
 
     async def free_models(self):
         try:
@@ -434,10 +497,50 @@ class ComfyClient:
         except Exception:
             pass
 
+    @staticmethod
+    def _kill_windows_process_tree(pid: int) -> bool:
+        """Terminate one verified ComfyUI process, elevating only if needed."""
+        command = ["taskkill", "/PID", str(int(pid)), "/T", "/F"]
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=20, check=False,
+        )
+        if result.returncode == 0:
+            return True
+
+        # A manually launched ComfyUI can live in Session 0 with a token that
+        # the bridge cannot terminate directly.  Retry the same exact PID via
+        # Windows elevation; do not use a name, wildcard, or process tree root
+        # discovered from an unrelated port.
+        if os.name != "nt":
+            return False
+        pid_text = str(int(pid))
+        elevated_script = (
+            "$p = Start-Process -FilePath 'taskkill.exe' -Verb RunAs "
+            "-WindowStyle Hidden -PassThru -Wait "
+            f"-ArgumentList @('/PID','{pid_text}','/T','/F'); "
+            "exit [int]$p.ExitCode"
+        )
+        elevated = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", elevated_script],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+        return elevated.returncode == 0
+
     async def shutdown(self):
         process = self.process
         self.process = None
-        discovered = [] if process and process.poll() is None else self._windows_process_ids()
+        if process and process.poll() is None:
+            discovered = []
+        else:
+            discovered = self._windows_process_ids()
+            if not discovered:
+                # After a bridge restart there may be no Popen handle, and
+                # Windows may deny command-line inspection of the ComfyUI
+                # process. The configured listener is still an exact, safe
+                # fallback for the explicit Stop ComfyUI action.
+                listening_pid = self._listening_pid()
+                if listening_pid:
+                    discovered = [listening_pid]
         try:
             if process and process.poll() is None:
                 if os.name == "nt":
@@ -445,14 +548,9 @@ class ComfyClient:
                     # the HTTP listener.  Terminating only the tracked parent
                     # leaves that child alive and makes the next start attach
                     # to the wrong instance.  /T is scoped to this exact PID.
-                    await asyncio.to_thread(
-                        subprocess.run,
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                        timeout=20,
-                        check=False,
-                    )
+                    killed = await asyncio.to_thread(self._kill_windows_process_tree, process.pid)
+                    if not killed and process.poll() is None:
+                        raise RuntimeError(f"Could not stop ComfyUI process {process.pid}")
                 else:
                     process.terminate()
                     try:
@@ -463,14 +561,8 @@ class ComfyClient:
                 # The app may have restarted while ComfyUI remained alive,
                 # leaving no Popen handle. Kill only matching ComfyUI trees.
                 for pid in discovered:
-                    await asyncio.to_thread(
-                        subprocess.run,
-                        ["taskkill", "/PID", str(pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                        timeout=20,
-                        check=False,
-                    )
+                    if not await asyncio.to_thread(self._kill_windows_process_tree, pid):
+                        raise RuntimeError(f"Could not stop ComfyUI process {pid}")
             if process and process.poll() is None:
                 await asyncio.to_thread(process.wait, 5)
         finally:

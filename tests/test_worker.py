@@ -1,13 +1,14 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 import backend.db as db_module
 from backend.db import connect, now_iso
-from backend.comfy import ComfyClient
+from backend.comfy import ComfyBusyError, ComfyCancellationError, ComfyClient
 from backend.worker import QueueWorker
 
 
@@ -70,6 +71,101 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await client.wait_for_prompt_clear("prompt-1", timeout=2))
 
+    async def test_pending_prompt_is_deleted_without_global_interrupt(self):
+        client = ComfyClient()
+        client.queue = AsyncMock(return_value={
+            "queue_running": [[1, "manual-prompt"]],
+            "queue_pending": [[2, "prompt-1"]],
+        })
+        client.delete_queued = AsyncMock()
+        client.wait_for_prompt_clear = AsyncMock(return_value=True)
+
+        with patch("backend.comfy.httpx.AsyncClient") as http_client:
+            await client.cancel("prompt-1")
+
+        client.delete_queued.assert_awaited_once_with(["prompt-1"])
+        client.wait_for_prompt_clear.assert_awaited_once_with("prompt-1")
+        http_client.assert_not_called()
+
+    async def test_cancel_refuses_global_interrupt_when_queue_cannot_prove_ownership(self):
+        client = ComfyClient()
+        client.queue = AsyncMock(side_effect=httpx.ReadTimeout("queue unavailable"))
+
+        with self.assertRaises(ComfyCancellationError), \
+             patch("backend.comfy.httpx.AsyncClient") as http_client:
+            await client.cancel("prompt-1")
+
+        http_client.assert_not_called()
+
+    async def test_running_prompt_proves_liveness_when_health_probe_times_out(self):
+        worker = QueueWorker()
+        worker.comfy.queue = AsyncMock(return_value={
+            "queue_running": [[1, "prompt-1"]], "queue_pending": [],
+        })
+        worker.comfy.ready = AsyncMock(return_value=False)
+        worker.comfy.discovered_pid = lambda: None
+
+        observation = await worker._observe_comfy_prompt("prompt-1")
+
+        self.assertEqual(observation["queue_state"], "queue_running")
+        self.assertTrue(observation["queue_available"])
+        self.assertTrue(observation["server_ready"])
+        self.assertFalse(observation["process_alive"])
+
+    async def test_live_process_proves_liveness_when_queue_and_health_probes_time_out(self):
+        worker = QueueWorker()
+        worker.comfy.queue = AsyncMock(side_effect=httpx.ReadTimeout("queue endpoint timed out"))
+        worker.comfy.ready = AsyncMock(return_value=False)
+        worker.comfy.discovered_pid = lambda: 6972
+
+        observation = await worker._observe_comfy_prompt("prompt-1")
+
+        self.assertFalse(observation["queue_available"])
+        self.assertEqual(observation["queue_error"], "ReadTimeout: queue endpoint timed out")
+        self.assertTrue(observation["process_alive"])
+        self.assertEqual(observation["process_pid"], 6972)
+
+    def test_prompt_queue_state_distinguishes_running_and_pending(self):
+        running = {"queue_running": [[1, "prompt-1"]], "queue_pending": []}
+        pending = {"queue_running": [], "queue_pending": [{"prompt_id": "prompt-1"}]}
+
+        self.assertEqual(ComfyClient.prompt_queue_state(running, "prompt-1"), "queue_running")
+        self.assertEqual(ComfyClient.prompt_queue_state(pending, "prompt-1"), "queue_pending")
+        self.assertIsNone(ComfyClient.prompt_queue_state({}, "prompt-1"))
+
+    def test_discovered_pid_falls_back_to_port_owner(self):
+        client = ComfyClient()
+        client._windows_process_ids = lambda: []
+        client._listening_pid = lambda: 8190
+
+        self.assertEqual(client.discovered_pid(), 8190)
+
+    async def test_shutdown_falls_back_to_comfy_listener_after_bridge_restart(self):
+        client = ComfyClient()
+        client._windows_process_ids = lambda: []
+        client._listening_pid = lambda: 8190
+
+        with patch("backend.comfy.subprocess.run") as run:
+            run.return_value = SimpleNamespace(returncode=0)
+            await client.shutdown()
+
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            ["taskkill", "/PID", "8190", "/T", "/F"],
+        )
+
+    def test_windows_stop_retries_exact_pid_with_elevation(self):
+        with patch("backend.comfy.subprocess.run", side_effect=[
+            SimpleNamespace(returncode=5),
+            SimpleNamespace(returncode=0),
+        ]) as run:
+            self.assertTrue(ComfyClient._kill_windows_process_tree(8190))
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args.args[0][0], "powershell.exe")
+        self.assertIn("'/PID','8190'", run.call_args.args[0][-1])
+
     async def test_cancel_failure_sets_restart_gate_before_next_job(self):
         worker = QueueWorker()
         worker.comfy.cancel = AsyncMock(side_effect=RuntimeError("prompt still running"))
@@ -79,6 +175,54 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(worker.comfy_restart_required)
         worker.comfy.shutdown.assert_awaited_once()
+
+    async def test_unsafe_cancel_keeps_comfy_alive_for_manual_work(self):
+        worker = QueueWorker()
+        worker.comfy.cancel = AsyncMock(side_effect=ComfyCancellationError("ownership unknown"))
+        worker.comfy.shutdown = AsyncMock()
+
+        await worker._cancel_comfy_prompt("prompt-1")
+
+        self.assertTrue(worker.comfy_restart_required)
+        worker.comfy.shutdown.assert_not_awaited()
+
+    async def test_busy_existing_comfy_process_is_not_replaced(self):
+        client = ComfyClient()
+        client.ready = AsyncMock(return_value=False)
+        client._present_process_ids = lambda: [6972]
+        client.shutdown = AsyncMock()
+
+        with self.assertRaises(ComfyBusyError):
+            await client.ensure_started()
+
+        client.shutdown.assert_not_awaited()
+
+    async def test_busy_comfy_requeues_job_instead_of_failing_it(self):
+        worker = QueueWorker()
+        worker.run_job = AsyncMock(side_effect=ComfyBusyError("existing process is busy"))
+        job = {"id": "job-waiting-for-comfy", "status": "starting"}
+
+        with patch("backend.worker.update_job") as update, \
+             patch("backend.worker.asyncio.sleep", new=AsyncMock()):
+            await worker._execute_job(job)
+
+        update.assert_called_once()
+        self.assertEqual(update.call_args.args[0], job["id"])
+        self.assertEqual(update.call_args.kwargs["status"], "queued")
+        self.assertEqual(update.call_args.kwargs["phase"], "queued")
+        self.assertIn("existing process is busy", update.call_args.kwargs["error"])
+
+    async def test_canceling_unsubmitted_job_does_not_interrupt_manual_comfy_work(self):
+        worker = QueueWorker()
+        worker.current_job = "job-without-prompt"
+        worker.comfy.cancel = AsyncMock()
+
+        with patch("backend.worker.get_job", return_value={
+            "id": worker.current_job, "status": "starting", "prompt_id": None,
+        }):
+            self.assertTrue(await worker.cancel(worker.current_job))
+
+        worker.comfy.cancel.assert_not_awaited()
 
     async def test_recovery_prefers_running_prompt_and_deletes_pending_duplicates(self):
         job_id = "a" * 32

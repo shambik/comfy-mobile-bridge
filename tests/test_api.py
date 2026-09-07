@@ -118,6 +118,29 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("uploaded audio", response.text)
 
+    def test_lip_sync_preserves_a_client_pretrimmed_audio_window(self):
+        data = {
+            "prompt": "",
+            "mode": "lip_sync", "duration": "5", "engine": "standard",
+            "encoder": "native", "audio_start": "0", "audio_pretrimmed": "true", "audio_original_start": "48.4",
+        }
+        files = {"audio": ("segment.wav", b"audio-placeholder", "audio/wav")}
+        with patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/segment.wav", "segment.wav"))), \
+             patch("backend.main.probe_audio_duration", return_value=5.0), \
+             patch("backend.main.trim_audio") as trim_audio_mock:
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        trim_audio_mock.assert_not_called()
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT audio_start,audio_duration,reference_audio_name FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, (48.4, 5.0, "segment.wav"))
+
     def test_live_webm_packet_duration_fallback(self):
         payload = {
             "packets": [
@@ -126,6 +149,17 @@ class JobApiTests(unittest.TestCase):
             ]
         }
         self.assertAlmostEqual(packet_audio_duration(payload), 5.0, places=3)
+
+    def test_comfy_status_distinguishes_busy_process_from_stopped(self):
+        with patch.object(worker.comfy, "ready", new=AsyncMock(return_value=False)), \
+             patch.object(worker.comfy, "discovered_pid", return_value=8190):
+            response = self.client.get("/api/comfy/status")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["running"], True)
+        self.assertEqual(response.json()["responsive"], False)
+        self.assertEqual(response.json()["busy"], True)
+        self.assertEqual(response.json()["pid"], 8190)
 
     def test_spectrum_profile_is_persisted(self):
         response = self.post(engine="spectrum", steps="16", resolution="736x416")

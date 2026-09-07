@@ -60,6 +60,7 @@ from .production_db import (add_config_revision, add_event, add_message, add_ref
 from .skill_catalog import (discover_skills, get_skill, install_skill_zip,
                             list_skills, register_skill, remove_skill,
                             set_skill_enabled)
+from .video_vault import delete_video_item, list_video_vault, store_video, video_file
 from .worker import QueueWorker
 
 worker = QueueWorker()
@@ -515,6 +516,20 @@ def raise_library_error(exc: Exception) -> None:
     raise HTTPException(409, str(exc)) from exc
 
 
+def raise_video_vault_error(exc: Exception) -> None:
+    if isinstance(exc, KeyError):
+        raise HTTPException(404, str(exc).strip("'")) from exc
+    if isinstance(exc, FileNotFoundError):
+        raise HTTPException(410, str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(400, str(exc)) from exc
+    if isinstance(exc, (PermissionError, OSError)):
+        raise HTTPException(503, str(exc)) from exc
+    if isinstance(exc, RuntimeError):
+        raise HTTPException(422, str(exc)) from exc
+    raise HTTPException(500, str(exc)) from exc
+
+
 def clipproj_ready() -> bool:
     return all((
         (CLIPPROJ_NODE_DIR / "clipproj_nodes.py").exists(),
@@ -585,9 +600,17 @@ def read_comfy_log(limit: int = 300, since: int | None = None) -> tuple[list[str
 
 @app.get("/api/comfy/status")
 async def comfy_status():
+    responsive = await worker.comfy.ready()
+    pid = await asyncio.to_thread(worker.comfy.discovered_pid)
     return {
-        "running": await worker.comfy.ready(),
-        "pid": worker.comfy.discovered_pid(),
+        # A busy H3 forward can make the HTTP server miss the short health
+        # timeout while the Python process and GPU generation remain alive.
+        # Keep that distinct from a stopped process so the UI does not report
+        # a false shutdown during a valid generation.
+        "running": responsive or pid is not None,
+        "responsive": responsive,
+        "busy": bool(pid is not None and not responsive),
+        "pid": pid,
         "host": COMFY_HOST,
         "port": COMFY_PORT,
     }
@@ -605,7 +628,8 @@ async def comfy_logs(request: Request):
     except ValueError:
         since = None
     lines, size = read_comfy_log(limit, since)
-    return {"running": await worker.comfy.ready(), "lines": lines, "size": size}
+    status = await comfy_status()
+    return {**status, "lines": lines, "size": size}
 
 
 @app.post("/api/comfy/start")
@@ -754,6 +778,53 @@ async def rename_library_asset(source_type: str, source_id: str, request: Reques
         return rename_asset(source_type, source_id, body.name)
     except (KeyError, ValueError, FileExistsError, FileNotFoundError, RuntimeError, OSError) as exc:
         raise_library_error(exc)
+
+
+@app.get("/api/video-vault")
+async def video_vault():
+    return {"items": list_video_vault()}
+
+
+@app.post("/api/video-vault")
+async def add_video_to_vault(request: Request, video: UploadFile = File(...), name: str | None = Form(None)):
+    require_csrf(request)
+    try:
+        return await store_video(video, name)
+    except (KeyError, FileNotFoundError, ValueError, RuntimeError, PermissionError, OSError) as exc:
+        raise_video_vault_error(exc)
+
+
+@app.get("/api/video-vault/{item_id}/video")
+async def vault_video(item_id: str):
+    try:
+        result = video_file(item_id)
+    except (KeyError, FileNotFoundError, RuntimeError, PermissionError, OSError) as exc:
+        raise_video_vault_error(exc)
+    if not result:
+        raise HTTPException(404, "Video not found")
+    item, path = result
+    return FileResponse(path, media_type=item["content_type"])
+
+
+@app.get("/api/video-vault/{item_id}/download")
+async def download_vault_video(item_id: str):
+    try:
+        result = video_file(item_id)
+    except (KeyError, FileNotFoundError, RuntimeError, PermissionError, OSError) as exc:
+        raise_video_vault_error(exc)
+    if not result:
+        raise HTTPException(404, "Video not found")
+    item, path = result
+    return FileResponse(path, media_type=item["content_type"], filename=item["original_name"])
+
+
+@app.delete("/api/video-vault/{item_id}")
+async def remove_video_from_vault(item_id: str, request: Request):
+    require_csrf(request)
+    try:
+        return delete_video_item(item_id)
+    except (KeyError, FileNotFoundError, ValueError, RuntimeError, PermissionError, OSError) as exc:
+        raise_video_vault_error(exc)
 
 
 @app.get("/api/events")
@@ -2273,6 +2344,8 @@ async def create_jobs(
     audio: UploadFile | None = File(None),
     audio_start: float = Form(0),
     audio_duration: float | None = Form(None),
+    audio_pretrimmed: bool = Form(False),
+    audio_original_start: float | None = Form(None),
     no_audio: bool = Form(False),
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
     project_id: str = Form(""), folder_id: str = Form(""),
@@ -2308,6 +2381,11 @@ async def create_jobs(
         raise HTTPException(400, "Lip-sync always keeps the uploaded audio")
     if mode != "lip_sync" and audio:
         raise HTTPException(400, "Uploaded audio is available in lip-sync mode only")
+    if mode != "lip_sync" and audio_pretrimmed:
+        raise HTTPException(400, "Pretrimmed audio is available in lip-sync mode only")
+    if audio_original_start is not None:
+        if mode != "lip_sync" or isinstance(audio_original_start, bool) or not math.isfinite(audio_original_start) or audio_original_start < 0:
+            raise HTTPException(400, "Original audio start must be zero or a positive number")
     if mode == "lip_sync" and (isinstance(audio_start, bool) or audio_start < 0):
         raise HTTPException(400, "Audio start must be zero or a positive number")
     selected_audio_duration = duration
@@ -2351,6 +2429,7 @@ async def create_jobs(
     prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
+    stored_audio_start = audio_original_start if audio_pretrimmed and audio_original_start is not None else audio_start
     input_path = input_name = None
     reference_audio_path = reference_audio_name = None
     source_audio_path = source_audio_name = None
@@ -2386,7 +2465,8 @@ async def create_jobs(
                 saved_paths.append(source_audio_path)
                 reference_audio_path, reference_audio_name = source_audio_path, source_audio_name
                 source_duration = probe_audio_duration(Path(source_audio_path))
-                if audio_start > 0.01 or source_duration > selected_audio_duration + 0.08 or source_duration < audio_start + selected_audio_duration - 0.08:
+                pretrimmed_window = audio_pretrimmed and abs(source_duration - selected_audio_duration) <= 0.08
+                if not pretrimmed_window and (audio_start > 0.01 or source_duration > selected_audio_duration + 0.08 or source_duration < audio_start + selected_audio_duration - 0.08):
                     trimmed_path, trimmed_name = trim_audio(Path(source_audio_path), audio_start, selected_audio_duration)
                     saved_paths.append(trimmed_path)
                     reference_audio_path, reference_audio_name = trimmed_path, trimmed_name
@@ -2442,7 +2522,7 @@ async def create_jobs(
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.turbo_profile, generation.encoder,
+                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
@@ -2732,6 +2812,43 @@ async def sequence_video(sequence_id: str):
     if not path:
         raise HTTPException(404, "Joined video file is missing")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+def _review_paths(production_id: str) -> tuple[Path, Path]:
+    """Resolve a review package without allowing paths outside productions."""
+    if not production_id or not all(
+        character.isalnum() or character in {"_", "-"} for character in production_id
+    ):
+        raise HTTPException(404, "Review not found")
+    productions_root = PRODUCTIONS.resolve()
+    production_root = (PRODUCTIONS / production_id).resolve()
+    if production_root.parent != productions_root or not production_root.is_dir():
+        raise HTTPException(404, "Review not found")
+    review_root = (production_root / "review").resolve()
+    if review_root.parent != production_root or not review_root.is_dir():
+        raise HTTPException(404, "Review package not found")
+    return production_root, review_root
+
+
+@app.get("/api/reviews/{production_id}/manifest")
+async def review_manifest(production_id: str):
+    _, review_root = _review_paths(production_id)
+    path = review_root / "manifest.json"
+    if not path.is_file():
+        raise HTTPException(404, "Review manifest not found")
+    return FileResponse(path, media_type="application/json")
+
+
+@app.get("/api/reviews/{production_id}/asset/{asset_path:path}")
+async def review_asset(production_id: str, asset_path: str):
+    production_root, _ = _review_paths(production_id)
+    target = (production_root / Path(asset_path)).resolve()
+    if not target.is_relative_to(production_root) or not target.is_file():
+        raise HTTPException(404, "Review asset not found")
+    if target.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(404, "Review asset not found")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name)
 
 
 dist = ROOT / "dist"

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import httpx
 
-from .comfy import ComfyClient, find_video, gpu_sample, media_probe
+from .comfy import (ComfyBusyError, ComfyCancellationError, ComfyClient,
+                    find_video, gpu_sample, media_probe)
 from .config import (AUDIOLOCK_NODE_DIR, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, INPUT, MODELS, REF2VA_MODEL,
                      REF2VA_TURBO_LORA,
@@ -55,6 +56,36 @@ class QueueWorker:
         except (httpx.HTTPError, asyncio.TimeoutError, ValueError) as exc:
             return None, exc
 
+    async def _observe_comfy_prompt(self, prompt_id: str) -> dict[str, object]:
+        """Observe prompt liveness without treating a blocked HTTP endpoint as death.
+
+        H3's first high-resolution forward can occupy ComfyUI's event loop
+        long enough for both /history and /system_stats to time out.  The
+        queue endpoint, a configured process, or the listening port can still
+        prove that the prompt is alive.  This observation is persisted with
+        the job so a later recovery has enough evidence to reconcile it.
+        """
+        queue_available = False
+        queue_state: str | None = None
+        queue_error: str | None = None
+        try:
+            payload = await self.comfy.queue()
+            queue_available = True
+            queue_state = ComfyClient.prompt_queue_state(payload, prompt_id)
+        except Exception as exc:
+            queue_error = self._error_text(exc)
+
+        server_ready = queue_available or await self.comfy.ready()
+        process_pid = await asyncio.to_thread(self.comfy.discovered_pid)
+        return {
+            "queue_available": queue_available,
+            "queue_state": queue_state,
+            "queue_error": queue_error,
+            "server_ready": server_ready,
+            "process_alive": process_pid is not None,
+            "process_pid": process_pid,
+        }
+
     def start(self):
         self.task = asyncio.create_task(self.loop())
 
@@ -71,8 +102,18 @@ class QueueWorker:
         self.wake.set()
 
     async def _cancel_comfy_prompt(self, prompt_id: str | None):
+        if not prompt_id:
+            # ComfyUI's /interrupt endpoint is global. A queued/starting
+            # bridge job has not submitted a prompt yet, so interrupting here
+            # could terminate an unrelated manual ComfyUI generation.
+            return
         try:
             await self.comfy.cancel(prompt_id)
+        except ComfyCancellationError:
+            # The queue could not prove that a global interrupt was safe. Keep
+            # the process alive and hold the worker at the recovery gate; a
+            # manual ComfyUI render must never be sacrificed for a UI cancel.
+            self.comfy_restart_required = True
         except Exception:
             # If Comfy did not acknowledge the cancellation, kill only the
             # configured ComfyUI process tree.  The loop will restart it
@@ -110,7 +151,8 @@ class QueueWorker:
             return True
         if job_id == self.current_job and job["status"] in ACTIVE_STATUSES:
             self.cancelled.add(job_id)
-            await self._cancel_comfy_prompt(job.get("prompt_id"))
+            if job.get("prompt_id"):
+                await self._cancel_comfy_prompt(job["prompt_id"])
             self.wake.set()
             return True
         return False
@@ -146,7 +188,9 @@ class QueueWorker:
         if sequence_id == self.current_sequence and self.current_job:
             self.cancelled.add(self.current_job)
             current = get_job(self.current_job, public=False)
-            await self._cancel_comfy_prompt(current.get("prompt_id") if current else None)
+            prompt_id = current.get("prompt_id") if current else None
+            if prompt_id:
+                await self._cancel_comfy_prompt(prompt_id)
             self.wake.set()
         return True
 
@@ -334,6 +378,31 @@ class QueueWorker:
             await self.run_job(job, recovered_prompt=recovered_prompt)
         except asyncio.CancelledError:
             raise
+        except ComfyBusyError as exc:
+            # A live manual/ComfyUI process whose health endpoint is busy is a
+            # transient resource condition, not a generation failure. Keep
+            # the job queued and let the next worker pass retry after a short
+            # backoff. Do not call /interrupt or kill the existing process.
+            if job["id"] in self.cancelled:
+                error = "Generation canceled while waiting for ComfyUI"
+                update_job(
+                    job["id"], status="canceled", phase="canceled", eta_seconds=None,
+                    error=None, finished_at=now_iso(),
+                )
+                if job.get("sequence_id"):
+                    self._fail_connected_sequence(job, "canceled", error)
+            else:
+                error = self._error_text(exc)[:8000]
+                update_job(
+                    job["id"], status="queued", phase="queued", progress=0,
+                    step=0, total_steps=0, eta_seconds=None, error=error,
+                )
+                if job.get("sequence_id"):
+                    update_sequence(
+                        job["sequence_id"], status="queued", phase="queued",
+                        eta_seconds=None, error=error,
+                    )
+                await asyncio.sleep(5)
         except Exception as exc:
             status = "canceled" if job["id"] in self.cancelled else "failed"
             error = self._error_text(exc)[:8000]
@@ -800,8 +869,18 @@ class QueueWorker:
                     consecutive_history_failures += 1
                     total_history_failures += 1
                     poll_error = self._error_text(history_error)
-                    server_ready = await self.comfy.ready()
-                    if server_ready:
+                    observation = await self._observe_comfy_prompt(prompt_id)
+                    queue_state = observation["queue_state"]
+                    queue_available = bool(observation["queue_available"])
+                    server_ready = bool(observation["server_ready"])
+                    process_alive = bool(observation["process_alive"])
+                    process_pid = observation["process_pid"]
+                    # A prompt visible in either Comfy queue is definitive
+                    # evidence that the generation is still owned by Comfy.
+                    # A responsive queue, live process, or listening port is
+                    # also enough to classify this as transport noise rather
+                    # than a terminal generation failure.
+                    if queue_state or queue_available or server_ready or process_alive:
                         consecutive_comfy_down_failures = 0
                     else:
                         consecutive_comfy_down_failures += 1
@@ -809,16 +888,24 @@ class QueueWorker:
                         "status": "retrying",
                         "consecutive_failures": consecutive_history_failures,
                         "server_ready": server_ready,
+                        "queue_available": queue_available,
+                        "queue_state": queue_state,
+                        "queue_error": observation["queue_error"],
+                        "process_alive": process_alive,
+                        "process_pid": process_pid,
                         "consecutive_comfy_down_failures": consecutive_comfy_down_failures,
                         "total_failures": total_history_failures,
                         "last_error": poll_error,
                         "last_attempt_at": now_iso(),
                     }
-                    if not server_ready and consecutive_comfy_down_failures >= 3:
+                    # Do not fail solely because /history and /system_stats
+                    # timed out.  Only terminalize after the queue endpoint is
+                    # also unavailable and neither the configured process nor
+                    # its listening port can be found.
+                    if not queue_available and not server_ready and not process_alive and consecutive_comfy_down_failures >= 3:
                         update_job(job["id"], runtime=runtime)
                         raise RuntimeError(
-                            "ComfyUI became unavailable while this generation was running; "
-                            "the job was marked failed instead of remaining in generating state."
+                            "ComfyUI process and prompt became unreachable while this generation was running"
                         )
                     if consecutive_history_failures == 1 or consecutive_history_failures % 5 == 0:
                         update_job(

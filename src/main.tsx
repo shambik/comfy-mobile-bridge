@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
+import { FrameReviewPage } from './review'
 import { AppModal, useAppModal } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 
@@ -13,7 +14,7 @@ type TurboProfile = 'v1' | 'v4'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
-type Page = 'studio' | 'production' | 'comfy'
+type Page = 'studio' | 'production' | 'comfy' | 'review' | 'video_vault'
 type RuntimeMetadata = {
   captured_at?: string
   capture_error?: string
@@ -69,6 +70,8 @@ const resolutions: ResolutionOption[] = [
   { id: '768x1344', label: '9:16 טבעי', hint: '768×1344 · 1.03MP', width: 768, height: 1344, aspect: '9:16', megapixels: 1.03 },
 ]
 const aspectOptions: Aspect[] = ['1:1', '4:3', '3:4', '16:9', '9:16']
+const MUTATION_TIMEOUT_MS = 120_000
+const LIP_SYNC_PRETRIM_THRESHOLD_BYTES = 2 * 1024 * 1024
 
 function dimensionsFor(aspect: Aspect, megapixels: number) {
   const ratios: Record<Aspect, number> = { '1:1': 1, '4:3': 4 / 3, '3:4': 3 / 4, '16:9': 16 / 9, '9:16': 9 / 16 }
@@ -76,6 +79,55 @@ function dimensionsFor(aspect: Aspect, megapixels: number) {
   const width = Math.max(256, Math.round(Math.sqrt(megapixels * 1_000_000 * ratio) / 32) * 32)
   const height = Math.max(256, Math.round(Math.sqrt(megapixels * 1_000_000 / ratio) / 32) * 32)
   return { width, height, id: `${width}x${height}` as Resolution }
+}
+
+type BrowserAudioContextConstructor = new () => AudioContext
+
+type PreparedLipSyncAudio = { file: File; pretrimmed: boolean }
+
+async function prepareLipSyncAudio(file: File, startSeconds: number, durationSeconds: number): Promise<PreparedLipSyncAudio> {
+  // Large WAV uploads are needlessly expensive over a relayed Tailscale path.
+  // Decode and send only the requested window when the browser can do so; on
+  // older browsers, preserve the original upload and let the bridge trim it.
+  if (file.size <= LIP_SYNC_PRETRIM_THRESHOLD_BYTES && startSeconds <= 0.01) {
+    return { file, pretrimmed: false }
+  }
+  const AudioContextCtor = (window.AudioContext || (window as Window & { webkitAudioContext?: BrowserAudioContextConstructor }).webkitAudioContext) as BrowserAudioContextConstructor | undefined
+  if (!AudioContextCtor) return { file, pretrimmed: false }
+  const context = new AudioContextCtor()
+  try {
+    const decoded = await context.decodeAudioData(await file.arrayBuffer())
+    const sampleRate = decoded.sampleRate
+    const startFrame = Math.max(0, Math.floor(startSeconds * sampleRate))
+    const frameCount = Math.max(1, Math.ceil(durationSeconds * sampleRate))
+    const channelCount = Math.max(1, Math.min(2, decoded.numberOfChannels))
+    const dataBytes = frameCount * channelCount * 2
+    const wav = new ArrayBuffer(44 + dataBytes)
+    const view = new DataView(wav)
+    const writeText = (offset: number, value: string) => Array.from(value).forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)))
+    writeText(0, 'RIFF'); view.setUint32(4, 36 + dataBytes, true); writeText(8, 'WAVE')
+    writeText(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true)
+    view.setUint16(22, channelCount, true); view.setUint32(24, sampleRate, true)
+    view.setUint32(28, sampleRate * channelCount * 2, true); view.setUint16(32, channelCount * 2, true)
+    view.setUint16(34, 16, true); writeText(36, 'data'); view.setUint32(40, dataBytes, true)
+    const channels = Array.from({ length: channelCount }, (_, index) => decoded.getChannelData(Math.min(index, decoded.numberOfChannels - 1)))
+    let offset = 44
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      const sourceFrame = startFrame + frame
+      for (const channel of channels) {
+        const source = sourceFrame < channel.length ? channel[sourceFrame] : 0
+        const sample = Math.max(-1, Math.min(1, source))
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+        offset += 2
+      }
+    }
+    const stem = file.name.replace(/\.[^.]+$/, '') || 'audio'
+    return { file: new File([wav], `${stem}_segment.wav`, { type: 'audio/wav' }), pretrimmed: true }
+  } catch {
+    return { file, pretrimmed: false }
+  } finally {
+    await context.close().catch(() => undefined)
+  }
 }
 
 type LibraryFolder = { id: string; project_id: string; name: string }
@@ -163,14 +215,158 @@ function VideoDropzone({ files, onChange }: { files: File[]; onChange: (files: F
   </label>
 }
 
-type ComfyPageProps = { running: boolean; loading: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
+type ComfyPageProps = { running: boolean; responsive: boolean; loading: boolean; busy: boolean; lines: string[]; error: string; onRefresh: () => void }
 
-function ComfyPage({ running, loading, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
+function ComfyPage({ running, responsive, loading, busy, lines, error, onRefresh, onClear }: ComfyPageProps & { onClear: () => void }) {
+  const stateClass = loading ? 'checking' : running ? (responsive ? 'running' : 'busy') : 'stopped'
+  const stateLabel = loading ? 'Checking ComfyUI…' : !running ? 'ComfyUI stopped' : responsive ? 'ComfyUI running' : 'ComfyUI busy — API responding slowly'
   return <section className="comfy-page">
     <div className="comfy-page-heading"><div><span className="eyebrow"><Terminal size={15} /> ComfyUI</span><h2>ComfyUI logs</h2></div><div className="log-actions"><button className="icon-button" onClick={onClear} aria-label="Clear visible log" title="Clear visible log"><Trash2 size={17} /></button><button className="icon-button" onClick={onRefresh} aria-label="Refresh log" title="Refresh log"><RefreshCw size={18} /></button></div></div>
-    <div className={`comfy-state ${loading ? 'checking' : running ? 'running' : 'stopped'}`}><i /> {loading ? 'Checking ComfyUI…' : running ? 'ComfyUI running' : 'ComfyUI stopped'}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
+    <div className={`comfy-state ${stateClass}`}><i /> {stateLabel}<span>{busy ? 'Updating…' : 'Auto-refreshing'}</span></div>
     {error && <div className="error-banner">{error}</div>}
     <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
+  </section>
+}
+
+type VideoVaultItem = {
+  id: string
+  original_name: string
+  content_type: string
+  size: number
+  sha256: string
+  duration: number
+  width: number
+  height: number
+  frame_rate?: string | null
+  created_at: string
+  available: boolean
+  video_url: string
+  download_url: string
+  delete_url: string
+}
+
+function formatVaultBytes(value: number) {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function formatVaultDuration(value: number) {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  const seconds = Math.round(value)
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+function VideoVaultPage({ csrf }: { csrf: string }) {
+  const [items, setItems] = useState<VideoVaultItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+
+  const readError = async (response: Response) => {
+    const raw = await response.text()
+    try {
+      const payload = raw ? JSON.parse(raw) as { detail?: string } : {}
+      return payload.detail || raw || `Request failed (${response.status})`
+    } catch {
+      return raw || `Request failed (${response.status})`
+    }
+  }
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/video-vault', { cache: 'no-store', credentials: 'same-origin' })
+      if (!response.ok) throw new Error(await readError(response))
+      const payload = await response.json() as { items?: VideoVaultItem[] }
+      setItems(Array.isArray(payload.items) ? payload.items : [])
+      setError('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to load the video vault')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const upload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!csrf) {
+      setError('The app session is not ready yet. Refresh and try again.')
+      return
+    }
+    setBusy(file.name)
+    setError('')
+    try {
+      const form = new FormData()
+      form.append('video', file, file.name)
+      const response = await fetch('/api/video-vault', {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrf },
+        body: form,
+        credentials: 'same-origin',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      const item = await response.json() as VideoVaultItem
+      setItems(current => [item, ...current.filter(existing => existing.id !== item.id)])
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to add the video')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const remove = async (item: VideoVaultItem) => {
+    if (!csrf || busy) return
+    if (!window.confirm(`Delete “${item.original_name}” from the vault and remove its stored file?`)) return
+    setBusy(`delete:${item.id}`)
+    setError('')
+    try {
+      const response = await fetch(item.delete_url, {
+        method: 'DELETE',
+        headers: { 'X-CSRF-Token': csrf },
+        credentials: 'same-origin',
+      })
+      if (!response.ok) throw new Error(await readError(response))
+      setItems(current => current.filter(existing => existing.id !== item.id))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Unable to delete the video')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return <section className="video-vault-page">
+    <div className="video-vault-head">
+      <div><span className="eyebrow"><Clapperboard size={15} /> Video Vault</span><h2>Saved videos</h2><p>One persistent download page for finished videos. No project registration is needed for each new file.</p></div>
+      <button type="button" className="video-vault-refresh" onClick={() => { void load() }} disabled={loading || !!busy}><RefreshCw className={loading ? 'spin' : ''} size={16} /> Refresh</button>
+    </div>
+    <div className="video-vault-toolbar">
+      <label className="video-vault-upload"><Plus size={17} /><span>{busy && !busy.startsWith('delete:') ? 'Adding…' : 'Add video'}</span><input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,video/mpeg" onChange={event => { void upload(event) }} disabled={!!busy} /></label>
+      <span className="video-vault-count">{items.length} {items.length === 1 ? 'video' : 'videos'} stored</span>
+      {busy.startsWith('delete:') && <span className="video-vault-progress" role="status"><LoaderCircle className="spin" size={14} /> Deleting stored file…</span>}
+    </div>
+    {error && <div className="video-vault-error" role="alert">{error}</div>}
+    {loading && !items.length && <div className="video-vault-empty"><LoaderCircle className="spin" size={20} /> Loading saved videos…</div>}
+    {!loading && !items.length && <div className="video-vault-empty"><Clapperboard size={24} /><strong>No videos in the vault yet</strong><span>Add a finished MP4, MOV, WebM, MKV, or MPEG file above.</span></div>}
+    {!!items.length && <div className="video-vault-grid">
+      {items.map(item => <article className="video-vault-card" key={item.id}>
+        {item.available ? <video src={item.video_url} controls preload="metadata" playsInline /> : <div className="video-vault-missing"><Clapperboard size={24} /><span>The stored file is missing</span></div>}
+        <div className="video-vault-card-body">
+          <h3 dir="auto" title={item.original_name}>{item.original_name}</h3>
+          <div className="video-vault-meta"><span>{formatVaultDuration(item.duration)}</span><span>{item.width}×{item.height}</span><span>{formatVaultBytes(item.size)}</span></div>
+          <small>{new Date(item.created_at).toLocaleString()}</small>
+          <div className="video-vault-actions">
+            {item.available && <a className="video-vault-download" href={item.download_url} download={item.original_name}><Download size={15} /> Download</a>}
+            <button type="button" className="video-vault-delete" onClick={() => { void remove(item) }} disabled={!!busy}><Trash2 size={15} /> Delete</button>
+          </div>
+        </div>
+      </article>)}
+    </div>}
   </section>
 }
 
@@ -237,6 +433,7 @@ function App() {
   const [bulkFolder, setBulkFolder] = useState('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const [comfyRunning, setComfyRunning] = useState(false)
+  const [comfyResponsive, setComfyResponsive] = useState(false)
   const [comfyLoading, setComfyLoading] = useState(true)
   const [comfyBusy, setComfyBusy] = useState(false)
   const [comfyLogs, setComfyLogs] = useState<string[]>([])
@@ -350,6 +547,7 @@ function App() {
       const status = await statusResponse.json()
       const logs = await logsResponse.json()
       setComfyRunning(Boolean(status.running))
+      setComfyResponsive(status.responsive !== false)
       if (forceLogs || !comfyLogCleared || comfyLogOffset !== null) setComfyLogs(Array.isArray(logs.lines) ? logs.lines : [])
       if (typeof logs.size === 'number' && comfyLogCleared && comfyLogOffset === null) setComfyLogOffset(logs.size)
       setComfyError('')
@@ -625,16 +823,27 @@ function App() {
   ].sort((a, b) => a.position - b.position)
 
   const mutate = async (url: string, method = 'POST', body?: BodyInit, sessionToken = csrf) => {
-    const response = await fetch(url, { method, headers: { 'X-CSRF-Token': sessionToken }, body })
-    const raw = await response.text()
-    let data: Record<string, any> = {}
-    try { data = raw ? JSON.parse(raw) : {} } catch { /* preserve the raw server response below */ }
-    if (!response.ok) {
-      const detail = typeof data.detail === 'string' ? data.detail : raw.trim() || `HTTP ${response.status}`
-      throw new Error(detail)
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), MUTATION_TIMEOUT_MS)
+    try {
+      const response = await fetch(url, { method, headers: { 'X-CSRF-Token': sessionToken }, body, signal: controller.signal })
+      const raw = await response.text()
+      let data: Record<string, any> = {}
+      try { data = raw ? JSON.parse(raw) : {} } catch { /* preserve the raw server response below */ }
+      if (!response.ok) {
+        const detail = typeof data.detail === 'string' ? data.detail : raw.trim() || `HTTP ${response.status}`
+        throw new Error(detail)
+      }
+      await load(true)
+      return data
+    } catch (error) {
+      if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') {
+        throw new Error('The request timed out before the server confirmed it. Check the connection and try again.')
+      }
+      throw error
+    } finally {
+      window.clearTimeout(timeoutId)
     }
-    await load(true)
-    return data
   }
 
   const bulkMutation = async (url: string, method = 'POST', body?: unknown) => {
@@ -866,6 +1075,7 @@ function App() {
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.detail || 'ComfyUI action failed')
       setComfyRunning(Boolean(data.running))
+      setComfyResponsive(data.responsive !== false)
       await loadComfy()
       feedback.notify('success', `ComfyUI ${action === 'start' ? 'started' : 'stopped'}`)
     } catch (e) {
@@ -994,27 +1204,32 @@ function App() {
     if (!confirmed && needsConfirmation) { setConfirming(true); return }
     const sessionToken = csrf || await loadSession()
     if (!sessionToken) return setMainError('generation', 'החיבור לשרת עדיין מתחבר. נסי שוב בעוד רגע')
-    const form = new FormData()
-    const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
-    form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-    form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
-    if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
-    if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
-    if (mode === 'frames') {
-      form.set('first_frame', openingFrame!)
-      if (closingFrame) form.set('last_frame', closingFrame)
-    } else if (mode === 'lip_sync') {
-      if (openingFrame) form.set('first_frame', openingFrame)
-      form.set('audio', lipSyncAudio!)
-      form.set('audio_start', String(audioTrimStart))
-    } else if (mode === 'reference') {
-      referenceImages.forEach(file => form.append('reference_images', file))
-      referenceVideos.forEach(file => form.append('reference_videos', file))
-      if (referenceAudio) form.set('reference_audio', referenceAudio)
-    }
     setConfirming(false)
     setSending(true)
     try {
+      const form = new FormData()
+      const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
+      form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
+      form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
+      if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
+      if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
+      if (mode === 'frames') {
+        form.set('first_frame', openingFrame!)
+        if (closingFrame) form.set('last_frame', closingFrame)
+      } else if (mode === 'lip_sync') {
+        if (openingFrame) form.set('first_frame', openingFrame)
+        const preparedAudio = await prepareLipSyncAudio(lipSyncAudio!, audioTrimStart, duration)
+        form.set('audio', preparedAudio.file)
+        form.set('audio_start', String(preparedAudio.pretrimmed ? 0 : audioTrimStart))
+        if (preparedAudio.pretrimmed) {
+          form.set('audio_pretrimmed', 'true')
+          form.set('audio_original_start', String(audioTrimStart))
+        }
+      } else if (mode === 'reference') {
+        referenceImages.forEach(file => form.append('reference_images', file))
+        referenceVideos.forEach(file => form.append('reference_videos', file))
+        if (referenceAudio) form.set('reference_audio', referenceAudio)
+      }
       await mutate('/api/jobs', 'POST', form, sessionToken)
       setPrompt(''); setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null); setOpeningFrame(null); setClosingFrame(null); setBatch(false); setConnected(false); setAudioTrimStart(0)
       feedback.notify('success', 'Generation added to the queue')
@@ -1188,21 +1403,21 @@ function App() {
     return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) })
   }
 
-  return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>
+  return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''} ${page === 'review' ? 'review-shell-host' : ''}`}>
     <header className="topbar">
       <div className="brand-mark"><Clapperboard size={22} /></div>
       <div><h1>H3 Studio</h1><p>יוצרים וידאו מהמחשב שלך</p></div>
       <div className="topbar-actions">
-        <button className={`comfy-status-button ${comfyLoading ? 'checking' : comfyRunning ? 'running' : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyLoading ? 'Checking ComfyUI…' : comfyRunning ? 'ComfyUI running' : 'ComfyUI stopped'}</span></button>
+        <button className={`comfy-status-button ${comfyLoading ? 'checking' : comfyRunning ? (comfyResponsive ? 'running' : 'busy') : ''}`} onClick={() => setPage('comfy')}><i /> <span>{comfyLoading ? 'Checking ComfyUI…' : !comfyRunning ? 'ComfyUI stopped' : comfyResponsive ? 'ComfyUI running' : 'ComfyUI busy'}</span></button>
         <button className="comfy-control-button" onClick={() => { void controlComfy(comfyRunning ? 'stop' : 'start') }} disabled={comfyBusy} aria-label={comfyRunning ? 'Stop ComfyUI' : 'Start ComfyUI'}>{comfyBusy ? <LoaderCircle className="spin" size={16} /> : comfyRunning ? <Square size={15} /> : <Power size={16} />}</button>
         <button className="comfy-control-button lock-button" onClick={() => { void lockComputer() }} aria-label="Lock Windows PC" title="Lock Windows PC"><Lock size={15} /></button>
         <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load(true) } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
-    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}><ImageIcon size={15} /> Frame review</button><button className={page === 'video_vault' ? 'active' : ''} onClick={() => setPage('video_vault')}><Download size={15} /> Video Vault</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
     <MainSectionError message={mainErrors.system} onDismiss={() => clearMainError('system')} />
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} responsive={comfyResponsive} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'review' ? <FrameReviewPage /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : page === 'video_vault' ? <VideoVaultPage csrf={csrf} /> : <>
     {jobsLoading && <div className="app-loading-strip" role="status" aria-live="polite"><LoaderCircle className="spin" size={14} /> Loading generation history and asset library…</div>}
 
     <section className="asset-library-panel">
