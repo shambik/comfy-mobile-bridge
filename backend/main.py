@@ -27,7 +27,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, AGY_DEFAULT_RUNTIME,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
-                     CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, INPUT, LOGS, MODELS,
+                     CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR,
+                     FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR,
+                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT,
@@ -542,6 +544,26 @@ def audio_lock_ready() -> bool:
     return (AUDIOLOCK_NODE_DIR / "__init__.py").exists()
 
 
+def fused_sla_ready() -> bool:
+    return all((
+        (MODELS / "diffusion_models" / FUSED_SLA_MODEL).exists(),
+        (MODELS / "vae" / FUSED_VIDEO_VAE).exists(),
+        (FUSED_SLA_NODE_DIR / "__init__.py").exists(),
+    ))
+
+
+def fused_workflow_ready(variant: str) -> bool:
+    if variant not in FUSED_WORKFLOW_FILES or not fused_sla_ready():
+        return False
+    if not FUSED_WORKFLOW_FILES[variant].exists():
+        return False
+    if variant in {"derope", "dyrope"} and not (FUSED_MAINODES_DIR / "__init__.py").exists():
+        return False
+    if variant == "dyrope" and not (MODELS / "loras" / FUSED_MOTION_ADAPTER).exists():
+        return False
+    return True
+
+
 def public_health():
     conflict = fortnite_running()
     return {
@@ -552,6 +574,12 @@ def public_health():
         "comfy_host": COMFY_HOST,
         "comfy_port": COMFY_PORT,
         "reference_ready": (MODELS / "diffusion_models" / REF2VA_MODEL).exists(),
+        "fused_sla_ready": fused_sla_ready(),
+        "fused_direct_ready": fused_workflow_ready("direct"),
+        "fused_i2v_fl2v_ready": fused_workflow_ready("i2v_fl2v"),
+        "fused_ref2va_ready": fused_workflow_ready("ref2va"),
+        "fused_derope_ready": fused_workflow_ready("derope"),
+        "fused_dyrope_ready": fused_workflow_ready("dyrope"),
         "reference_10s_ready": REFERENCE_10S_MARKER.exists(),
         "spectrum_ready": (SPECTRUM_NODE_DIR / "nodes.py").exists(),
         "spectrum_version": SPECTRUM_NODE_VERSION,
@@ -2335,6 +2363,7 @@ async def create_jobs(
     resolution: str | None = Form(None),
     megapixels: float | None = Form(None), aspect_ratio: str | None = Form(None),
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
+    workflow_variant: str | None = Form(None),
     seed: str = Form(""),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
@@ -2364,13 +2393,20 @@ async def create_jobs(
         generation = normalize_generation_settings(
             mode, engine, steps, resolution, encoder, turbo_profile,
             megapixels=megapixels, aspect_ratio=aspect_ratio,
+            workflow_variant=workflow_variant,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if generation.encoder == "clipproj" and not clipproj_ready():
         raise HTTPException(409, "ClipProj is not fully installed yet")
+    if generation.engine == "fused_sla" and not fused_sla_ready():
+        raise HTTPException(409, "H3 Fused SLA is not fully installed yet")
+    if generation.engine == "fused_sla" and not fused_workflow_ready(generation.workflow_variant):
+        raise HTTPException(409, f"The Fused {generation.workflow_variant} workflow is not fully installed yet")
     if connected and (not batch or mode != "text"):
         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
+    if connected and generation.engine == "fused_sla":
+        raise HTTPException(400, "H3 Fused SLA is currently available for standalone jobs only")
     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
         raise HTTPException(400, "Text mode does not accept reference media")
     if mode == "lip_sync" and (reference_images or reference_videos or reference_audio or last_frame):
@@ -2404,6 +2440,10 @@ async def create_jobs(
         raise HTTPException(400, "This mode requires one image")
     if mode == "reference" and not (image or reference_images or reference_videos):
         raise HTTPException(400, "Reference mode requires at least one image or video")
+    if generation.engine == "fused_sla" and generation.workflow_variant == "ref2va":
+        reference_image_count = len(reference_images) + (1 if image else 0)
+        if reference_image_count != 1 or reference_videos or reference_audio:
+            raise HTTPException(400, "The official Fused Ref2VA workflow accepts exactly one reference image and no reference video or audio")
     if mode in ("opening", "closing", "reference") and (first_frame or last_frame):
         raise HTTPException(400, "This mode accepts one image only")
     if mode != "reference" and (reference_images or reference_videos):
@@ -2506,23 +2546,23 @@ async def create_jobs(
             if connected:
                 db.execute(
                     """INSERT INTO jobs
-                       (id,prompt,mode,duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,
+                       (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,
                         sequence_id,sequence_index,sequence_total,status,position,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
-                    (job_id, text, "text", duration, generation.engine, generation.turbo_profile, generation.encoder,
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
+                    (job_id, text, "text", duration, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.encoder,
                      generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                      job_seed, sequence_id, index + 1, len(prompts), position, now, now),
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,audio_start,audio_duration,engine,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,audio_start,audio_duration,engine,workflow_variant,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    source_audio_path,source_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.turbo_profile, generation.encoder,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),

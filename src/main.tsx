@@ -8,7 +8,8 @@ import { AppModal, useAppModal } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
-type Engine = 'turbo' | 'standard' | 'spectrum'
+type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla'
+type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'derope' | 'dyrope'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
@@ -32,7 +33,7 @@ type RuntimeMetadata = {
 type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
-  engine: Engine; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
+  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
@@ -143,6 +144,8 @@ type Preferences = {
   encoder: Encoder
   turboProfile: TurboProfile
   turboSteps: number
+  fusedSlaSteps: number
+  fusedWorkflow: FusedWorkflow
   standardSteps: number
   spectrumSteps: number
   resolution: Resolution
@@ -150,17 +153,19 @@ type Preferences = {
   megapixels: number
 }
 
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', turboSteps: 4, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey) || '{}') as Partial<Preferences>
     return {
-      engine: saved.engine === 'standard' || saved.engine === 'spectrum' ? saved.engine : 'turbo',
+      engine: saved.engine === 'standard' || saved.engine === 'spectrum' || saved.engine === 'fused_sla' ? saved.engine : 'turbo',
       encoder: saved.encoder === 'clipproj' ? 'clipproj' : 'native',
       turboProfile: saved.turboProfile === 'v4' ? 'v4' : 'v1',
       turboSteps: Number.isInteger(saved.turboSteps) && saved.turboSteps! >= 4 && saved.turboSteps! <= 12 ? saved.turboSteps! : 4,
+      fusedSlaSteps: Number.isInteger(saved.fusedSlaSteps) && saved.fusedSlaSteps! >= 4 && saved.fusedSlaSteps! <= 8 ? saved.fusedSlaSteps! : 4,
+      fusedWorkflow: saved.fusedWorkflow === 'i2v_fl2v' || saved.fusedWorkflow === 'ref2va' || saved.fusedWorkflow === 'derope' || saved.fusedWorkflow === 'dyrope' ? saved.fusedWorkflow : 'direct',
       standardSteps: Number.isInteger(saved.standardSteps) && saved.standardSteps! >= 8 && saved.standardSteps! <= 30 ? saved.standardSteps! : 20,
       spectrumSteps: Number.isInteger(saved.spectrumSteps) && saved.spectrumSteps! >= 8 && saved.spectrumSteps! <= 30 ? saved.spectrumSteps! : 16,
       resolution: resolutions.some(item => item.id === saved.resolution) ? saved.resolution! : '736x416',
@@ -226,6 +231,18 @@ function ComfyPage({ running, responsive, loading, busy, lines, error, onRefresh
     {error && <div className="error-banner">{error}</div>}
     <pre className="comfy-log" aria-live="polite">{lines.length ? lines.join('\n') : 'No log output yet. Start ComfyUI to begin.'}</pre>
   </section>
+}
+
+function isFusedWorkflow(value: unknown): value is FusedWorkflow {
+  return value === 'direct' || value === 'i2v_fl2v' || value === 'ref2va' || value === 'derope' || value === 'dyrope'
+}
+
+function fusedWorkflowLabel(value: unknown) {
+  if (value === 'i2v_fl2v') return 'I2V / FL2V'
+  if (value === 'ref2va') return 'Ref2VA'
+  if (value === 'derope') return 'De-rope'
+  if (value === 'dyrope') return 'DyRoPE'
+  return 'Direct SLA'
 }
 
 type VideoVaultItem = {
@@ -419,6 +436,12 @@ function App() {
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
+  const [fusedSlaReady, setFusedSlaReady] = useState(false)
+  const [fusedDirectReady, setFusedDirectReady] = useState(false)
+  const [fusedI2vReady, setFusedI2vReady] = useState(false)
+  const [fusedRef2vaReady, setFusedRef2vaReady] = useState(false)
+  const [fusedDeropeReady, setFusedDeropeReady] = useState(false)
+  const [fusedDyropeReady, setFusedDyropeReady] = useState(false)
   const [audioLockReady, setAudioLockReady] = useState(false)
   const [gpuConflict, setGpuConflict] = useState(false)
   const [gpuBusy, setGpuBusy] = useState(false)
@@ -463,6 +486,12 @@ function App() {
       if (!data.csrf_token) throw new Error('missing session token')
       setCsrf(data.csrf_token)
       setReferenceReady(data.reference_ready)
+      setFusedSlaReady(Boolean(data.fused_sla_ready))
+      setFusedDirectReady(Boolean(data.fused_direct_ready))
+      setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
+      setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
+      setFusedDeropeReady(Boolean(data.fused_derope_ready))
+      setFusedDyropeReady(Boolean(data.fused_dyrope_ready))
       setReference10Ready(data.reference_10s_ready)
       setSpectrumReady(data.spectrum_ready)
       setClipprojReady(data.clipproj_ready)
@@ -479,6 +508,12 @@ function App() {
 
   const applyPublicHealth = (data: Record<string, any>) => {
     if ('reference_ready' in data) setReferenceReady(Boolean(data.reference_ready))
+    if ('fused_sla_ready' in data) setFusedSlaReady(Boolean(data.fused_sla_ready))
+    if ('fused_direct_ready' in data) setFusedDirectReady(Boolean(data.fused_direct_ready))
+    if ('fused_i2v_fl2v_ready' in data) setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
+    if ('fused_ref2va_ready' in data) setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
+    if ('fused_derope_ready' in data) setFusedDeropeReady(Boolean(data.fused_derope_ready))
+    if ('fused_dyrope_ready' in data) setFusedDyropeReady(Boolean(data.fused_dyrope_ready))
     if ('reference_10s_ready' in data) setReference10Ready(Boolean(data.reference_10s_ready))
     if ('spectrum_ready' in data) setSpectrumReady(Boolean(data.spectrum_ready))
     if ('clipproj_ready' in data) setClipprojReady(Boolean(data.clipproj_ready))
@@ -764,21 +799,44 @@ function App() {
   }, [confirming])
 
   const paragraphCount = useMemo(() => batch ? prompt.trim().split(/\n\s*\n/).filter(Boolean).length : 1, [prompt, batch])
-  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady ? 'standard' : preferences.engine
-  const effectiveEncoder: Encoder = mode === 'lip_sync' ? 'native' : preferences.encoder
-  const generationSteps = mode === 'reference' && effectiveEngine === 'turbo' ? 4 : effectiveEngine === 'turbo' ? preferences.turboSteps : effectiveEngine === 'spectrum' ? preferences.spectrumSteps : preferences.standardSteps
-  const stepRange = effectiveEngine === 'turbo'
+  const effectiveEngine: Engine = mode === 'reference' && preferences.engine === 'turbo' && !referenceTurboReady
+    ? 'standard'
+    : mode === 'lip_sync' && preferences.engine === 'fused_sla'
+      ? 'standard'
+      : preferences.engine === 'fused_sla' && !fusedSlaReady
+        ? 'turbo'
+      : preferences.engine
+  const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
+    ? 'direct'
+    : mode === 'reference'
+      ? 'ref2va'
+      : mode === 'text'
+        ? preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'i2v_fl2v' ? 'direct' : preferences.fusedWorkflow
+        : preferences.fusedWorkflow === 'ref2va' ? 'i2v_fl2v' : preferences.fusedWorkflow
+  const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' ? 'native' : preferences.encoder
+  const generationSteps = mode === 'reference' && effectiveEngine === 'turbo'
+    ? 4
+    : effectiveEngine === 'turbo'
+      ? preferences.turboSteps
+      : effectiveEngine === 'fused_sla'
+        ? effectiveFusedWorkflow === 'direct' ? preferences.fusedSlaSteps : 4
+        : effectiveEngine === 'spectrum'
+          ? preferences.spectrumSteps
+          : preferences.standardSteps
+  const stepRange = effectiveEngine === 'fused_sla'
+    ? effectiveFusedWorkflow === 'direct' ? { min: 4, max: 8, recommended: 4 } : { min: 4, max: 4, recommended: 4 }
+    : effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
   const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
   const requestedFrames = Math.max(5, Math.round(duration * 24))
   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
-  const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : 1
+  const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : effectiveEngine === 'fused_sla' && (effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope') ? 2 : 1
   const promptMultiplier = batch ? Math.max(1, paragraphCount) : 1
   const relativeLoad = calculatedResolution.width * calculatedResolution.height * duration * generationSteps * engineLoadFactor * promptMultiplier / (736 * 416 * 5 * 4)
   const loadLevel = relativeLoad >= 5 ? 'very-heavy' : relativeLoad >= 2 ? 'heavy' : 'normal'
   const loadLabel = loadLevel === 'very-heavy' ? 'כבד מאוד' : loadLevel === 'heavy' ? 'כבד' : 'רגיל'
-  const needsConfirmation = effectiveEngine === 'spectrum' || effectiveEncoder === 'clipproj' || (effectiveEngine === 'turbo' && preferences.turboProfile === 'v4') || connected || relativeLoad >= 2 || (batch && paragraphCount >= 5)
+  const needsConfirmation = effectiveEngine === 'spectrum' || effectiveEncoder === 'clipproj' || (effectiveEngine === 'turbo' && preferences.turboProfile === 'v4') || (effectiveEngine === 'fused_sla' && (effectiveFusedWorkflow !== 'direct' || generationSteps === 8)) || connected || relativeLoad >= 2 || (batch && paragraphCount >= 5)
   const queued = jobs.filter(j => j.status === 'queued')
   const active = jobs.filter(j => ['starting', 'running', 'verifying'].includes(j.status))
   const history = jobs.filter(j => !['queued', 'starting', 'running', 'verifying'].includes(j.status))
@@ -1024,6 +1082,8 @@ function App() {
         encoder: job.encoder || 'native',
         turboProfile: job.turbo_profile || current.turboProfile,
         turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
+        fusedSlaSteps: jobEngine === 'fused_sla' ? Math.max(4, Math.min(8, job.steps)) : current.fusedSlaSteps,
+        fusedWorkflow: jobEngine === 'fused_sla' && isFusedWorkflow(job.workflow_variant) ? job.workflow_variant : current.fusedWorkflow,
         standardSteps: jobEngine === 'standard' ? Math.max(8, Math.min(30, job.steps)) : current.standardSteps,
         spectrumSteps: jobEngine === 'spectrum' ? Math.max(8, Math.min(30, job.steps)) : current.spectrumSteps,
         resolution: matchingResolution?.id || current.resolution,
@@ -1135,10 +1195,16 @@ function App() {
     clearMainError('generation')
     if (next !== 'text') setConnected(false)
     if (next !== 'lip_sync') setLipSyncAudio(null)
-    if (next === 'frames') { setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null) }
+    if (next === 'frames') {
+      setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null)
+      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+        ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
+    }
     else if (next === 'opening') {
       setClosingFrame(null)
       setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null)
+      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+        ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
     }
     else if (next === 'lip_sync') {
       setClosingFrame(null)
@@ -1150,6 +1216,9 @@ function App() {
       setOpeningFrame(null)
       setClosingFrame(null)
       setLipSyncAudio(null)
+      setPreferences(current => current.engine === 'fused_sla' && fusedRef2vaReady
+        ? { ...current, fusedWorkflow: 'ref2va' }
+        : current.engine === 'fused_sla' ? { ...current, engine: 'standard' } : current)
     } else if (next === 'text') {
       setReferenceImages([])
       setReferenceVideos([])
@@ -1157,17 +1226,52 @@ function App() {
       setOpeningFrame(null)
       setClosingFrame(null)
       setLipSyncAudio(null)
+      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'i2v_fl2v')
+        ? { ...current, fusedWorkflow: 'direct' } : current)
+    } else if (next === 'closing') {
+      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+        ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
     }
   }
+
+  const fusedWorkflowReady = (workflow: FusedWorkflow) => workflow === 'direct'
+    ? fusedDirectReady
+    : workflow === 'i2v_fl2v'
+      ? fusedI2vReady
+      : workflow === 'ref2va'
+        ? fusedRef2vaReady
+        : workflow === 'derope'
+          ? fusedDeropeReady
+          : fusedDyropeReady
 
   const selectEngine = (engine: Engine) => {
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
-    setPreferences(current => ({ ...current, engine }))
+    if (engine === 'fused_sla' && (!fusedSlaReady || mode === 'lip_sync' || (mode === 'reference' && !fusedRef2vaReady))) return
+    if (engine === 'fused_sla') setConnected(false)
+    setPreferences(current => engine !== 'fused_sla'
+      ? { ...current, engine }
+      : { ...current, engine, fusedWorkflow: mode === 'reference' ? 'ref2va' : mode === 'text' ? 'direct' : fusedI2vReady ? 'i2v_fl2v' : 'direct' })
+  }
+
+  const selectFusedWorkflow = (workflow: FusedWorkflow) => {
+    if (!fusedSlaReady || !fusedWorkflowReady(workflow)) return
+    if (mode === 'reference' && workflow !== 'ref2va') return
+    if (mode !== 'reference' && workflow === 'ref2va') return
+    if (mode === 'text' && workflow === 'i2v_fl2v') return
+    if (mode !== 'text' && mode !== 'opening' && mode !== 'closing' && mode !== 'frames') return
+    setConnected(false)
+    setPreferences(current => ({
+      ...current,
+      engine: 'fused_sla',
+      fusedWorkflow: workflow,
+      fusedSlaSteps: workflow === 'direct' ? current.fusedSlaSteps : 4,
+    }))
   }
 
   const selectEncoder = (encoder: Encoder) => {
     if (mode === 'lip_sync' && encoder !== 'native') return
+    if (preferences.engine === 'fused_sla' && encoder !== 'native') return
     if (encoder === 'clipproj' && !clipprojReady) return
     setPreferences(current => ({ ...current, encoder }))
   }
@@ -1183,7 +1287,9 @@ function App() {
 
   const setGenerationSteps = (value: number) => {
     const next = Math.max(stepRange.min, Math.min(stepRange.max, Math.round(value)))
-    setPreferences(current => effectiveEngine === 'turbo'
+    setPreferences(current => effectiveEngine === 'fused_sla'
+      ? { ...current, fusedSlaSteps: next }
+      : effectiveEngine === 'turbo'
       ? { ...current, turboSteps: next }
       : effectiveEngine === 'spectrum'
         ? { ...current, spectrumSteps: next }
@@ -1210,7 +1316,7 @@ function App() {
       const form = new FormData()
       const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
       form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-      form.set('engine', effectiveEngine); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
+      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
       if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
       if (mode === 'frames') {
@@ -1488,6 +1594,7 @@ function App() {
           </button>}
         </div>
         <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>
+        {effectiveEngine === 'fused_sla' && <div className="reference-limits-note">Official Ref2VA uses exactly one reference image; reference video and audio inputs are unavailable for this workflow.</div>}
         {referenceAudio && <div className="reference-audio-note"><AudioLines size={14} /><span>בפרומפט אפשר לכתוב <b dir="ltr">&lt;Picture 1&gt;</b> ו־<b dir="ltr">&lt;Audio 1&gt;</b>. H3 ישתמש בקול ובתזמון כרפרנס וייצר אודיו חדש יחד עם תנועת השפתיים.</span></div>}
       </>}
 
@@ -1510,11 +1617,28 @@ function App() {
               <button type="button" className={effectiveEngine === 'spectrum' ? 'active' : ''} aria-pressed={effectiveEngine === 'spectrum'} disabled={mode === 'lip_sync' || !spectrumReady} onClick={() => selectEngine('spectrum')}>
                 <Sparkles size={16} /><span><strong>Spectrum</strong><small>native + מהיר</small></span>
               </button>
+              <button type="button" className={effectiveEngine === 'fused_sla' ? 'active' : ''} aria-pressed={effectiveEngine === 'fused_sla'} disabled={mode === 'lip_sync' || !fusedSlaReady || (mode === 'reference' && !fusedRef2vaReady)} onClick={() => selectEngine('fused_sla')}>
+                <BrainCircuit size={16} /><span><strong>H3 Fused SLA</strong><small>INT8 · 4–8 steps</small></span>
+              </button>
             </div>
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
             {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
             {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
+            {effectiveEngine === 'fused_sla' && <p className="setting-note">Fused INT8 · SLA sparse attention · low VRAM chunking · 4 steps recommended; 8 is slower and can sharpen detail</p>}
+            {effectiveEngine === 'fused_sla' && <div className="fused-workflow-picker">
+              <div className="setting-title"><span>Fused workflow</span><small>{fusedWorkflowLabel(effectiveFusedWorkflow)}</small></div>
+              <div className="fused-workflow-toggle">
+                {(['direct', 'i2v_fl2v', 'ref2va', 'derope', 'dyrope'] as FusedWorkflow[]).map(workflow => {
+                  const modeAllowed = mode === 'reference' ? workflow === 'ref2va' : workflow !== 'ref2va' && !(mode === 'text' && workflow === 'i2v_fl2v')
+                  const ready = fusedWorkflowReady(workflow)
+                  return <button key={workflow} type="button" className={effectiveFusedWorkflow === workflow ? 'active' : ''} aria-pressed={effectiveFusedWorkflow === workflow} disabled={!modeAllowed || !ready} onClick={() => selectFusedWorkflow(workflow)}>
+                    <strong>{fusedWorkflowLabel(workflow)}</strong><small>{workflow === 'direct' ? '01 · 4–8 steps' : workflow === 'i2v_fl2v' ? '04 · opening/closing frame' : workflow === 'ref2va' ? '05 · reference image' : workflow === 'derope' ? '02 · two-pass recovery' : '03 · temporal adapter'}</small>
+                  </button>
+                })}
+              </div>
+              {effectiveFusedWorkflow !== 'direct' && <p className="setting-note">Official workflow · fixed 4 steps · higher VRAM/time than Direct SLA</p>}
+            </div>}
             {effectiveEngine === 'turbo' && mode !== 'reference' && <>
               <div className="setting-title turbo-profile-title"><span>Turbo LoRA</span><small>בחירת אופי התוצאה</small></div>
               <div className="turbo-profile-toggle">
@@ -1532,7 +1656,7 @@ function App() {
               <button type="button" className={effectiveEncoder === 'native' ? 'active' : ''} aria-pressed={effectiveEncoder === 'native'} onClick={() => selectEncoder('native')}>
                 <BrainCircuit size={17} /><span><strong>32B מקורי</strong><small>דיוק מלא</small></span>
               </button>
-              <button type="button" className={effectiveEncoder === 'clipproj' ? 'active' : ''} aria-pressed={effectiveEncoder === 'clipproj'} disabled={mode === 'lip_sync' || !clipprojReady} onClick={() => selectEncoder('clipproj')}>
+              <button type="button" className={effectiveEncoder === 'clipproj' ? 'active' : ''} aria-pressed={effectiveEncoder === 'clipproj'} disabled={mode === 'lip_sync' || effectiveEngine === 'fused_sla' || !clipprojReady} onClick={() => selectEncoder('clipproj')}>
                 <Sparkles size={17} /><span><strong>ClipProj 4B</strong><small>חסכוני · ניסיוני</small></span>
               </button>
             </div>
@@ -1673,7 +1797,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
   const engine = job.engine || (job.mode === 'reference' ? 'standard' : 'turbo')
-  const steps = job.steps || (engine === 'turbo' ? 4 : engine === 'spectrum' ? 16 : 20)
+  const steps = job.steps || (engine === 'turbo' || engine === 'fused_sla' ? 4 : engine === 'spectrum' ? 16 : 20)
   const width = job.width || 736
   const height = job.height || 416
   const megapixels = job.megapixels
@@ -1714,7 +1838,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
       {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
+      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -1818,6 +1942,7 @@ function modeLabel(mode: Mode) {
 function engineLabel(engine: Engine | string) {
   if (engine === 'turbo') return 'Turbo'
   if (engine === 'spectrum') return 'Spectrum'
+  if (engine === 'fused_sla') return 'H3 Fused SLA'
   return 'רגיל'
 }
 

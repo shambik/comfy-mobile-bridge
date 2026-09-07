@@ -10,15 +10,17 @@ import httpx
 from .comfy import (ComfyBusyError, ComfyCancellationError, ComfyClient,
                     find_video, gpu_sample, media_probe)
 from .config import (AUDIOLOCK_NODE_DIR, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
-                     CLIPPROJ_TEXT_ENCODER, INPUT, MODELS, REF2VA_MODEL,
-                     REF2VA_TURBO_LORA,
-                     SEQUENCES)
+                     CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
+                     FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
+                     FUSED_WORKFLOW_FILES, INPUT, MODELS, REF2VA_MODEL,
+                     REF2VA_TURBO_LORA, SEQUENCES)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
 from .library import finalize_completed_asset, resolve_asset_path
-from .workflows import (native_audio_lock_workflow, reference_workflow, spectrum_workflow,
-                        standard_workflow, turbo_workflow)
+from .workflows import (native_audio_lock_workflow, official_fused_workflow,
+                        reference_workflow,
+                        spectrum_workflow, standard_workflow, turbo_workflow)
 
 
 SAMPLER_NODE_ID = "14"
@@ -668,7 +670,7 @@ class QueueWorker:
                 raise RuntimeError("Native AudioLock node is not installed")
             if not job.get("reference_audio_name"):
                 raise RuntimeError("Lip-sync job has no uploaded audio")
-        elif job["mode"] == "reference":
+        elif job["mode"] == "reference" and job["engine"] != "fused_sla":
             required.add("MiniMaxH3ReferenceToVideo")
             if job["engine"] == "turbo":
                 required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
@@ -686,6 +688,36 @@ class QueueWorker:
             ref_path = MODELS / "diffusion_models" / REF2VA_MODEL
             if not ref_path.exists():
                 raise RuntimeError(f"Reference model is not installed: {REF2VA_MODEL}")
+        elif job["engine"] == "fused_sla":
+            variant = job.get("workflow_variant") or ("ref2va" if job["mode"] == "reference" else "direct")
+            required |= {
+                "KSamplerSelect", "MiniMaxH3SigmaShift", "MiniMaxChunkFeedForward",
+                "H3SLAAttention", "VAEDecode", "VAEDecodeAudio",
+                "SamplerCustomAdvanced", "BasicGuider", "BasicScheduler", "RandomNoise",
+            }
+            required_files = [
+                MODELS / "diffusion_models" / FUSED_SLA_MODEL,
+                MODELS / "vae" / FUSED_VIDEO_VAE,
+                FUSED_SLA_NODE_DIR / "__init__.py",
+            ]
+            workflow_path = FUSED_WORKFLOW_FILES.get(variant)
+            if workflow_path is None or not workflow_path.exists():
+                required_files.append(workflow_path or MODELS / "missing-official-workflow.json")
+            if variant in {"derope", "dyrope"}:
+                required |= {
+                    "H3JerkOracle", "H3TimeSmear", "H3V2VInit", "H3InjectSchedule",
+                    "H3ExactRecover", "H3JerkHeatmap", "H3AudioSmear", "H3AudioRecover",
+                    "H3ClockRemap", "H3SaveHoldMap", "VAEEncode", "VAEEncodeAudio",
+                }
+                required_files.append(FUSED_MAINODES_DIR / "__init__.py")
+            if variant == "ref2va":
+                required.add("MiniMaxH3ReferenceToVideo")
+            if variant == "dyrope":
+                required |= {"H3DyRoPE", "LoraLoaderModelOnly"}
+                required_files.append(MODELS / "loras" / FUSED_MOTION_ADAPTER)
+            missing_files = [str(path) for path in required_files if not path.exists()]
+            if missing_files:
+                raise RuntimeError("H3 Fused SLA is not fully installed: " + ", ".join(missing_files))
         elif job["engine"] == "turbo":
             required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
         elif job["engine"] == "spectrum":
@@ -711,7 +743,7 @@ class QueueWorker:
                 encoder=encoder,
                 turbo=job["engine"] == "turbo", turbo_profile=job.get("turbo_profile") or "v1",
             )
-        elif job["mode"] == "reference":
+        elif job["mode"] == "reference" and job["engine"] != "fused_sla":
             workflow_builder = "reference_workflow"
             reference_images = json.loads(job.get("reference_images_json") or "[]")
             if not reference_images and image_name:
@@ -723,6 +755,27 @@ class QueueWorker:
                 megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 spectrum=job["engine"] == "spectrum", turbo=job["engine"] == "turbo", encoder=encoder,
                 image_names=reference_images, video_names=json.loads(job.get("reference_videos_json") or "[]"),
+                include_audio=not bool(job.get("no_audio")),
+            )
+        elif job["engine"] == "fused_sla":
+            variant = job.get("workflow_variant") or ("ref2va" if job["mode"] == "reference" else "direct")
+            first_frame_name = job.get("first_frame_name")
+            last_frame_name = job.get("last_frame_name")
+            if job["mode"] == "opening":
+                first_frame_name = first_frame_name or image_name
+            elif job["mode"] == "closing":
+                last_frame_name = last_frame_name or image_name
+            reference_images = json.loads(job.get("reference_images_json") or "[]")
+            if not reference_images and job["mode"] == "reference" and image_name:
+                reference_images = [image_name]
+            workflow_builder = f"official_{variant}_workflow"
+            workflow = official_fused_workflow(
+                variant, job["prompt"], job["duration"], seed, prefix,
+                first_frame_name=first_frame_name,
+                last_frame_name=last_frame_name,
+                reference_image_name=reference_images[0] if reference_images else None,
+                steps=job["steps"], width=job["width"], height=job["height"],
+                megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 include_audio=not bool(job.get("no_audio")),
             )
         else:
@@ -969,7 +1022,10 @@ class QueueWorker:
             # give the filesystem a short grace period before declaring the
             # output missing.
             for _ in range(12):
-                video = find_video(prefix)
+                video = find_video(
+                    prefix,
+                    exact_prefix=job["engine"] == "fused_sla" and (job.get("workflow_variant") or "direct") in {"derope", "dyrope"},
+                )
                 if video:
                     break
                 await asyncio.sleep(5)

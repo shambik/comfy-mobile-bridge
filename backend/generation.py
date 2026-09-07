@@ -21,6 +21,9 @@ def parse_resolution(value: str) -> tuple[int, int]:
 TURBO_STEP_RANGE = (4, 12)
 STANDARD_STEP_RANGE = (8, 30)
 SPECTRUM_STEP_RANGE = (8, 30)
+FUSED_SLA_STEP_RANGE = (4, 8)
+FUSED_WORKFLOW_VARIANTS = ("direct", "i2v_fl2v", "ref2va", "derope", "dyrope")
+FUSED_FIXED_VARIANTS = {"i2v_fl2v", "ref2va", "derope", "dyrope"}
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class GenerationSettings:
     turbo_profile: str = "v1"
     megapixels: float = 0.31
     aspect_ratio: str = "16:9"
+    workflow_variant: str = "direct"
 
 
 def normalize_generation_settings(
@@ -44,14 +48,33 @@ def normalize_generation_settings(
     turbo_profile: str | None = None,
     megapixels: float | None = None,
     aspect_ratio: str | None = None,
+    workflow_variant: str | None = None,
 ) -> GenerationSettings:
     resolved_engine = engine or ("standard" if mode in ("reference", "lip_sync") else "turbo")
-    if resolved_engine not in ("turbo", "standard", "spectrum"):
-        raise ValueError("Engine must be turbo, standard or spectrum")
+    if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla"):
+        raise ValueError("Engine must be turbo, standard, spectrum or fused_sla")
+    resolved_variant = workflow_variant or ("ref2va" if mode == "reference" and resolved_engine == "fused_sla" else "direct")
+    if resolved_variant not in FUSED_WORKFLOW_VARIANTS:
+        raise ValueError("Fused workflow must be direct, i2v_fl2v, ref2va, derope or dyrope")
+    if resolved_engine != "fused_sla" and resolved_variant != "direct":
+        raise ValueError("Fused workflow variants require the Fused SLA engine")
+    if resolved_engine == "fused_sla" and mode == "reference" and resolved_variant != "ref2va":
+        raise ValueError("Fused reference mode requires the Ref2VA workflow")
+    if resolved_engine == "fused_sla" and resolved_variant == "ref2va" and mode != "reference":
+        raise ValueError("The Fused Ref2VA workflow requires Reference mode")
+    if resolved_engine == "fused_sla" and resolved_variant == "i2v_fl2v" and mode not in {"opening", "closing", "frames"}:
+        raise ValueError("The Fused I2V/FL2V workflow requires an image-to-video mode")
+    if resolved_engine == "fused_sla" and resolved_variant in {"derope", "dyrope"} and mode not in {"text", "opening", "closing", "frames"}:
+        raise ValueError("Fused de-rope workflows use text or image-to-video mode")
     if resolved_engine == "turbo":
         step_min, step_max, default_steps = (*TURBO_STEP_RANGE, 4)
     elif resolved_engine == "spectrum":
         step_min, step_max, default_steps = (*SPECTRUM_STEP_RANGE, 16)
+    elif resolved_engine == "fused_sla":
+        if resolved_variant in FUSED_FIXED_VARIANTS:
+            step_min, step_max, default_steps = (4, 4, 4)
+        else:
+            step_min, step_max, default_steps = (*FUSED_SLA_STEP_RANGE, 4)
     else:
         step_min, step_max, default_steps = (*STANDARD_STEP_RANGE, 20)
     resolved_steps = default_steps if steps is None else steps
@@ -87,6 +110,8 @@ def normalize_generation_settings(
         raise ValueError("Text encoder must be native or clipproj")
     if mode == "lip_sync" and resolved_engine not in ("standard", "turbo"):
         raise ValueError("Lip-sync supports only the Standard or Turbo engine")
+    if resolved_engine == "fused_sla" and resolved_encoder != "native":
+        raise ValueError("H3 Fused SLA uses the native 32B text encoder")
     if mode == "lip_sync" and resolved_encoder != "native":
         raise ValueError("Lip-sync uses the native 32B encoder")
     resolved_turbo_profile = turbo_profile or "v1"
@@ -103,4 +128,5 @@ def normalize_generation_settings(
     return GenerationSettings(
         resolved_engine, resolved_steps, width, height,
         resolved_encoder, resolved_turbo_profile, resolved_megapixels, resolved_aspect,
+        resolved_variant,
     )

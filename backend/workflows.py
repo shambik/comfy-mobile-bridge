@@ -1,8 +1,10 @@
+import json
 from copy import deepcopy
 
 from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
-                     FL2VA_MODEL, REF2VA_MODEL, REF2VA_TURBO_LORA, TEXT_ENCODER, TURBO_LORAS,
-                     VIDEO_VAE)
+                     FL2VA_MODEL, FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL,
+                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, REF2VA_MODEL,
+                     REF2VA_TURBO_LORA, TEXT_ENCODER, TURBO_LORAS, VIDEO_VAE)
 
 FPS = 24
 H3_DURATION_EXPRESSION = "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17"
@@ -175,6 +177,187 @@ def standard_workflow(
         nodes["201"] = {"class_type": "LoadImage", "inputs": {"image": last_frame_name}}
         nodes["104"]["inputs"]["last_frame"] = ["201", 0]
     return deepcopy(nodes)
+
+
+def fused_sla_workflow(
+    prompt: str,
+    duration: int,
+    seed: int,
+    prefix: str,
+    first_frame_name: str | None = None,
+    last_frame_name: str | None = None,
+    steps: int = 4,
+    width: int = 736,
+    height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
+    encoder: str = "native",
+    include_audio: bool = True,
+):
+    """Low VRAM fused ref-delta H3 with the official SLA attention chain.
+
+    The model is already a fused turbo checkpoint, so this path does not
+    attach a Turbo LoRA.  Four steps is the default; the model also supports
+    the measured 6–8 step single-pass ladder. The KJNodes feed-forward
+    chunker keeps the sequence memory within reach of a 10 GB card before the
+    SLA attention patch runs.
+    """
+    nodes = _common_decode(
+        "104", "17", {"id": "20", "scheduler": "9"},
+        seed, prefix, encoder="native", include_audio=include_audio,
+    )
+    nodes.update({
+        **_resolution_selector(width, height, megapixels, aspect_ratio),
+        **_duration_selector(duration),
+        "6": {"class_type": "UNETLoader", "inputs": {
+            "unet_name": FUSED_SLA_MODEL, "weight_dtype": "default",
+        }},
+        "18": {"class_type": "MiniMaxChunkFeedForward", "inputs": {
+            "model": ["6", 0], "chunks": 4, "seq_threshold": 4096,
+        }},
+        "19": {"class_type": "H3SLAAttention", "inputs": {
+            "model": ["18", 0], "sparsity_ratio": 0.90,
+            "block_size": "64", "min_seq_len": 8192,
+            "dense_last_steps": 0, "protect_audio": True, "enabled": True,
+        }},
+        "17": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
+            "model": ["19", 0], "shift_video": 12.0, "shift_audio": 3.0,
+        }},
+        "20": {"class_type": "KSamplerSelect", "inputs": {
+            "sampler_name": "res_multistep",
+        }},
+        "9": {"class_type": "BasicScheduler", "inputs": {
+            "model": ["17", 0], "scheduler": "simple", "steps": steps,
+            "denoise": 1.0,
+        }},
+        "104": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["13", 0], "vae": ["11", 0], "prompt": prompt,
+            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1],
+        }},
+    })
+    if first_frame_name:
+        nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
+        nodes["104"]["inputs"]["first_frame"] = ["200", 0]
+    if last_frame_name:
+        nodes["201"] = {"class_type": "LoadImage", "inputs": {"image": last_frame_name}}
+        nodes["104"]["inputs"]["last_frame"] = ["201", 0]
+    # The fused workflow uses the INT8 video VAE while retaining the existing
+    # audio VAE from the native H3 installation.
+    nodes["11"] = {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}}
+    return deepcopy(nodes)
+
+
+def _official_workflow(variant: str) -> dict:
+    path = FUSED_WORKFLOW_FILES.get(variant)
+    if path is None:
+        raise ValueError(f"Unknown official Fused workflow: {variant}")
+    if not path.exists():
+        raise RuntimeError(f"Official Fused workflow is missing: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read official Fused workflow: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Official Fused workflow is not an API graph: {path}")
+    return deepcopy(payload)
+
+
+def _official_aspect(aspect_ratio: str | None, width: int, height: int) -> str:
+    aspect = aspect_ratio or min(
+        H3_ASPECT_RATIOS,
+        key=lambda item: abs(H3_ASPECT_RATIOS[item] - width / height),
+    )
+    return {
+        "1:1": "1:1 (Square)",
+        "16:9": "16:9 (Widescreen)",
+        "9:16": "9:16 (Portrait Widescreen)",
+        "4:3": "4:3 (Standard)",
+        "3:4": "3:4 (Portrait Standard)",
+    }.get(aspect, aspect)
+
+
+def official_fused_workflow(
+    variant: str,
+    prompt: str,
+    duration: float,
+    seed: int,
+    prefix: str,
+    first_frame_name: str | None = None,
+    last_frame_name: str | None = None,
+    reference_image_name: str | None = None,
+    steps: int = 4,
+    width: int = 736,
+    height: int = 416,
+    megapixels: float | None = None,
+    aspect_ratio: str | None = None,
+    include_audio: bool = True,
+) -> dict:
+    """Return one of the downloaded official low-VRAM H3 API graphs.
+
+    The graph topology stays upstream-owned. Only request-specific values and
+    uploaded filenames are filled in here so the bridge can run the same
+    workflows from the phone UI and from ComfyUI directly.
+    """
+    nodes = _official_workflow(variant)
+    prompt_node = nodes.get("1")
+    if prompt_node:
+        prompt_node.setdefault("inputs", {})["value"] = prompt
+    resolution_node = nodes.get("115")
+    if resolution_node:
+        resolution_node.setdefault("inputs", {}).update({
+            "aspect_ratio": _official_aspect(aspect_ratio, width, height),
+            "megapixels": megapixels if megapixels is not None else width * height / 1_000_000,
+            "multiple": 32,
+        })
+    duration_node = nodes.get("133")
+    if duration_node:
+        duration_node.setdefault("inputs", {})["value"] = duration
+    scheduler = nodes.get("124")
+    if scheduler:
+        scheduler.setdefault("inputs", {})["steps"] = steps
+    for node_id, node in nodes.items():
+        if node.get("class_type") == "RandomNoise":
+            node.setdefault("inputs", {})["noise_seed"] = seed if node_id == "129" else seed + 1
+
+    def add_frame(node_id: str, input_name: str, filename: str | None, load_id: str) -> None:
+        if not filename:
+            return
+        nodes[load_id] = {"class_type": "LoadImage", "inputs": {"image": filename}}
+        if node_id in nodes:
+            nodes[node_id].setdefault("inputs", {})[input_name] = [load_id, 0]
+
+    if variant in {"direct", "i2v_fl2v", "derope", "dyrope"}:
+        add_frame("131", "first_frame", first_frame_name, "903")
+        add_frame("131", "last_frame", last_frame_name, "904")
+        if variant in {"derope", "dyrope"}:
+            add_frame("206", "first_frame", first_frame_name, "905")
+            add_frame("206", "last_frame", last_frame_name, "906")
+    if variant == "ref2va":
+        if not reference_image_name:
+            raise ValueError("The official Ref2VA workflow requires a reference image")
+        nodes.setdefault("901", {"class_type": "LoadImage", "inputs": {}})
+        nodes["901"].setdefault("inputs", {})["image"] = reference_image_name
+    if variant == "dyrope":
+        nodes["902"].setdefault("inputs", {})["lora_name"] = FUSED_MOTION_ADAPTER
+
+    save_nodes = [
+        (node_id, node) for node_id, node in nodes.items()
+        if node.get("class_type") == "SaveVideo"
+    ]
+    for node_id, node in save_nodes:
+        node.setdefault("inputs", {})["filename_prefix"] = f"{prefix}_{variant}_{node_id}"
+    final_save = nodes.get("215") if variant in {"derope", "dyrope"} else nodes.get("92")
+    if final_save and final_save.get("class_type") == "SaveVideo":
+        final_save.setdefault("inputs", {})["filename_prefix"] = prefix
+    for node in nodes.values():
+        if node.get("class_type") == "H3SaveHoldMap":
+            node.setdefault("inputs", {})["filename_prefix"] = f"{prefix}_holdmap"
+
+    if not include_audio:
+        for node in nodes.values():
+            if node.get("class_type") == "CreateVideo":
+                node.setdefault("inputs", {}).pop("audio", None)
+    return nodes
 
 
 def native_audio_lock_workflow(

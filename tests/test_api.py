@@ -171,6 +171,52 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("spectrum", 16, 736, 416, "queued"))
 
+    def test_fused_sla_profile_is_persisted_at_four_steps(self):
+        with patch("backend.main.fused_sla_ready", return_value=True):
+            response = self.post(engine="fused_sla", steps="4", resolution="512x288")
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT engine,steps,width,height,status FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("fused_sla", 4, 512, 288, "queued"))
+
+    def test_fused_sla_accepts_eight_step_quality_mode(self):
+        with patch("backend.main.fused_sla_ready", return_value=True):
+            response = self.post(engine="fused_sla", steps="8", resolution="512x288")
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT engine,steps FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("fused_sla", 8))
+
+    def test_fused_sla_reference_requires_reference_media(self):
+        response = self.post(mode="reference", engine="fused_sla", steps="4")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("at least one image or video", response.text)
+
+    def test_fused_ref2va_reference_profile_is_persisted(self):
+        files = {"image": ("reference.png", b"image-placeholder", "image/png")}
+        with patch("backend.main.fused_sla_ready", return_value=True), \
+             patch("backend.main.fused_workflow_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/reference.png", "reference.png"))):
+            response = self.client.post(
+                "/api/jobs",
+                data={"prompt": "A person turns toward camera", "mode": "reference", "duration": "5", "engine": "fused_sla", "steps": "4"},
+                files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT engine,workflow_variant,steps FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("fused_sla", "ref2va", 4))
+
     def test_clipproj_profile_is_persisted(self):
         with patch("backend.main.clipproj_ready", return_value=True):
             response = self.post(encoder="clipproj")

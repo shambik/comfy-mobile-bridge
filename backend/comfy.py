@@ -571,8 +571,17 @@ class ComfyClient:
                 self.log_handle = None
 
 
-def find_video(prefix: str) -> Path | None:
-    candidates = sorted(OUTPUT.rglob(f"{prefix}*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+def find_video(prefix: str, *, exact_prefix: bool = False) -> Path | None:
+    candidates = list(OUTPUT.rglob(f"{prefix}*.mp4"))
+    if exact_prefix:
+        exact = [
+            path for path in candidates
+            if path.stem.startswith(f"{prefix}_")
+            and path.stem[len(prefix) + 1:].isdigit()
+        ]
+        if exact:
+            candidates = exact
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None
 
 

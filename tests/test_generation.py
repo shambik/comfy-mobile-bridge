@@ -1,7 +1,8 @@
 import unittest
 
 from backend.generation import GenerationSettings, normalize_generation_settings
-from backend.workflows import (native_audio_lock_workflow, reference_workflow,
+from backend.workflows import (fused_sla_workflow, native_audio_lock_workflow,
+                               official_fused_workflow, reference_workflow,
                                spectrum_workflow, standard_workflow, turbo_workflow)
 
 
@@ -27,6 +28,10 @@ class GenerationSettingsTests(unittest.TestCase):
             normalize_generation_settings("text", "turbo", 4, "512x288", "clipproj"),
             GenerationSettings("turbo", 4, 512, 288, "clipproj"),
         )
+        self.assertEqual(
+            normalize_generation_settings("text", "fused_sla", 4),
+            GenerationSettings("fused_sla", 4, 736, 416),
+        )
 
     def test_safe_ranges_and_presets_are_enforced(self):
         cases = [
@@ -37,6 +42,7 @@ class GenerationSettingsTests(unittest.TestCase):
             ("reference", "turbo", 5, "736x416"),
             ("text", "spectrum", 7, "736x416"),
             ("text", "spectrum", 31, "736x416"),
+            ("text", "fused_sla", 9, "736x416"),
             ("text", "standard", 20, "1025x576"),
         ]
         for case in cases:
@@ -49,8 +55,17 @@ class GenerationSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_generation_settings("text", turbo_profile="unknown")
         self.assertEqual(normalize_generation_settings("lip_sync", "turbo", 4).engine, "turbo")
+        self.assertEqual(normalize_generation_settings("text", "fused_sla", 8).steps, 8)
         with self.assertRaises(ValueError):
             normalize_generation_settings("lip_sync", "standard", 20, encoder="clipproj")
+        self.assertEqual(
+            normalize_generation_settings("reference", "fused_sla", 4).workflow_variant,
+            "ref2va",
+        )
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("reference", "fused_sla", 4, workflow_variant="direct")
+        with self.assertRaises(ValueError):
+            normalize_generation_settings("text", "fused_sla", 4, encoder="clipproj")
 
     def test_turbo_v4_profile_is_explicit_and_keeps_v1_default(self):
         self.assertEqual(normalize_generation_settings("text").turbo_profile, "v1")
@@ -59,6 +74,43 @@ class GenerationSettingsTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_official_fused_graphs_receive_request_values(self):
+        direct = official_fused_workflow("direct", "prompt", 10, 17, "direct", steps=4, megapixels=0.7)
+        self.assertEqual(direct["1"]["inputs"]["value"], "prompt")
+        self.assertEqual(direct["124"]["inputs"]["steps"], 4)
+        self.assertEqual(direct["92"]["inputs"]["filename_prefix"], "direct")
+        self.assertEqual(direct["901"]["class_type"], "MiniMaxChunkFeedForward")
+
+        ref2va = official_fused_workflow("ref2va", "reference prompt", 10, 17, "ref", reference_image_name="face.png")
+        self.assertEqual(ref2va["901"]["inputs"]["image"], "face.png")
+        self.assertEqual(ref2va["131"]["inputs"]["ref_images.ref_image_0"], ["901", 0])
+
+        dyrope = official_fused_workflow("dyrope", "prompt", 10, 17, "dy", include_audio=False)
+        self.assertEqual(dyrope["902"]["inputs"]["lora_name"], "minimax_h3/minimax_h3_temporal_expansion_step375_r16.safetensors")
+        self.assertEqual(dyrope["215"]["inputs"]["filename_prefix"], "dy")
+        self.assertNotIn("audio", dyrope["214"]["inputs"])
+
+    def test_fused_sla_uses_verified_assets_and_low_vram_attention_chain(self):
+        workflow = fused_sla_workflow(
+            "test", 5, 17, "fused", first_frame_name="first.png",
+            last_frame_name="last.png", width=512, height=288,
+        )
+        self.assertEqual(
+            workflow["6"]["inputs"]["unet_name"],
+            "minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors",
+        )
+        self.assertEqual(
+            workflow["11"]["inputs"]["vae_name"],
+            "minimax_h3_video_vae_int8_convrot.safetensors",
+        )
+        self.assertEqual(workflow["18"]["class_type"], "MiniMaxChunkFeedForward")
+        self.assertEqual(workflow["19"]["class_type"], "H3SLAAttention")
+        self.assertEqual(workflow["19"]["inputs"]["model"], ["18", 0])
+        self.assertEqual(workflow["17"]["inputs"]["model"], ["19", 0])
+        self.assertEqual(workflow["9"]["inputs"]["steps"], 4)
+        self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
+        self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
+
     def test_turbo_uses_selected_steps_and_resolution(self):
         workflow = turbo_workflow("test", 5, 1, "turbo", steps=6, width=512, height=288)
         self.assertEqual(workflow["9"]["inputs"]["steps"], 6)

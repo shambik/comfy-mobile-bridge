@@ -144,6 +144,8 @@ OUTPUT = _as_path(comfy_config.get("output"), COMFY_CODE / "output", relative_to
 TEMP = _as_path(comfy_config.get("temp"), COMFY_CODE / "temp", relative_to=COMFY_CODE)
 USER = _as_path(comfy_config.get("user"), COMFY_CODE / "user", relative_to=COMFY_CODE)
 SPECTRUM_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-Spectrum-MiniMax-H3"
+FUSED_SLA_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-PlagueKind-Nodes-only-sparse"
+FUSED_MAINODES_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-MAINodes"
 CLIPPROJ_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-ClipProj"
 AUDIOLOCK_NODE_DIR = COMFY_CODE / "custom_nodes" / "ComfyUI-H3-NativeAudioLock"
 CLIPPROJ_NODE_COMMIT = "ca9b325e83cb02cb5e652570569c6f3f20fee342"
@@ -156,11 +158,22 @@ REF2VA_TURBO_LORA = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
 TURBO_LORA = TURBO_LORAS["v1"]
 FL2VA_MODEL = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
 REF2VA_MODEL = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+FUSED_SLA_MODEL = "minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors"
 TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 CLIPPROJ_TEXT_ENCODER = "qwen3vl_4b_fp8_scaled.safetensors"
 CLIPPROJ_PROJECTION = "h3_qwen3vl_4b_tap24.safetensors"
 VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
+FUSED_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+FUSED_WORKFLOW_DIR = STATE / "h3-new-flow" / "official"
+FUSED_MOTION_ADAPTER = "minimax_h3/minimax_h3_temporal_expansion_step375_r16.safetensors"
+FUSED_WORKFLOW_FILES = {
+    "direct": FUSED_WORKFLOW_DIR / "01_reference_4step_sla_lowvram.api.json",
+    "i2v_fl2v": FUSED_WORKFLOW_DIR / "04_i2v_fl2v_4step_sla_lowvram.api.json",
+    "ref2va": FUSED_WORKFLOW_DIR / "05_ref2va_4step_sla_lowvram.api.json",
+    "derope": FUSED_WORKFLOW_DIR / "02_derope_4plus4_sla_lowvram.api.json",
+    "dyrope": FUSED_WORKFLOW_DIR / "03_derope_dyrope_pb3049_warm375_lowvram.api.json",
+}
 
 TAILSCALE_ENABLED = bool(tailscale_config.get("enabled", True))
 TAILSCALE_SCOPE = str(tailscale_config.get("scope", "tailnet"))

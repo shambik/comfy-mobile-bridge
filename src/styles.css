@@ -71,10 +71,19 @@ textarea:focus { box-shadow: inset 0 0 0 1px #799b81, 0 0 0 3px #77987e1a; }
 .setting-block { min-width: 0; padding: 11px; border: 1px solid #2f3732; border-radius: 13px; background: #0d110f; }
 .setting-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
 .setting-title span { color: #d3dad5; font-size: 11px; font-weight: 700; }.setting-title small { color: #647168; font-size: 9px; }
-.engine-toggle { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.engine-toggle { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .encoder-toggle { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 .engine-toggle button,.encoder-toggle button { min-height: 49px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 0 8px; border: 1px solid #303a33; border-radius: 10px; background: #151a17; color: #748078; }
 .engine-toggle button > span,.encoder-toggle button > span { text-align: right; }.engine-toggle strong,.engine-toggle small,.encoder-toggle strong,.encoder-toggle small { display: block; }.engine-toggle strong,.encoder-toggle strong { color: #afb8b1; font-size: 11px; }.engine-toggle small,.encoder-toggle small { margin-top: 1px; color: #667069; font-size: 8px; }
+.fused-workflow-picker { margin-top: 11px; padding-top: 10px; border-top: 1px solid #242d27; }
+.fused-workflow-toggle { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.fused-workflow-toggle button { min-width: 0; min-height: 52px; padding: 6px 7px; border: 1px solid #303a33; border-radius: 10px; background: #151a17; color: #748078; text-align: right; }
+.fused-workflow-toggle button strong,.fused-workflow-toggle button small { display: block; }
+.fused-workflow-toggle button strong { color: #afb8b1; font-size: 10px; }
+.fused-workflow-toggle button small { margin-top: 3px; color: #667069; font-size: 8px; line-height: 1.25; }
+.fused-workflow-toggle button.active { border-color: #779b81; background: #1b2820; color: #cce0cf; }
+.fused-workflow-toggle button.active strong { color: #d7ebda; }
+.fused-workflow-toggle button:disabled { cursor: not-allowed; opacity: .38; }
 .engine-toggle button.active,.encoder-toggle button.active { border-color: #91b79b; background: linear-gradient(145deg, #26342b, #1b251f); color: #b9d9c0; box-shadow: inset 0 0 0 1px #91b79b33; }.engine-toggle button.active strong,.encoder-toggle button.active strong { color: #e2ebe4; }.engine-toggle button:disabled,.encoder-toggle button:disabled { opacity: .3; }
 .setting-note { margin: 8px 0 0; color: #9d8f70; font-size: 9px; line-height: 1.4; }
 .recommendation-action { border: 0; background: transparent; padding: 0; cursor: pointer; text-align: start; }
@@ -215,6 +224,7 @@ footer { text-align: center; color: #4f5953; font-size: 10px; padding-top: 34px;
 .bulk-dock + .asset-results-tree .asset-container-head { position: relative; z-index: 1; }
 .bulk-dock { z-index: 30; }
 @media (max-width: 619px) { .asset-library-head { align-items: flex-start; }.asset-library-head > button { flex: 0 0 auto; }.asset-library-toolbar { grid-template-columns: 1fr; }.generation-destination { grid-template-columns: auto minmax(0,1fr); }.generation-destination > label,.generation-destination > button { grid-column: 2; }.asset-project-title { display: grid; grid-template-columns: minmax(0,1fr); align-items: stretch; }.asset-project-actions { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) 38px; }.asset-project-actions button { min-width: 0; }.asset-folder-list > div { align-items: center; }.asset-folder-actions { flex: 0 0 auto; }.asset-dialog-backdrop { padding: 12px; }.asset-dialog { gap: 9px; padding: 14px; }.asset-dialog-head h2 { font-size: 18px; }.asset-container-toggle { padding-inline: 8px; }.asset-result-container.folder { margin: 7px; }.asset-result-container.folder > .asset-container-content { padding: 7px; }.asset-location { flex-wrap: wrap; }.asset-location b { width: 100%; margin-left: 28px; }.job-actions { display: flex; flex-wrap: wrap; }.job-actions button,.job-actions a { width: auto; min-width: 0; height: 31px; flex: 0 1 auto; padding-inline: 6px; }.job-actions .trash { margin: 0; }.job-actions .elapsed { flex: 1 1 100%; margin: 0; }.job-body { padding: 11px; }.section-heading { align-items: flex-start; }.section-heading-actions { flex-wrap: wrap; }.selection-hint { max-width: 110px; } .bulk-dock-controls { grid-template-columns: 1fr 1fr; }.bulk-move-button,.bulk-delete-button { width: 100%; } }
+@media (max-width: 619px) { .engine-toggle { grid-template-columns: repeat(2, minmax(0, 1fr)); }.engine-toggle button { min-height: 56px; padding-inline: 6px; }.fused-workflow-toggle { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 
 /* Agent Production Studio — isolated from the existing green H3 controls. */
