@@ -91,7 +91,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(ref2va["131"]["inputs"]["ref_images.ref_image_0"], ["901", 0])
 
         dyrope = official_fused_workflow("dyrope", "prompt", 10, 17, "dy", include_audio=False)
-        self.assertEqual(dyrope["902"]["inputs"]["lora_name"], "minimax_h3/minimax_h3_temporal_expansion_step375_r16.safetensors")
+        self.assertEqual(dyrope["902"]["inputs"]["lora_name"], "minimax_h3\\minimax_h3_temporal_expansion_step375_r16.safetensors")
         self.assertEqual(dyrope["215"]["inputs"]["filename_prefix"], "dy")
         self.assertNotIn("audio", dyrope["214"]["inputs"])
 

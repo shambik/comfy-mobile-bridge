@@ -166,7 +166,7 @@ VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 FUSED_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 FUSED_WORKFLOW_DIR = STATE / "h3-new-flow" / "official"
-FUSED_MOTION_ADAPTER = "minimax_h3/minimax_h3_temporal_expansion_step375_r16.safetensors"
+FUSED_MOTION_ADAPTER = "minimax_h3\\minimax_h3_temporal_expansion_step375_r16.safetensors"
 FUSED_WORKFLOW_FILES = {
     "direct": FUSED_WORKFLOW_DIR / "01_reference_4step_sla_lowvram.api.json",
     "i2v_fl2v": FUSED_WORKFLOW_DIR / "04_i2v_fl2v_4step_sla_lowvram.api.json",
