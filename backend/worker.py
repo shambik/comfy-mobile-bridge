@@ -112,19 +112,11 @@ class QueueWorker:
             return
         try:
             await self.comfy.cancel(prompt_id)
-        except ComfyCancellationError as exc:
-            # If the queue proved that this was the sole running prompt, an
-            # interrupt that leaves it in queue_running means the owned H3
-            # forward is stuck. Terminate the exact ComfyUI process tree so a
-            # canceled bridge job cannot keep consuming the GPU. If ownership
-            # was never proven, preserve any manual ComfyUI render.
+        except ComfyCancellationError:
+            # The queue could not prove that a global interrupt was safe. Keep
+            # the process alive and hold the worker at the recovery gate; a
+            # manual ComfyUI render must never be sacrificed for a UI cancel.
             self.comfy_restart_required = True
-            if not exc.safe_to_shutdown:
-                return
-            try:
-                await self.comfy.shutdown()
-            except Exception:
-                pass
         except Exception:
             # If Comfy did not acknowledge the cancellation, kill only the
             # configured ComfyUI process tree.  The loop will restart it
