@@ -21,6 +21,14 @@ from .config import (COMFY_CODE, COMFY_HOST, COMFY_PORT, COMFY_PYTHON,
 class ComfyCancellationError(RuntimeError):
     """Raised when ComfyUI still owns a prompt after cancellation was requested."""
 
+    def __init__(self, message: str, *, safe_to_shutdown: bool = False):
+        super().__init__(message)
+        # A running prompt is safe to terminate only after Comfy's queue
+        # proved that the bridge-owned prompt was the sole running prompt.
+        # Queue ownership failures remain non-destructive so a manual render
+        # cannot be killed by a bridge cancellation.
+        self.safe_to_shutdown = safe_to_shutdown
+
 
 class ComfyBusyError(RuntimeError):
     """Raised when a ComfyUI process is present but its health endpoint is busy."""
@@ -488,7 +496,15 @@ class ComfyClient:
             (await client.post(
                 COMFY_URL + "/queue", json={"delete": [prompt_id]}
             )).raise_for_status()
-        await self.wait_for_prompt_clear(prompt_id)
+        try:
+            await self.wait_for_prompt_clear(prompt_id)
+        except ComfyCancellationError as exc:
+            # The queue proved this was the sole running prompt, so a prompt
+            # that survives the interrupt is an owned stuck forward. Let the
+            # worker terminate only this configured ComfyUI process tree.
+            raise ComfyCancellationError(
+                str(exc), safe_to_shutdown=True,
+            ) from exc
 
     async def free_models(self):
         try:

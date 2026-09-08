@@ -97,6 +97,26 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
 
         http_client.assert_not_called()
 
+    async def test_running_prompt_that_survives_interrupt_is_safe_to_shutdown(self):
+        client = ComfyClient()
+        client.queue = AsyncMock(return_value={
+            "queue_running": [[1, "prompt-1"]], "queue_pending": [],
+        })
+        client.wait_for_prompt_clear = AsyncMock(
+            side_effect=ComfyCancellationError("prompt still running")
+        )
+
+        with patch("backend.comfy.httpx.AsyncClient") as http_client:
+            http_client.return_value.__aenter__.return_value.post = AsyncMock(
+                side_effect=lambda *args, **kwargs: SimpleNamespace(
+                    raise_for_status=lambda: None,
+                )
+            )
+            with self.assertRaises(ComfyCancellationError) as raised:
+                await client.cancel("prompt-1")
+
+        self.assertTrue(raised.exception.safe_to_shutdown)
+
     async def test_running_prompt_proves_liveness_when_health_probe_times_out(self):
         worker = QueueWorker()
         worker.comfy.queue = AsyncMock(return_value={
@@ -178,13 +198,27 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsafe_cancel_keeps_comfy_alive_for_manual_work(self):
         worker = QueueWorker()
-        worker.comfy.cancel = AsyncMock(side_effect=ComfyCancellationError("ownership unknown"))
+        worker.comfy.cancel = AsyncMock(side_effect=ComfyCancellationError(
+            "ownership unknown", safe_to_shutdown=False,
+        ))
         worker.comfy.shutdown = AsyncMock()
 
         await worker._cancel_comfy_prompt("prompt-1")
 
         self.assertTrue(worker.comfy_restart_required)
         worker.comfy.shutdown.assert_not_awaited()
+
+    async def test_owned_stuck_cancel_shuts_down_comfy_before_restart(self):
+        worker = QueueWorker()
+        worker.comfy.cancel = AsyncMock(side_effect=ComfyCancellationError(
+            "prompt still running", safe_to_shutdown=True,
+        ))
+        worker.comfy.shutdown = AsyncMock()
+
+        await worker._cancel_comfy_prompt("prompt-1")
+
+        self.assertTrue(worker.comfy_restart_required)
+        worker.comfy.shutdown.assert_awaited_once()
 
     async def test_busy_existing_comfy_process_is_not_replaced(self):
         client = ComfyClient()
