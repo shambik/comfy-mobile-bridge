@@ -3,7 +3,7 @@
 **Review date:** 2026-08-23  
 **Repository:** `shambik/comfy-mobile-bridge`  
 **Branch reviewed:** `main`  
-**Reviewed revision:** `dad5f10` (`Improve production agents and studio flow`)  
+**Reviewed revision:** `8add8ab` (`Improve production agents and studio flow`)  
 **Scope:** application code, production orchestration, agent integrations, ComfyUI integration, persistence, media/file handling, frontend/mobile behavior, networking, startup/setup scripts, tests, CI, dependencies, and documentation.
 
 This document is a review only. No application code was changed while preparing it. The unrelated untracked `temp.json` file was not modified.
