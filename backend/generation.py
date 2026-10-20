@@ -22,8 +22,36 @@ TURBO_STEP_RANGE = (4, 12)
 STANDARD_STEP_RANGE = (8, 30)
 SPECTRUM_STEP_RANGE = (8, 30)
 FUSED_SLA_STEP_RANGE = (4, 8)
-FUSED_WORKFLOW_VARIANTS = ("direct", "i2v_fl2v", "ref2va", "derope", "dyrope")
-FUSED_FIXED_VARIANTS = {"i2v_fl2v", "ref2va", "derope", "dyrope"}
+FUSED_WORKFLOW_VARIANTS = ("direct", "i2v_fl2v", "ref2va", "ref2va_multiref", "derope", "dyrope")
+# Ref2VA exposes the same 4–8 step sampler control as Direct SLA. The other
+# official auxiliary graphs remain fixed at four steps because their graph
+# topology is tied to the corresponding adapter/recovery pass.
+FUSED_FIXED_VARIANTS = {"i2v_fl2v", "derope", "dyrope"}
+# Per-job attention speed-ups. "standard" leaves the workflow untouched.
+# Turbo accepts every mode; Fused SLA already runs sparse attention, so it only
+# adds Sage. Standard and Spectrum stay on standard attention.
+ATTENTION_MODES = ("standard", "sage", "sla", "sage_sla")
+ENGINE_ATTENTION_MODES = {
+    "turbo": ATTENTION_MODES,
+    "fused_sla": ("standard", "sage"),
+    "standard": ("standard",),
+    "spectrum": ("standard",),
+    "ltx": ("standard",),
+}
+# LTX-2.5 distilled: one pass of the 8-step distilled schedule. Reference mode
+# uses Lightricks' Ingredients IC-LoRA with one reference sheet image.
+LTX_STEPS = 8
+LTX_MODES = ("text", "opening", "closing", "frames", "lip_sync", "reference")
+LTX_DURATION_RANGE = (1.0, 10.0)
+# Full-resolution single-pass sizes per aspect. "balanced" matches the tested
+# 896x1600 run; "high" is the tested 1088x1920 run trimmed to the app's
+# 2.0 MP safety limit. Every side is a multiple of 32.
+LTX_SIZES = {
+    "balanced": {"9:16": (896, 1600), "16:9": (1600, 896), "1:1": (1216, 1216),
+                 "4:3": (1376, 1024), "3:4": (1024, 1376)},
+    "high": {"9:16": (1056, 1888), "16:9": (1888, 1056), "1:1": (1408, 1408),
+             "4:3": (1632, 1216), "3:4": (1216, 1632)},
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +65,7 @@ class GenerationSettings:
     megapixels: float = 0.31
     aspect_ratio: str = "16:9"
     workflow_variant: str = "direct"
+    attention_mode: str = "standard"
 
 
 def normalize_generation_settings(
@@ -49,19 +78,26 @@ def normalize_generation_settings(
     megapixels: float | None = None,
     aspect_ratio: str | None = None,
     workflow_variant: str | None = None,
+    attention_mode: str | None = None,
+    ltx_quality: str | None = None,
 ) -> GenerationSettings:
     resolved_engine = engine or ("standard" if mode in ("reference", "lip_sync") else "turbo")
-    if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla"):
-        raise ValueError("Engine must be turbo, standard, spectrum or fused_sla")
+    if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla", "ltx"):
+        raise ValueError("Engine must be turbo, standard, spectrum, fused_sla or ltx")
+    if resolved_engine == "ltx":
+        return _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
+                              workflow_variant, attention_mode, ltx_quality)
+    if ltx_quality is not None:
+        raise ValueError("LTX quality is only available with the ltx engine")
     resolved_variant = workflow_variant or ("ref2va" if mode == "reference" and resolved_engine == "fused_sla" else "direct")
     if resolved_variant not in FUSED_WORKFLOW_VARIANTS:
-        raise ValueError("Fused workflow must be direct, i2v_fl2v, ref2va, derope or dyrope")
+        raise ValueError("Fused workflow must be direct, i2v_fl2v, ref2va, ref2va_multiref, derope or dyrope")
     if resolved_engine != "fused_sla" and resolved_variant != "direct":
         raise ValueError("Fused workflow variants require the Fused SLA engine")
-    if resolved_engine == "fused_sla" and mode == "reference" and resolved_variant != "ref2va":
-        raise ValueError("Fused reference mode requires the Ref2VA workflow")
-    if resolved_engine == "fused_sla" and resolved_variant == "ref2va" and mode != "reference":
-        raise ValueError("The Fused Ref2VA workflow requires Reference mode")
+    if resolved_engine == "fused_sla" and mode == "reference" and resolved_variant not in {"ref2va", "ref2va_multiref"}:
+        raise ValueError("Fused reference mode requires the Ref2VA or Ref2VA Multi-reference workflow")
+    if resolved_engine == "fused_sla" and resolved_variant in {"ref2va", "ref2va_multiref"} and mode != "reference":
+        raise ValueError("The Fused Ref2VA workflows require Reference mode")
     if resolved_engine == "fused_sla" and resolved_variant == "i2v_fl2v" and mode not in {"opening", "closing", "frames"}:
         raise ValueError("The Fused I2V/FL2V workflow requires an image-to-video mode")
     if resolved_engine == "fused_sla" and resolved_variant in {"derope", "dyrope"} and mode not in {"text", "opening", "closing", "frames"}:
@@ -123,12 +159,53 @@ def normalize_generation_settings(
         raise ValueError("Turbo profile is only available with the turbo engine")
     if resolved_engine == "turbo" and resolved_turbo_profile == "v4" and resolved_steps > 8:
         raise ValueError("Turbo v4 supports 4 to 8 useful steps")
-    if mode == "reference" and resolved_engine == "turbo" and resolved_steps != 4:
-        raise ValueError("Ref2VA Turbo uses exactly 4 steps")
+    if mode == "reference" and resolved_engine == "turbo" and not 4 <= resolved_steps <= 8:
+        raise ValueError("Ref2VA Turbo steps must be between 4 and 8")
     if resolved_engine != "turbo":
         resolved_turbo_profile = "v1"
+    resolved_attention = attention_mode or "standard"
+    if resolved_attention not in ATTENTION_MODES:
+        raise ValueError("Attention mode must be standard, sage, sla or sage_sla")
+    if resolved_attention not in ENGINE_ATTENTION_MODES[resolved_engine]:
+        allowed = ", ".join(ENGINE_ATTENTION_MODES[resolved_engine])
+        raise ValueError(f"The {resolved_engine} engine supports attention modes: {allowed}")
     return GenerationSettings(
         resolved_engine, resolved_steps, width, height,
         resolved_encoder, resolved_turbo_profile, resolved_megapixels, resolved_aspect,
-        resolved_variant,
+        resolved_variant, resolved_attention,
+    )
+
+
+def ltx_quality_for_size(width: int, height: int) -> str:
+    """Recover the LTX quality preset from a stored job size."""
+    for quality, sizes in LTX_SIZES.items():
+        if (width, height) in sizes.values():
+            return quality
+    return "balanced"
+
+
+def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
+                   workflow_variant, attention_mode, ltx_quality) -> GenerationSettings:
+    if mode not in LTX_MODES:
+        raise ValueError("Unsupported mode for LTX 2.5")
+    if steps not in (None, LTX_STEPS):
+        raise ValueError(f"LTX 2.5 uses the fixed {LTX_STEPS}-step distilled schedule")
+    if (encoder or "native") != "native":
+        raise ValueError("LTX 2.5 uses its own Gemma text encoder")
+    if turbo_profile not in (None, "v1"):
+        raise ValueError("Turbo profile is only available with the turbo engine")
+    if (workflow_variant or "direct") != "direct":
+        raise ValueError("Fused workflow variants require the Fused SLA engine")
+    if (attention_mode or "standard") != "standard":
+        raise ValueError("The ltx engine supports attention modes: standard")
+    quality = ltx_quality or "balanced"
+    if quality not in LTX_SIZES:
+        raise ValueError("LTX quality must be balanced or high")
+    aspect = aspect_ratio or "9:16"
+    if aspect not in LTX_SIZES[quality]:
+        raise ValueError("Aspect ratio must be one of 1:1, 16:9, 9:16, 4:3 or 3:4")
+    width, height = LTX_SIZES[quality][aspect]
+    return GenerationSettings(
+        "ltx", LTX_STEPS, width, height, "native", "v1",
+        round(width * height / 1_000_000, 2), aspect, "direct", "standard",
     )

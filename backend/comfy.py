@@ -27,7 +27,8 @@ class ComfyBusyError(RuntimeError):
 
 
 class ComfyClient:
-    def __init__(self):
+    def __init__(self, base_url: str = COMFY_URL):
+        self.base_url = base_url.rstrip("/")
         self.process: subprocess.Popen | None = None
         self.log_handle = None
         self.last_command: list[str] | None = None
@@ -38,7 +39,7 @@ class ComfyClient:
             # large H3 models are loading.  Health reporting must answer a
             # simple question: is the ComfyUI server responsive?
             async with httpx.AsyncClient(timeout=3) as client:
-                response = await client.get(COMFY_URL + "/system_stats")
+                response = await client.get(self.base_url + "/system_stats")
                 response.raise_for_status()
             return True
         except Exception:
@@ -46,7 +47,7 @@ class ComfyClient:
 
     async def system_stats(self) -> dict:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(COMFY_URL + "/system_stats")
+            response = await client.get(self.base_url + "/system_stats")
             response.raise_for_status()
             return response.json()
 
@@ -318,11 +319,11 @@ class ComfyClient:
 
     async def object_info(self):
         async with httpx.AsyncClient(timeout=30) as client:
-            return (await client.get(COMFY_URL + "/object_info")).raise_for_status().json()
+            return (await client.get(self.base_url + "/object_info")).raise_for_status().json()
 
     async def submit(self, workflow: dict, client_id: str) -> str:
         async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(COMFY_URL + "/prompt", json={"prompt": workflow, "client_id": client_id})
+            response = await client.post(self.base_url + "/prompt", json={"prompt": workflow, "client_id": client_id})
             if response.status_code >= 400:
                 raise RuntimeError(f"ComfyUI rejected workflow: {response.text[:4000]}")
             payload = response.json()
@@ -332,13 +333,13 @@ class ComfyClient:
 
     async def history(self, prompt_id: str):
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{COMFY_URL}/history/{prompt_id}")
+            response = await client.get(f"{self.base_url}/history/{prompt_id}")
             response.raise_for_status()
             return response.json().get(prompt_id)
 
     async def monitor_progress(self, client_id: str, on_message, ready: asyncio.Event, stop: asyncio.Event):
         """Forward ComfyUI WebSocket execution events until the job is done."""
-        parsed = urlsplit(COMFY_URL)
+        parsed = urlsplit(self.base_url)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         websocket_url = urlunsplit((scheme, parsed.netloc, "/ws", f"clientId={quote(client_id)}", ""))
 
@@ -388,7 +389,7 @@ class ComfyClient:
 
     async def queue(self):
         async with httpx.AsyncClient(timeout=20) as client:
-            return (await client.get(COMFY_URL + "/queue")).raise_for_status().json()
+            return (await client.get(self.base_url + "/queue")).raise_for_status().json()
 
     async def delete_queued(self, prompt_ids: list[str]):
         """Delete pending prompts without interrupting the GPU job."""
@@ -396,7 +397,7 @@ class ComfyClient:
         if not ids:
             return
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(COMFY_URL + "/queue", json={"delete": ids})
+            response = await client.post(self.base_url + "/queue", json={"delete": ids})
             response.raise_for_status()
 
     @staticmethod

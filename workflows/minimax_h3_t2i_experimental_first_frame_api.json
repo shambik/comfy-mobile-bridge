@@ -1,0 +1,189 @@
+{
+  "6": {
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "MiniMax H3 model"
+    }
+  },
+  "9": {
+    "inputs": {
+      "model": [
+        "6",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": 20,
+      "denoise": 1.0
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "H3 scheduler"
+    }
+  },
+  "10": {
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Decode H3 frames"
+    }
+  },
+  "11": {
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "H3 video VAE"
+    }
+  },
+  "13": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "H3 text encoder"
+    }
+  },
+  "14": {
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "16",
+        0
+      ],
+      "sampler": [
+        "17",
+        0
+      ],
+      "sigmas": [
+        "9",
+        0
+      ],
+      "latent_image": [
+        "104",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "Sample five-frame H3 latent"
+    }
+  },
+  "15": {
+    "inputs": {
+      "noise_seed": 2026092201
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "Random seed"
+    }
+  },
+  "16": {
+    "inputs": {
+      "model": [
+        "6",
+        0
+      ],
+      "conditioning": [
+        "104",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "H3 prompt guider"
+    }
+  },
+  "17": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "H3 sampler"
+    }
+  },
+  "104": {
+    "inputs": {
+      "clip": [
+        "13",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ],
+      "prompt": "A cinematic photorealistic still frame, a solitary performer in a rain-soaked neon city at night, dramatic colored practical lighting, natural human anatomy, realistic skin and fabric texture, crisp facial detail, professional music-video cinematography, composed as a striking single image. No text, no logo, no watermark.",
+      "width": [
+        "115",
+        0
+      ],
+      "height": [
+        "115",
+        1
+      ],
+      "length": 5
+    },
+    "class_type": "MiniMaxH3ImageToVideo",
+    "_meta": {
+      "title": "MiniMax H3 experimental text-to-still source"
+    }
+  },
+  "115": {
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 1.0,
+      "multiple": 32
+    },
+    "class_type": "ResolutionSelector",
+    "_meta": {
+      "title": "H3 canvas"
+    }
+  },
+  "200": {
+    "inputs": {
+      "image": [
+        "10",
+        0
+      ],
+      "batch_index": 0,
+      "length": 1
+    },
+    "class_type": "ImageFromBatch",
+    "_meta": {
+      "title": "Extract first frame only"
+    }
+  },
+  "201": {
+    "inputs": {
+      "images": [
+        "200",
+        0
+      ],
+      "filename_prefix": "image/minimax_h3_experimental_first_frame"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save H3 still image"
+    }
+  }
+}

@@ -34,9 +34,10 @@ def _create_jobs_table(db):
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         audio_start REAL NOT NULL DEFAULT 0,
         audio_duration REAL,
-        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla')),
-        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','derope','dyrope')),
+        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx')),
+        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
+        attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla')),
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
         steps INTEGER NOT NULL,
         width INTEGER NOT NULL,
@@ -78,10 +79,11 @@ def _create_jobs_table(db):
         finished_at TEXT,
         CHECK((engine='turbo' AND steps BETWEEN 4 AND 12) OR
               (engine='fused_sla' AND steps BETWEEN 4 AND 8) OR
+              (engine='ltx' AND steps = 8) OR
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
         CHECK(width BETWEEN 256 AND 2048 AND height BETWEEN 256 AND 2048 AND
               width % 32 = 0 AND height % 32 = 0 AND width * height <= 2000000),
-        CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla')),
+        CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx')),
         CHECK((sequence_id IS NULL AND sequence_index IS NULL AND sequence_total IS NULL) OR
               (sequence_id IS NOT NULL AND sequence_index BETWEEN 1 AND sequence_total AND sequence_total BETWEEN 2 AND 20))
     );
@@ -183,7 +185,7 @@ def _rebuild_jobs_table(db):
     _create_jobs_table(db)
 
     columns = [
-        "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "workflow_variant", "turbo_profile", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+        "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "workflow_variant", "turbo_profile", "attention_mode", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
@@ -197,6 +199,7 @@ def _rebuild_jobs_table(db):
         "engine": "CASE WHEN mode='reference' THEN 'standard' ELSE 'turbo' END",
         "workflow_variant": "'direct'",
         "turbo_profile": "'v1'",
+        "attention_mode": "'standard'",
         "encoder": "'native'",
         "steps": "CASE WHEN mode='reference' THEN 20 ELSE 4 END",
         "width": "736",
@@ -269,11 +272,18 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
             else:
+                if "attention_mode" not in _table_columns(db):
+                    # A plain column add keeps every existing row; old jobs
+                    # read as standard attention.
+                    db.execute(
+                        "ALTER TABLE jobs ADD COLUMN attention_mode TEXT NOT NULL DEFAULT 'standard' "
+                        "CHECK(attention_mode IN ('standard','sage','sla','sage_sla'))"
+                    )
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, position)")
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sequence ON jobs(sequence_id, sequence_index)")
         elif not table:
@@ -545,6 +555,7 @@ def historical_generation_seconds(
     height: int,
     encoder: str = "native",
     turbo_profile: str = "v1",
+    attention_mode: str = "standard",
 ) -> float | None:
     """Return a same-machine baseline for an honest ETA estimate."""
     with connect() as db:
@@ -552,11 +563,11 @@ def historical_generation_seconds(
             """
             SELECT metrics_json FROM jobs
             WHERE status='completed' AND mode=? AND duration=? AND engine=? AND encoder=?
-              AND turbo_profile=?
+              AND turbo_profile=? AND COALESCE(attention_mode, 'standard')=?
               AND steps=? AND width=? AND height=? AND metrics_json IS NOT NULL
             ORDER BY finished_at DESC LIMIT 12
             """,
-            (mode, duration, engine, encoder, turbo_profile, steps, width, height),
+            (mode, duration, engine, encoder, turbo_profile, attention_mode, steps, width, height),
         ).fetchall()
 
     values = []

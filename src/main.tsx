@@ -4,18 +4,21 @@ import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, Chevr
 import './styles.css'
 import { ProductionStudio } from './production'
 import { FrameReviewPage } from './review'
-import { AppModal, useAppModal } from './app-modal'
+import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
+import { BotImagesPage } from './bot-images'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
-type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla'
-type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'derope' | 'dyrope'
+type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx'
+type LtxQuality = 'balanced' | 'high'
+type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
+type AttentionMode = 'standard' | 'sage' | 'sla' | 'sage_sla'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
-type Page = 'studio' | 'production' | 'comfy' | 'review' | 'video_vault'
+type Page = 'studio' | 'production' | 'comfy' | 'review' | 'video_vault' | 'h3_still' | 'bot_images'
 type RuntimeMetadata = {
   captured_at?: string
   capture_error?: string
@@ -33,7 +36,7 @@ type RuntimeMetadata = {
 type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
-  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
+  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
@@ -73,6 +76,35 @@ const resolutions: ResolutionOption[] = [
 const aspectOptions: Aspect[] = ['1:1', '4:3', '3:4', '16:9', '9:16']
 const MUTATION_TIMEOUT_MS = 120_000
 const LIP_SYNC_PRETRIM_THRESHOLD_BYTES = 2 * 1024 * 1024
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+      return
+    }
+  } catch {
+    // Clipboard API access is unavailable on many phones over plain LAN HTTP.
+    // Fall through to the legacy DOM copy path in that case.
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '-9999px'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  textarea.setSelectionRange(0, textarea.value.length)
+  try {
+    if (!document.execCommand('copy')) throw new Error('Clipboard copy was rejected')
+  } finally {
+    textarea.remove()
+  }
+}
 
 function dimensionsFor(aspect: Aspect, megapixels: number) {
   const ratios: Record<Aspect, number> = { '1:1': 1, '4:3': 4 / 3, '3:4': 3 / 4, '16:9': 16 / 9, '9:16': 9 / 16 }
@@ -143,6 +175,8 @@ type Preferences = {
   engine: Engine
   encoder: Encoder
   turboProfile: TurboProfile
+  attentionMode: AttentionMode
+  ltxQuality: LtxQuality
   turboSteps: number
   fusedSlaSteps: number
   fusedWorkflow: FusedWorkflow
@@ -153,19 +187,21 @@ type Preferences = {
   megapixels: number
 }
 
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey) || '{}') as Partial<Preferences>
     return {
-      engine: saved.engine === 'standard' || saved.engine === 'spectrum' || saved.engine === 'fused_sla' ? saved.engine : 'turbo',
+      engine: saved.engine === 'standard' || saved.engine === 'spectrum' || saved.engine === 'fused_sla' || saved.engine === 'ltx' ? saved.engine : 'turbo',
       encoder: saved.encoder === 'clipproj' ? 'clipproj' : 'native',
       turboProfile: saved.turboProfile === 'v4' ? 'v4' : 'v1',
+      attentionMode: isAttentionMode(saved.attentionMode) ? saved.attentionMode : 'standard',
+      ltxQuality: saved.ltxQuality === 'high' ? 'high' : 'balanced',
       turboSteps: Number.isInteger(saved.turboSteps) && saved.turboSteps! >= 4 && saved.turboSteps! <= 12 ? saved.turboSteps! : 4,
       fusedSlaSteps: Number.isInteger(saved.fusedSlaSteps) && saved.fusedSlaSteps! >= 4 && saved.fusedSlaSteps! <= 8 ? saved.fusedSlaSteps! : 4,
-      fusedWorkflow: saved.fusedWorkflow === 'i2v_fl2v' || saved.fusedWorkflow === 'ref2va' || saved.fusedWorkflow === 'derope' || saved.fusedWorkflow === 'dyrope' ? saved.fusedWorkflow : 'direct',
+      fusedWorkflow: saved.fusedWorkflow === 'i2v_fl2v' || saved.fusedWorkflow === 'ref2va' || saved.fusedWorkflow === 'ref2va_multiref' || saved.fusedWorkflow === 'derope' || saved.fusedWorkflow === 'dyrope' ? saved.fusedWorkflow : 'direct',
       standardSteps: Number.isInteger(saved.standardSteps) && saved.standardSteps! >= 8 && saved.standardSteps! <= 30 ? saved.standardSteps! : 20,
       spectrumSteps: Number.isInteger(saved.spectrumSteps) && saved.spectrumSteps! >= 8 && saved.spectrumSteps! <= 30 ? saved.spectrumSteps! : 16,
       resolution: resolutions.some(item => item.id === saved.resolution) ? saved.resolution! : '736x416',
@@ -234,15 +270,191 @@ function ComfyPage({ running, responsive, loading, busy, lines, error, onRefresh
 }
 
 function isFusedWorkflow(value: unknown): value is FusedWorkflow {
-  return value === 'direct' || value === 'i2v_fl2v' || value === 'ref2va' || value === 'derope' || value === 'dyrope'
+  return value === 'direct' || value === 'i2v_fl2v' || value === 'ref2va' || value === 'ref2va_multiref' || value === 'derope' || value === 'dyrope'
 }
 
 function fusedWorkflowLabel(value: unknown) {
   if (value === 'i2v_fl2v') return 'I2V / FL2V'
   if (value === 'ref2va') return 'Ref2VA'
+  if (value === 'ref2va_multiref') return 'Ref2VA · Multi-reference'
   if (value === 'derope') return 'De-rope'
   if (value === 'dyrope') return 'DyRoPE'
   return 'Direct SLA'
+}
+
+type H3StillInputMode = 'text' | 'edit' | 'reference'
+type H3StillEngine = 'standard' | 'turbo'
+type H3StillRun = {
+  id: string
+  prompt_id: string
+  prompt: string
+  seed: string
+  input_mode: H3StillInputMode
+  engine: H3StillEngine
+  steps: number
+  aspect_ratio: string
+  megapixels: number
+  reference_count: number
+  ref_image_size: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  phase: string
+  step: number
+  total_steps: number
+  progress: number
+  elapsed_seconds: number
+  generation_seconds?: number | null
+  eta_seconds?: number | null
+  started_at?: string | null
+  finished_at?: string | null
+  error?: string | null
+  image_url?: string
+  image_filename?: string
+}
+
+const h3StillRunKey = 'h3-still-active-run-v2'
+
+function formatStillSeconds(value?: number | null) {
+  if (value === undefined || value === null || !Number.isFinite(value)) return '—'
+  const seconds = Math.max(0, Math.round(value))
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`
+}
+
+function H3StillPage({ csrf, comfyRunning, comfyResponsive }: { csrf: string; comfyRunning: boolean; comfyResponsive: boolean }) {
+  const [prompt, setPrompt] = useState('A cinematic photorealistic still frame of a lone performer in a rain-soaked neon city at night, dramatic colored practical lighting, realistic skin and fabric texture, crisp facial detail, professional music-video cinematography, no text, no logo, no watermark.')
+  const [inputMode, setInputMode] = useState<H3StillInputMode>('text')
+  const [engine, setEngine] = useState<H3StillEngine>('standard')
+  const [steps, setSteps] = useState(20)
+  const [turboProfile, setTurboProfile] = useState<'v1' | 'v4'>('v1')
+  const [aspect, setAspect] = useState<Aspect>('1:1')
+  const [megapixels, setMegapixels] = useState(1.0)
+  const [refImageSize, setRefImageSize] = useState<'match' | 'max'>('max')
+  const [editImage, setEditImage] = useState<File | null>(null)
+  const [referenceImages, setReferenceImages] = useState<File[]>([])
+  const [run, setRun] = useState<H3StillRun | null>(null)
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
+
+  const editPreview = useMemo(() => editImage ? URL.createObjectURL(editImage) : '', [editImage])
+  useEffect(() => () => { if (editPreview) URL.revokeObjectURL(editPreview) }, [editPreview])
+
+  useEffect(() => {
+    setSteps(previous => engine === 'turbo' ? Math.min(12, Math.max(4, previous)) : Math.min(30, Math.max(8, previous)))
+  }, [engine])
+
+  useEffect(() => {
+    const savedId = localStorage.getItem(h3StillRunKey)
+    if (!savedId) return
+    let cancelled = false
+    void fetch(`/api/h3-still/${savedId}`, { cache: 'no-store' }).then(async response => {
+      const data = await response.json() as H3StillRun & { detail?: string }
+      if (!response.ok) throw new Error(data.detail || 'The saved H3 still run is no longer available')
+      if (!cancelled) setRun(data)
+    }).catch(() => { localStorage.removeItem(h3StillRunKey) })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!run || run.status === 'completed' || run.status === 'failed') return
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const response = await fetch(`/api/h3-still/${run.id}`, { cache: 'no-store' })
+        const data = await response.json() as H3StillRun & { detail?: string }
+        if (!response.ok) throw new Error(data.detail || 'Unable to read H3 still status')
+        if (!cancelled) setRun(data)
+      } catch (reason) {
+        if (!cancelled) setError(reason instanceof Error ? reason.message : 'Unable to read H3 still status')
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 1000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [run?.id, run?.status])
+
+  const submit = async () => {
+    if (!csrf || !prompt.trim() || sending) return
+    setSending(true)
+    setError('')
+    setRun(null)
+    const form = new FormData()
+    form.append('prompt', prompt.trim())
+    form.append('input_mode', inputMode)
+    form.append('engine', engine)
+    form.append('steps', String(steps))
+    form.append('aspect_ratio', aspect)
+    form.append('megapixels', String(megapixels))
+    form.append('ref_image_size', refImageSize)
+    form.append('turbo_profile', turboProfile)
+    if (inputMode === 'edit' && editImage) form.append('image', editImage, editImage.name)
+    if (inputMode === 'reference') referenceImages.forEach(file => form.append('reference_images', file, file.name))
+    try {
+      const response = await fetch('/api/h3-still/advanced', { method: 'POST', headers: { 'X-CSRF-Token': csrf }, body: form })
+      const raw = await response.text()
+      let data: H3StillRun & { detail?: string }
+      try { data = JSON.parse(raw) } catch { throw new Error(raw || `HTTP ${response.status}`) }
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`)
+      localStorage.setItem(h3StillRunKey, data.id)
+      setRun(data)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'H3 still submission failed')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const deleteRun = async () => {
+    if (!csrf || !run || run.status === 'queued' || run.status === 'running') return
+    try {
+      const response = await fetch(`/api/h3-still/${run.id}`, { method: 'DELETE', headers: { 'X-CSRF-Token': csrf } })
+      const raw = await response.text()
+      let data: { detail?: string }
+      try { data = raw ? JSON.parse(raw) as { detail?: string } : {} } catch { throw new Error(raw || `HTTP ${response.status}`) }
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`)
+      localStorage.removeItem(h3StillRunKey)
+      setRun(null)
+      setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to delete the H3 still')
+    }
+  }
+
+  const statusLabel = !run ? 'Ready' : run.status === 'queued' ? 'Queued in ComfyUI' : run.status === 'running' ? 'Generating first frame…' : run.status === 'completed' ? 'Completed' : 'Failed'
+  const stepOptions = engine === 'turbo' ? [4, 5, 6, 8, 10, 12] : [8, 10, 12, 16, 20, 24, 30]
+  const missingInput = inputMode === 'edit' ? !editImage : inputMode === 'reference' ? referenceImages.length === 0 : false
+  const validMegapixels = Number.isFinite(megapixels) && megapixels >= 0.1 && megapixels <= 2.0
+  const canSubmit = !!csrf && comfyRunning && comfyResponsive && !!prompt.trim() && validMegapixels && !missingInput && !sending
+
+  return <section className="h3-still-page">
+    <div className="h3-still-head">
+      <div><span className="eyebrow"><Sparkles size={15} /> MiniMax H3 still experiment</span><h2>Generate one image from H3</h2><p>Standalone H3 image experiment. H3 samples its minimum five-frame latent and saves only the first decoded frame. Text, image-edit, and Ref2VA reference modes are available.</p></div>
+      <div className={`h3-still-runtime ${comfyRunning && comfyResponsive ? 'ready' : ''}`}><i /> {comfyRunning && comfyResponsive ? 'ComfyUI ready' : 'ComfyUI not ready'}</div>
+    </div>
+    <div className="h3-still-mode-tabs" role="tablist" aria-label="H3 still input mode">
+      {([['text', 'Text to image'], ['edit', 'Image edit'], ['reference', 'Reference images']] as [H3StillInputMode, string][]).map(([value, label]) => <button type="button" role="tab" aria-selected={inputMode === value} className={inputMode === value ? 'active' : ''} key={value} onClick={() => setInputMode(value)}>{label}</button>)}
+    </div>
+    <label className="h3-still-prompt"><span>Prompt</span><textarea value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={4000} /></label>
+    {inputMode === 'edit' && <div className="h3-still-upload"><label><ImageIcon size={19} /><span>{editImage ? editImage.name : 'Choose one image to edit'}</span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={event => setEditImage(event.target.files?.[0] || null)} /></label>{editPreview && <img src={editPreview} alt="Image-edit input preview" />}</div>}
+    {inputMode === 'reference' && <div className="h3-still-upload"><label><ImageIcon size={19} /><span>{referenceImages.length ? `${referenceImages.length} reference image${referenceImages.length === 1 ? '' : 's'} selected` : 'Choose up to 9 reference images'}</span><input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={event => setReferenceImages(Array.from(event.target.files || []).slice(0, 9))} /></label><small>Use &lt;Picture 1&gt;, &lt;Picture 2&gt;, and so on in the prompt. “Max identity” uses larger reference tokens and takes longer.</small></div>}
+    <div className="h3-still-controls">
+      <label><span>Engine</span><select value={engine} onChange={event => setEngine(event.target.value as H3StillEngine)}><option value="standard">Standard H3</option><option value="turbo">Turbo H3</option></select></label>
+      <label><span>Steps</span><select value={steps} onChange={event => setSteps(Number(event.target.value))}>{stepOptions.map(value => <option key={value} value={value}>{value} steps</option>)}</select></label>
+      <label><span>Aspect ratio</span><select value={aspect} onChange={event => setAspect(event.target.value as Aspect)}>{aspectOptions.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+      <label><span>Megapixels · max 2.0</span><input type="number" min={0.1} max={2.0} step={0.01} value={megapixels} onChange={event => setMegapixels(Number(event.target.value))} /></label>
+      {engine === 'turbo' && inputMode !== 'reference' && <label><span>Turbo profile</span><select value={turboProfile} onChange={event => setTurboProfile(event.target.value as 'v1' | 'v4')}><option value="v1">Turbo profile v1</option><option value="v4">Turbo profile v4</option></select></label>}
+      {inputMode === 'reference' && <label><span>Reference fidelity</span><select value={refImageSize} onChange={event => setRefImageSize(event.target.value as 'match' | 'max')}><option value="max">Max identity · slower</option><option value="match">Match canvas · faster</option></select></label>}
+    </div>
+    <button type="button" className="h3-still-submit" onClick={() => { void submit() }} disabled={!canSubmit}>{sending ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />} {sending ? 'Submitting…' : 'Generate H3 still'}</button>
+    {error && <div className="h3-still-error">{error}</div>}
+    {run && <div className={`h3-still-result ${run.status}`}>
+      <div className="h3-still-result-head"><strong>{statusLabel}</strong><span>Seed {run.seed} · {run.engine} · {run.steps} steps</span></div>
+      <div className="h3-still-progress-meta"><span>{run.phase}</span><span>Step {run.step}/{run.total_steps || run.steps} · {Math.round(run.progress * 100)}%</span><span>Elapsed {formatStillSeconds(run.elapsed_seconds)}{run.status === 'completed' ? ` · Generated in ${formatStillSeconds(run.generation_seconds)}` : run.eta_seconds !== null && run.eta_seconds !== undefined ? ` · ETA ${formatStillSeconds(run.eta_seconds)}` : ''}</span></div>
+      <div className="h3-still-progress-track"><i style={{ width: `${Math.max(0, Math.min(100, run.progress * 100))}%` }} /></div>
+      {run.status === 'completed' && run.image_url ? <img src={`${run.image_url}?v=${run.id}`} alt="MiniMax H3 generated still" /> : <div className="h3-still-placeholder"><LoaderCircle className={run.status === 'failed' ? '' : 'spin'} size={24} />{run.status === 'failed' ? (run.error || 'Generation failed') : 'Waiting for the PNG output…'}</div>}
+      {run.status === 'completed' && run.image_url && <a href={run.image_url} download={run.image_filename || 'h3-still.png'}>Download PNG</a>}
+      {(run.status === 'completed' || run.status === 'failed') && <button type="button" className="h3-still-delete" onClick={() => { if (window.confirm('Delete this generated H3 still from storage?')) void deleteRun() }}><Trash2 size={14} /> Delete generated still</button>}
+    </div>}
+  </section>
 }
 
 type VideoVaultItem = {
@@ -275,11 +487,12 @@ function formatVaultDuration(value: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-function VideoVaultPage({ csrf }: { csrf: string }) {
+function VideoVaultPage({ csrf, askConfirm }: { csrf: string; askConfirm: (request: Omit<AppModalRequest, 'type'>) => Promise<boolean> }) {
   const [items, setItems] = useState<VideoVaultItem[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({})
 
   const readError = async (response: Response) => {
     const raw = await response.text()
@@ -339,7 +552,22 @@ function VideoVaultPage({ csrf }: { csrf: string }) {
 
   const remove = async (item: VideoVaultItem) => {
     if (!csrf || busy) return
-    if (!window.confirm(`Delete “${item.original_name}” from the vault and remove its stored file?`)) return
+    if (!await askConfirm({
+      title: 'Delete saved video',
+      message: `Delete “${item.original_name}”? This permanently removes the video from the Video Vault and from the PC.`,
+      confirmLabel: 'Delete permanently',
+      danger: true,
+    })) return
+    const preview = videoRefs.current[item.id]
+    if (preview) {
+      preview.pause()
+      preview.removeAttribute('src')
+      preview.load()
+      videoRefs.current[item.id] = null
+      // Give the browser a moment to close its range request before the
+      // Windows server attempts to unlink the MP4.
+      await new Promise(resolve => window.setTimeout(resolve, 120))
+    }
     setBusy(`delete:${item.id}`)
     setError('')
     try {
@@ -372,7 +600,7 @@ function VideoVaultPage({ csrf }: { csrf: string }) {
     {!loading && !items.length && <div className="video-vault-empty"><Clapperboard size={24} /><strong>No videos in the vault yet</strong><span>Add a finished MP4, MOV, WebM, MKV, or MPEG file above.</span></div>}
     {!!items.length && <div className="video-vault-grid">
       {items.map(item => <article className="video-vault-card" key={item.id}>
-        {item.available ? <video src={item.video_url} controls preload="metadata" playsInline /> : <div className="video-vault-missing"><Clapperboard size={24} /><span>The stored file is missing</span></div>}
+        {item.available ? <video ref={element => { videoRefs.current[item.id] = element }} src={item.video_url} controls preload="metadata" playsInline /> : <div className="video-vault-missing"><Clapperboard size={24} /><span>The stored file is missing</span></div>}
         <div className="video-vault-card-body">
           <h3 dir="auto" title={item.original_name}>{item.original_name}</h3>
           <div className="video-vault-meta"><span>{formatVaultDuration(item.duration)}</span><span>{item.width}×{item.height}</span><span>{formatVaultBytes(item.size)}</span></div>
@@ -431,15 +659,17 @@ function App() {
   const setMainError = (scope: MainErrorScope, message = '') => setMainErrors(current => ({ ...current, [scope]: message }))
   const clearMainError = (scope: MainErrorScope) => setMainErrors(current => ({ ...current, [scope]: '' }))
   const [referenceReady, setReferenceReady] = useState(false)
-  const [reference10Ready, setReference10Ready] = useState(false)
   const [spectrumReady, setSpectrumReady] = useState(false)
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
   const [fusedSlaReady, setFusedSlaReady] = useState(false)
+  const [ltxReady, setLtxReady] = useState(false)
+  const [ltxReferenceReady, setLtxReferenceReady] = useState(false)
   const [fusedDirectReady, setFusedDirectReady] = useState(false)
   const [fusedI2vReady, setFusedI2vReady] = useState(false)
   const [fusedRef2vaReady, setFusedRef2vaReady] = useState(false)
+  const [fusedRef2vaMultirefReady, setFusedRef2vaMultirefReady] = useState(false)
   const [fusedDeropeReady, setFusedDeropeReady] = useState(false)
   const [fusedDyropeReady, setFusedDyropeReady] = useState(false)
   const [audioLockReady, setAudioLockReady] = useState(false)
@@ -487,12 +717,14 @@ function App() {
       setCsrf(data.csrf_token)
       setReferenceReady(data.reference_ready)
       setFusedSlaReady(Boolean(data.fused_sla_ready))
+      setLtxReady(Boolean(data.ltx_ready))
+      setLtxReferenceReady(Boolean(data.ltx_reference_ready))
       setFusedDirectReady(Boolean(data.fused_direct_ready))
       setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
       setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
+      setFusedRef2vaMultirefReady(Boolean(data.fused_ref2va_multiref_ready ?? data.fused_ref2va_ready))
       setFusedDeropeReady(Boolean(data.fused_derope_ready))
       setFusedDyropeReady(Boolean(data.fused_dyrope_ready))
-      setReference10Ready(data.reference_10s_ready)
       setSpectrumReady(data.spectrum_ready)
       setClipprojReady(data.clipproj_ready)
       setTurboV4Ready(data.turbo_v4_ready)
@@ -509,12 +741,14 @@ function App() {
   const applyPublicHealth = (data: Record<string, any>) => {
     if ('reference_ready' in data) setReferenceReady(Boolean(data.reference_ready))
     if ('fused_sla_ready' in data) setFusedSlaReady(Boolean(data.fused_sla_ready))
+    if ('ltx_ready' in data) setLtxReady(Boolean(data.ltx_ready))
+    if ('ltx_reference_ready' in data) setLtxReferenceReady(Boolean(data.ltx_reference_ready))
     if ('fused_direct_ready' in data) setFusedDirectReady(Boolean(data.fused_direct_ready))
     if ('fused_i2v_fl2v_ready' in data) setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
     if ('fused_ref2va_ready' in data) setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
+    if ('fused_ref2va_multiref_ready' in data || 'fused_ref2va_ready' in data) setFusedRef2vaMultirefReady(Boolean(data.fused_ref2va_multiref_ready ?? data.fused_ref2va_ready))
     if ('fused_derope_ready' in data) setFusedDeropeReady(Boolean(data.fused_derope_ready))
     if ('fused_dyrope_ready' in data) setFusedDyropeReady(Boolean(data.fused_dyrope_ready))
-    if ('reference_10s_ready' in data) setReference10Ready(Boolean(data.reference_10s_ready))
     if ('spectrum_ready' in data) setSpectrumReady(Boolean(data.spectrum_ready))
     if ('clipproj_ready' in data) setClipprojReady(Boolean(data.clipproj_ready))
     if ('turbo_v4_ready' in data) setTurboV4Ready(Boolean(data.turbo_v4_ready))
@@ -803,35 +1037,48 @@ function App() {
     ? 'standard'
     : preferences.engine === 'fused_sla' && !fusedSlaReady
         ? 'turbo'
+      : preferences.engine === 'ltx' && (!ltxReady || (mode === 'reference' && !ltxReferenceReady))
+        ? 'turbo'
       : preferences.engine
+  const allowedAttentionModes = ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
+  const effectiveAttention: AttentionMode = allowedAttentionModes.includes(preferences.attentionMode) ? preferences.attentionMode : 'standard'
   const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
     ? 'direct'
     : mode === 'reference'
-    ? 'ref2va'
+    ? preferences.fusedWorkflow === 'ref2va_multiref' && (fusedRef2vaMultirefReady || fusedRef2vaReady) ? 'ref2va_multiref' : 'ref2va'
     : mode === 'lip_sync'
       ? 'direct'
     : mode === 'text'
-        ? preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'i2v_fl2v' ? 'direct' : preferences.fusedWorkflow
-        : preferences.fusedWorkflow === 'ref2va' ? 'i2v_fl2v' : preferences.fusedWorkflow
+        ? preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'ref2va_multiref' || preferences.fusedWorkflow === 'i2v_fl2v' ? 'direct' : preferences.fusedWorkflow
+        : preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'ref2va_multiref' ? 'i2v_fl2v' : preferences.fusedWorkflow
   const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' ? 'native' : preferences.encoder
-  const generationSteps = mode === 'reference' && effectiveEngine === 'turbo'
+  const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
+  const generationSteps = effectiveEngine === 'ltx'
+    ? 8
+    : mode === 'reference' && effectiveEngine === 'turbo'
     ? 4
     : effectiveEngine === 'turbo'
       ? preferences.turboSteps
       : effectiveEngine === 'fused_sla'
-        ? effectiveFusedWorkflow === 'direct' ? preferences.fusedSlaSteps : 4
+        ? fusedWorkflowHasFixedSteps ? 4 : preferences.fusedSlaSteps
         : effectiveEngine === 'spectrum'
           ? preferences.spectrumSteps
           : preferences.standardSteps
-  const stepRange = effectiveEngine === 'fused_sla'
-    ? effectiveFusedWorkflow === 'direct' ? { min: 4, max: 8, recommended: 4 } : { min: 4, max: 4, recommended: 4 }
+  const stepRange = effectiveEngine === 'ltx'
+    ? { min: 8, max: 8, recommended: 8 }
+    : effectiveEngine === 'fused_sla'
+    ? fusedWorkflowHasFixedSteps ? { min: 4, max: 4, recommended: 4 } : { min: 4, max: 8, recommended: 4 }
     : effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
-  const calculatedResolution = dimensionsFor(preferences.aspect, preferences.megapixels)
+  const ltxSize = LTX_SIZES[preferences.ltxQuality][preferences.aspect]
+  const calculatedResolution = effectiveEngine === 'ltx'
+    ? { id: `${ltxSize[0]}x${ltxSize[1]}`, width: ltxSize[0], height: ltxSize[1] }
+    : dimensionsFor(preferences.aspect, preferences.megapixels)
   const requestedFrames = Math.max(5, Math.round(duration * 24))
   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
-  const engineLoadFactor = effectiveEngine === 'spectrum' ? 1.8 : effectiveEngine === 'fused_sla' && (effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope') ? 2 : 1
+  // LTX's distilled single pass ran about 4x faster per pixel than H3 Turbo in the lab.
+  const engineLoadFactor = effectiveEngine === 'ltx' ? 0.25 : effectiveEngine === 'spectrum' ? 1.8 : effectiveEngine === 'fused_sla' && (effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope') ? 2 : 1
   const promptMultiplier = batch ? Math.max(1, paragraphCount) : 1
   const relativeLoad = calculatedResolution.width * calculatedResolution.height * duration * generationSteps * engineLoadFactor * promptMultiplier / (736 * 416 * 5 * 4)
   const loadLevel = relativeLoad >= 5 ? 'very-heavy' : relativeLoad >= 2 ? 'heavy' : 'normal'
@@ -1081,6 +1328,8 @@ function App() {
         engine: jobEngine,
         encoder: job.encoder || 'native',
         turboProfile: job.turbo_profile || current.turboProfile,
+        attentionMode: isAttentionMode(job.attention_mode) ? job.attention_mode : 'standard',
+        ltxQuality: jobEngine === 'ltx' ? ltxQualityForSize(job.width, job.height) : current.ltxQuality,
         turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
         fusedSlaSteps: jobEngine === 'fused_sla' ? Math.max(4, Math.min(8, job.steps)) : current.fusedSlaSteps,
         fusedWorkflow: jobEngine === 'fused_sla' && isFusedWorkflow(job.workflow_variant) ? job.workflow_variant : current.fusedWorkflow,
@@ -1197,13 +1446,13 @@ function App() {
     if (next !== 'lip_sync') setLipSyncAudio(null)
     if (next === 'frames') {
       setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null)
-      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'ref2va_multiref')
         ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
     }
     else if (next === 'opening') {
       setClosingFrame(null)
       setReferenceImages([]); setReferenceVideos([]); setReferenceAudio(null); setLipSyncAudio(null)
-      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'ref2va_multiref')
         ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
     }
     else if (next === 'lip_sync') {
@@ -1216,8 +1465,8 @@ function App() {
       setOpeningFrame(null)
       setClosingFrame(null)
       setLipSyncAudio(null)
-      setPreferences(current => current.engine === 'fused_sla' && fusedRef2vaReady
-        ? { ...current, fusedWorkflow: 'ref2va' }
+      setPreferences(current => current.engine === 'fused_sla' && (fusedRef2vaReady || fusedRef2vaMultirefReady)
+        ? { ...current, fusedWorkflow: current.fusedWorkflow === 'ref2va_multiref' && (fusedRef2vaMultirefReady || fusedRef2vaReady) ? 'ref2va_multiref' : 'ref2va' }
         : current.engine === 'fused_sla' ? { ...current, engine: 'standard' } : current)
     } else if (next === 'text') {
       setReferenceImages([])
@@ -1226,10 +1475,10 @@ function App() {
       setOpeningFrame(null)
       setClosingFrame(null)
       setLipSyncAudio(null)
-      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'i2v_fl2v')
+      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'ref2va_multiref' || current.fusedWorkflow === 'i2v_fl2v')
         ? { ...current, fusedWorkflow: 'direct' } : current)
     } else if (next === 'closing') {
-      setPreferences(current => current.engine === 'fused_sla' && current.fusedWorkflow === 'ref2va'
+      setPreferences(current => current.engine === 'fused_sla' && (current.fusedWorkflow === 'ref2va' || current.fusedWorkflow === 'ref2va_multiref')
         ? { ...current, fusedWorkflow: fusedI2vReady ? 'i2v_fl2v' : 'direct' } : current)
     }
   }
@@ -1240,33 +1489,36 @@ function App() {
       ? fusedI2vReady
       : workflow === 'ref2va'
         ? fusedRef2vaReady
-        : workflow === 'derope'
-          ? fusedDeropeReady
-          : fusedDyropeReady
+        : workflow === 'ref2va_multiref'
+        ? fusedRef2vaMultirefReady || fusedRef2vaReady
+          : workflow === 'derope'
+            ? fusedDeropeReady
+            : fusedDyropeReady
 
   const selectEngine = (engine: Engine) => {
+    if (engine === 'ltx' && (!ltxReady || (mode === 'reference' && !ltxReferenceReady))) return
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
-    if (engine === 'fused_sla' && (!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady))) return
+    if (engine === 'fused_sla' && (!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady && !fusedRef2vaMultirefReady))) return
     if (engine === 'fused_sla') setConnected(false)
     setPreferences(current => engine !== 'fused_sla'
       ? { ...current, engine }
-      : { ...current, engine, fusedWorkflow: mode === 'reference' ? 'ref2va' : mode === 'lip_sync' || mode === 'text' ? 'direct' : fusedI2vReady ? 'i2v_fl2v' : 'direct' })
+      : { ...current, engine, fusedWorkflow: mode === 'reference' ? current.fusedWorkflow === 'ref2va_multiref' && (fusedRef2vaMultirefReady || fusedRef2vaReady) ? 'ref2va_multiref' : 'ref2va' : mode === 'lip_sync' || mode === 'text' ? 'direct' : fusedI2vReady ? 'i2v_fl2v' : 'direct' })
   }
 
   const selectFusedWorkflow = (workflow: FusedWorkflow) => {
     if (!fusedSlaReady || !fusedWorkflowReady(workflow)) return
     if (mode === 'lip_sync' && workflow !== 'direct') return
-    if (mode === 'reference' && workflow !== 'ref2va') return
-    if (mode !== 'reference' && workflow === 'ref2va') return
+    if (mode === 'reference' && workflow !== 'ref2va' && workflow !== 'ref2va_multiref') return
+    if (mode !== 'reference' && (workflow === 'ref2va' || workflow === 'ref2va_multiref')) return
     if (mode === 'text' && workflow === 'i2v_fl2v') return
-    if (mode !== 'text' && mode !== 'opening' && mode !== 'closing' && mode !== 'frames') return
+    if (mode !== 'text' && mode !== 'opening' && mode !== 'closing' && mode !== 'frames' && mode !== 'reference') return
     setConnected(false)
     setPreferences(current => ({
       ...current,
       engine: 'fused_sla',
       fusedWorkflow: workflow,
-      fusedSlaSteps: workflow === 'direct' ? current.fusedSlaSteps : 4,
+      fusedSlaSteps: workflow === 'i2v_fl2v' || workflow === 'derope' || workflow === 'dyrope' ? 4 : current.fusedSlaSteps,
     }))
   }
 
@@ -1301,9 +1553,12 @@ function App() {
     clearMainError('generation')
     if (!prompt.trim() && mode !== 'lip_sync') return setMainError('generation', 'צריך לכתוב פרומפט')
     if (mode === 'frames' && !openingFrame) return setMainError('generation', 'צריך לצרף פריים פותח')
-    if (mode === 'lip_sync' && !audioLockReady) return setMainError('generation', 'Native AudioLock עדיין לא נטען ב־ComfyUI')
+    if (effectiveEngine === 'ltx' && mode === 'lip_sync' && !openingFrame) return setMainError('generation', 'LTX 2.5 צריך פריים פותח — עדיף close-up של הפנים')
+    if (effectiveEngine === 'ltx' && (duration < 1 || duration > 10)) return setMainError('generation', 'LTX 2.5 תומך ב־1 עד 10 שניות')
+    if (mode === 'lip_sync' && effectiveEngine !== 'ltx' && !audioLockReady) return setMainError('generation', 'Native AudioLock עדיין לא נטען ב־ComfyUI')
     if (mode === 'lip_sync' && !lipSyncAudio) return setMainError('generation', 'צריך לצרף אודיו לדיבוב')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setMainError('generation', 'צריך לצרף לפחות תמונת או סרטון רפרנס')
+    if (mode === 'reference' && effectiveEngine === 'ltx' && (referenceImages.length !== 1 || referenceVideos.length || referenceAudio)) return setMainError('generation', 'LTX רפרנס מקבל תמונת רפרנס אחת בלבד (דף רפרנס), בלי סרטונים או אודיו')
     if (seedEnabled && !seedInput.trim()) return setMainError('generation', 'יש להזין מספר Seed או לבטל את הסימון')
     if (batch && paragraphCount > 20) return setMainError('generation', 'אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setMainError('generation', 'רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -1320,11 +1575,14 @@ function App() {
       form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
       if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
+      form.set('attention_mode', effectiveAttention)
+      if (effectiveEngine === 'ltx') form.set('ltx_quality', preferences.ltxQuality)
       if (mode === 'frames') {
         form.set('first_frame', openingFrame!)
         if (closingFrame) form.set('last_frame', closingFrame)
       } else if (mode === 'lip_sync') {
         if (openingFrame) form.set('first_frame', openingFrame)
+        if (closingFrame && effectiveEngine !== 'ltx') form.set('last_frame', closingFrame)
         const preparedAudio = await prepareLipSyncAudio(lipSyncAudio!, audioTrimStart, duration)
         form.set('audio', preparedAudio.file)
         form.set('audio_start', String(preparedAudio.pretrimmed ? 0 : audioTrimStart))
@@ -1476,12 +1734,12 @@ function App() {
       const { sequence } = asset
       const reference = `sequence:${sequence.id}`
       const order = selectedResults.indexOf(reference) + 1
-      return <SequenceCard key={reference} sequence={sequence} assignment={assignmentFor('sequence', sequence.id)} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={sequence.status === 'completed' ? () => openAssetEditor('sequence', sequence.id, sequence.title) : undefined} onDelete={() => { void deleteGeneratedAsset('sequence', sequence.id, sequence.title) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
+      return <SequenceCard key={reference} sequence={sequence} assignment={assignmentFor('sequence', sequence.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={sequence.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={sequence.status === 'completed' ? () => openAssetEditor('sequence', sequence.id, sequence.title) : undefined} onDelete={() => { void deleteGeneratedAsset('sequence', sequence.id, sequence.title) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
     }
     const { job } = asset
     const reference = `job:${job.id}`
     const order = selectedResults.indexOf(reference) + 1
-    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
   }
 
   const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void) => {
@@ -1521,10 +1779,10 @@ function App() {
         <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load(true) } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
-    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}><ImageIcon size={15} /> Frame review</button><button className={page === 'video_vault' ? 'active' : ''} onClick={() => setPage('video_vault')}><Download size={15} /> Video Vault</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'h3_still' ? 'active' : ''} onClick={() => setPage('h3_still')}><Sparkles size={15} /> H3 still</button><button className={page === 'bot_images' ? 'active' : ''} onClick={() => setPage('bot_images')}><ImageIcon size={15} /> Image lab</button><button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}><ImageIcon size={15} /> Frame review</button><button className={page === 'video_vault' ? 'active' : ''} onClick={() => setPage('video_vault')}><Download size={15} /> Video Vault</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
     <MainSectionError message={mainErrors.system} onDismiss={() => clearMainError('system')} />
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} responsive={comfyResponsive} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'review' ? <FrameReviewPage /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : page === 'video_vault' ? <VideoVaultPage csrf={csrf} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} responsive={comfyResponsive} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'bot_images' ? <BotImagesPage csrf={csrf} /> : page === 'h3_still' ? <H3StillPage csrf={csrf} comfyRunning={comfyRunning} comfyResponsive={comfyResponsive} /> : page === 'review' ? <FrameReviewPage /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : page === 'video_vault' ? <VideoVaultPage csrf={csrf} askConfirm={appModal.askConfirm} /> : <>
     {jobsLoading && <div className="app-loading-strip" role="status" aria-live="polite"><LoaderCircle className="spin" size={14} /> Loading generation history and asset library…</div>}
 
     <section className="asset-library-panel">
@@ -1561,7 +1819,8 @@ function App() {
         <ImageDropzone label="הוסף פריים סוגר · אופציונלי" hint="אם מצורף, H3 יכוון את הסרטון גם לתמונה הזו" preview={closingPreview} onChange={setClosingFrame} />
       </div>}
       {mode === 'lip_sync' && <div className="lip-sync-inputs">
-        <ImageDropzone label="פריים פותח · אופציונלי" hint="JPG, PNG או WebP עד 20MB" preview={openingPreview} onChange={setOpeningFrame} />
+        <ImageDropzone label={effectiveEngine === 'ltx' ? 'פריים פותח · חובה ב־LTX' : 'פריים פותח · אופציונלי'} hint={effectiveEngine === 'ltx' ? 'עדיף close-up שבו הפנים ממלאות את רוב התמונה · עד 20MB' : 'JPG, PNG או WebP עד 20MB'} preview={openingPreview} onChange={setOpeningFrame} />
+        {effectiveEngine !== 'ltx' && <ImageDropzone label="פריים סוגר · אופציונלי" hint="H3 יכוון את הסרטון גם לפריים הזה" preview={closingPreview} onChange={setClosingFrame} />}
         <div className="lip-sync-audio-box">
           <AudioDropzone file={lipSyncAudio} onChange={setLipSyncAudio} disabled={isRecording} label="הוסף אודיו לדיבוב · חובה" hint="WAV, MP3, M4A, AAC, FLAC, OGG או WebM · עד 50MB" />
           <div className="recording-controls">
@@ -1595,7 +1854,8 @@ function App() {
           </button>}
         </div>
         <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>
-        {effectiveEngine === 'fused_sla' && <div className="reference-limits-note">Official Ref2VA uses exactly one reference image; reference video and audio inputs are unavailable for this workflow.</div>}
+        {effectiveEngine === 'fused_sla' && effectiveFusedWorkflow === 'ref2va' && <div className="reference-limits-note">Official Ref2VA uses exactly one reference image; reference video and audio inputs are unavailable for this workflow.</div>}
+        {effectiveEngine === 'fused_sla' && effectiveFusedWorkflow === 'ref2va_multiref' && <div className="reference-limits-note">Ref2VA Multi-reference accepts up to 9 images, 3 videos, and 1 standalone reference audio.</div>}
         {referenceAudio && <div className="reference-audio-note"><AudioLines size={14} /><span>בפרומפט אפשר לכתוב <b dir="ltr">&lt;Picture 1&gt;</b> ו־<b dir="ltr">&lt;Audio 1&gt;</b>. H3 ישתמש בקול ובתזמון כרפרנס וייצר אודיו חדש יחד עם תנועת השפתיים.</span></div>}
       </>}
 
@@ -1621,24 +1881,41 @@ function App() {
               <button type="button" className={effectiveEngine === 'fused_sla' ? 'active' : ''} aria-pressed={effectiveEngine === 'fused_sla'} disabled={!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady)} onClick={() => selectEngine('fused_sla')}>
                 <BrainCircuit size={16} /><span><strong>H3 Fused SLA</strong><small>INT8 · 4–8 steps</small></span>
               </button>
+              <button type="button" className={effectiveEngine === 'ltx' ? 'active' : ''} aria-pressed={effectiveEngine === 'ltx'} disabled={!ltxReady || (mode === 'reference' && !ltxReferenceReady)} onClick={() => selectEngine('ltx')}>
+                <Clapperboard size={16} /><span><strong>LTX 2.5</strong><small>מהיר · 8 סטפים</small></span>
+              </button>
             </div>
+            {!ltxReady && <p className="setting-note">LTX 2.5 ייפתח כשקבצי המודל של LTX-2.5 נמצאים בתיקיית המודלים</p>}
+            {ltxReady && mode === 'reference' && !ltxReferenceReady && <p className="setting-note">LTX 2.5 ברפרנס דורש את ה־Ingredients IC-LoRA</p>}
+            {effectiveEngine === 'ltx' && <>
+              <div className="setting-title turbo-profile-title"><span>איכות LTX</span><small>מעבר אחד ברזולוציה מלאה</small></div>
+              <div className="turbo-profile-toggle">
+                <button type="button" className={preferences.ltxQuality === 'balanced' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'balanced'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'balanced' }))}><strong dir="ltr">Balanced · {LTX_SIZES.balanced[preferences.aspect].join('×')}</strong><small>הסנכרון הטוב ביותר · ≈3–5 דק׳ ל־5 שנ׳</small></button>
+                <button type="button" className={preferences.ltxQuality === 'high' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'high'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'high' }))}><strong dir="ltr">High · {LTX_SIZES.high[preferences.aspect].join('×')}</strong><small>חד יותר, תנועת פה מעט קטנה יותר · ≈4–9 דק׳</small></button>
+              </div>
+              {mode === 'lip_sync'
+                ? <p className="setting-note">לסנכרון שפתיים טוב: פריים פותח שבו הפנים ממלאות את רוב התמונה, ופרומפט שמתאר את אותו קדרור ומצלמה סטטית. 8 סטפים קבועים · 1–10 שניות · האודיו נשמר כמו שהוא.</p>
+                : mode === 'reference'
+                ? <p className="setting-note">LTX רפרנס (Ingredients): תמונת רפרנס אחת בלבד — דף שמרכז דמויות, אביזרים ולוקיישן. תארי בפרומפט כל פריט לפי המיקום שלו בדף, ואת הסצנה, התנועה והסאונד. בחרי יחס תמונה שמתאים לדף. 8 סטפים · 1–10 שניות.</p>
+                : <p className="setting-note">LTX מייצר וידאו וסאונד יחד. תארי בפרומפט גם את התנועה, המצלמה והסאונד. 8 סטפים קבועים · 1–10 שניות{mode === 'frames' || mode === 'closing' ? ' · הפריים הסוגר נעול על הפריים האחרון' : ''}.</p>}
+            </>}
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
             {mode === 'reference' && referenceTurboReady && <p className="setting-note">Ref2VA Turbo משתמש ב־4 סטפים וב־LoRA ייעודית</p>}
-            {mode === 'lip_sync' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'fused_sla' ? 'Fused SLA INT8' : effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
+            {mode === 'lip_sync' && effectiveEngine !== 'ltx' && <p className="setting-note">דיבוב משתמש ב־Native AudioLock · {effectiveEngine === 'fused_sla' ? 'Fused SLA INT8' : effectiveEngine === 'turbo' ? `Turbo ${preferences.turboProfile.toUpperCase()}` : 'Standard'} · 32B כדי לשמור את האודיו שהועלה מדויק.</p>}
             {!spectrumReady && <p className="setting-note">Spectrum יופיע אחרי שה־ComfyUI עם התוסף יופעל מחדש</p>}
             {effectiveEngine === 'fused_sla' && <p className="setting-note">Fused INT8 · SLA sparse attention · low VRAM chunking · 4 steps recommended; 8 is slower and can sharpen detail</p>}
             {effectiveEngine === 'fused_sla' && <div className="fused-workflow-picker">
               <div className="setting-title"><span>Fused workflow</span><small>{fusedWorkflowLabel(effectiveFusedWorkflow)}</small></div>
               <div className="fused-workflow-toggle">
-                {(['direct', 'i2v_fl2v', 'ref2va', 'derope', 'dyrope'] as FusedWorkflow[]).map(workflow => {
-                  const modeAllowed = mode === 'lip_sync' ? workflow === 'direct' : mode === 'reference' ? workflow === 'ref2va' : workflow !== 'ref2va' && !(mode === 'text' && workflow === 'i2v_fl2v')
+                {(['direct', 'i2v_fl2v', 'ref2va', 'ref2va_multiref', 'derope', 'dyrope'] as FusedWorkflow[]).map(workflow => {
+                  const modeAllowed = mode === 'lip_sync' ? workflow === 'direct' : mode === 'reference' ? workflow === 'ref2va' || workflow === 'ref2va_multiref' : (workflow !== 'ref2va' && workflow !== 'ref2va_multiref') && !(mode === 'text' && workflow === 'i2v_fl2v')
                   const ready = fusedWorkflowReady(workflow)
                   return <button key={workflow} type="button" className={effectiveFusedWorkflow === workflow ? 'active' : ''} aria-pressed={effectiveFusedWorkflow === workflow} disabled={!modeAllowed || !ready} onClick={() => selectFusedWorkflow(workflow)}>
-                    <strong>{fusedWorkflowLabel(workflow)}</strong><small>{workflow === 'direct' ? '01 · 4–8 steps' : workflow === 'i2v_fl2v' ? '04 · opening/closing frame' : workflow === 'ref2va' ? '05 · reference image' : workflow === 'derope' ? '02 · two-pass recovery' : '03 · temporal adapter'}</small>
+                    <strong>{fusedWorkflowLabel(workflow)}</strong><small>{workflow === 'direct' ? '01 · 4–8 steps' : workflow === 'i2v_fl2v' ? '04 · opening/closing frame' : workflow === 'ref2va' ? '05 · one reference image' : workflow === 'ref2va_multiref' ? '05 · 9 images · 3 videos · audio' : workflow === 'derope' ? '02 · two-pass recovery' : '03 · temporal adapter'}</small>
                   </button>
                 })}
               </div>
-              {effectiveFusedWorkflow !== 'direct' && <p className="setting-note">Official workflow · fixed 4 steps · higher VRAM/time than Direct SLA</p>}
+              {effectiveFusedWorkflow !== 'direct' && <p className="setting-note">Official workflow · {fusedWorkflowHasFixedSteps ? 'fixed 4 steps' : '4–8 steps'} · higher VRAM/time than Direct SLA</p>}
             </div>}
             {effectiveEngine === 'turbo' && mode !== 'reference' && <>
               <div className="setting-title turbo-profile-title"><span>Turbo LoRA</span><small>בחירת אופי התוצאה</small></div>
@@ -1649,9 +1926,21 @@ function App() {
               {!turboV4Ready && <p className="setting-note">Turbo v4 ייפתח אחרי הורדת המודל ובדיקת checksum</p>}
               {preferences.turboProfile === 'v4' && generationSteps === 4 && <p className="setting-note">בתנועה מהירה v4 על 4 סטפים עלול למרוח; 6–8 סטפים מומלצים</p>}
             </>}
+            {allowedAttentionModes.length > 1 && <>
+              <div className="setting-title turbo-profile-title"><span>האצת Attention</span><small>לפי עבודה, בלי להפעיל מחדש את ComfyUI</small></div>
+              <div className="turbo-profile-toggle attention-toggle">
+                {allowedAttentionModes.map(attention => (
+                  <button key={attention} type="button" className={effectiveAttention === attention ? 'active' : ''} aria-pressed={effectiveAttention === attention} onClick={() => setPreferences(current => ({ ...current, attentionMode: attention }))}>
+                    <strong dir="ltr">{attentionLabel(attention)}</strong>
+                    <small>{attention === 'standard' ? 'כמו היום' : attention === 'sage' ? (effectiveEngine === 'fused_sla' ? 'ניסיוני ב־Fused SLA' : '≈25–35% מהיר יותר · אותה תמונה') : attention === 'sla' ? '≈55–75% מהיר יותר · שינוי קל בתמונה' : 'הכי מהיר · שינוי קל בתמונה'}</small>
+                  </button>
+                ))}
+              </div>
+              {effectiveEngine === 'fused_sla' && effectiveAttention === 'sage' && <p className="setting-note">ב־Fused SLA המהירות עם Sage לא עקבית ב־1.5MP; בדקי מול רגיל</p>}
+            </>}
           </div>
 
-          <div className="setting-block">
+          {effectiveEngine !== 'ltx' && <div className="setting-block">
             <div className="setting-title"><span>Text Encoder</span><small>זיכרון מול דיוק</small></div>
             <div className="encoder-toggle">
               <button type="button" className={effectiveEncoder === 'native' ? 'active' : ''} aria-pressed={effectiveEncoder === 'native'} onClick={() => selectEncoder('native')}>
@@ -1663,9 +1952,9 @@ function App() {
             </div>
             {!clipprojReady && <p className="setting-note">ClipProj ייפתח אחרי סיום ההתקנה והפעלה מחדש של ComfyUI</p>}
             {effectiveEncoder === 'clipproj' && mode === 'reference' && <p className="setting-note">ברפרנס ClipProj משתמש במצב resident ולכן העומס על 8GB עשוי להיות גבוה</p>}
-          </div>
+          </div>}
 
-          <div className="setting-block">
+          {effectiveEngine !== 'ltx' && <div className="setting-block">
             <div className="setting-title"><span>סטפים</span><small>{stepRange.recommended} מומלץ</small></div>
             <div className="stepper">
               <button type="button" aria-label="הפחתת סטפים" onClick={() => setGenerationSteps(generationSteps - 1)} disabled={generationSteps === stepRange.min}><Minus size={16} /></button>
@@ -1674,17 +1963,17 @@ function App() {
             </div>
             <input className="steps-range" dir="ltr" type="range" min={stepRange.min} max={stepRange.max} step="1" value={generationSteps} onChange={event => setGenerationSteps(Number(event.target.value))} aria-label="מספר סטפים" />
             <div className="range-labels"><span>{stepRange.min}</span><span>{stepRange.max}</span></div>
-          </div>
+          </div>}
 
           <div className="setting-block audio-setting-block">
             <div className="setting-title"><span>אודיו</span><small>ערוץ שמע בתוצאה</small></div>
-            {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : 'H3 ייצור וימזג אודיו'}</small></label>}
+            {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : effectiveEngine === 'ltx' ? 'LTX ייצור וימזג אודיו' : 'H3 ייצור וימזג אודיו'}</small></label>}
           </div>
 
           <div className="setting-block resolution-block">
             <div className="setting-title"><span>רזולוציה</span><small>כפולות 32 שמתאימות ל־H3</small></div>
             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
-            <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>
+            {effectiveEngine !== 'ltx' && <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>}
             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
             <div className="seed-control">
               <label className="seed-checkbox"><input type="checkbox" checked={seedEnabled} onChange={event => setSeedEnabled(event.target.checked)} /><span>הזנת Seed ידנית</span><small>כבוי = אקראי</small></label>
@@ -1694,17 +1983,16 @@ function App() {
         </div>
 
         <div className="generation-summary">
-          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && mode !== 'reference' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
+          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && mode !== 'reference' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{effectiveEngine === 'ltx' ? 'Gemma 12B' : encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
           <small>{loadLevel === 'normal' ? 'מוכן ליצירה' : 'לפני השליחה יוצג אישור עומס'}</small>
         </div>
       </div>
 
       <div className="final-row">
-        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(value) }} /><small>{mode === 'lip_sync' ? 'האודיו ייחתך או יושלם בשקט לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
+        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(value) }} /><small>{effectiveEngine === 'ltx' ? (mode === 'lip_sync' ? 'LTX 2.5 · 1–10 שניות · האודיו ייחתך לאורך הזה' : 'LTX 2.5 · 1–10 שניות') : mode === 'lip_sync' ? 'האודיו ייחתך או יושלם בשקט לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
         <button className="create-button" onClick={() => { void submit() }} disabled={sending || isRecording} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
-      {mode === 'reference' && referenceReady && !reference10Ready && <p className="quiet-warning">רפרנס מעל 5 שניות ייפתח רק אחרי בדיקת עומס מוצלחת.</p>}
     </section>
 
     <section className="queue-section">
@@ -1712,11 +2000,11 @@ function App() {
       <MainSectionError message={mainErrors.queue} onDismiss={() => clearMainError('queue')} />
       {!active.length && !queued.length && !activeSequences.length && !queuedSequences.length && <div className="empty"><div><Play size={22} /></div><p>הסרטון הבא שלך מתחיל בפרומפט למעלה</p></div>}
       <div className="queue-cards-grid">
-        {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
-        {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
+        {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} csrf={csrf} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
+        {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} csrf={csrf} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
         {queuedTasks.map(task => task.kind === 'sequence'
-          ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
-          : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
+          ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} csrf={csrf} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
+          : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} csrf={csrf} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
       </div>
     </section>
 
@@ -1793,7 +2081,46 @@ function MainSectionError({ message, onDismiss, className = '' }: { message?: st
   return <div className={`error-banner section-error ${className}`} role="alert"><span>{message}</span><button type="button" onClick={onDismiss} aria-label="Dismiss error"><X size={14} /></button></div>
 }
 
-function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
+function LastFrameControl({ sourceType, sourceId, csrf, videoUrl }: { sourceType: 'job' | 'sequence'; sourceId: string; csrf?: string; videoUrl?: string }) {
+  const [frameUrl, setFrameUrl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  if (!videoUrl) return null
+
+  const extract = async () => {
+    if (!csrf || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const collection = sourceType === 'job' ? 'jobs' : 'sequences'
+      const response = await fetch(`/api/${collection}/${sourceId}/last-frame`, {
+        method: 'POST',
+        headers: { 'X-CSRF-Token': csrf },
+      })
+      const payload = await response.json().catch(() => ({})) as { image_url?: string; detail?: string }
+      if (!response.ok || !payload.image_url) throw new Error(payload.detail || 'Last frame extraction failed')
+      setFrameUrl(`${payload.image_url}?v=${Date.now()}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Last frame extraction failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <div className="last-frame-control">
+    <button type="button" onClick={() => { void extract() }} disabled={!csrf || busy} title="Extract the final decoded frame from this video">
+      {busy ? <LoaderCircle className="spin" size={14} /> : <ImageIcon size={14} />}
+      {busy ? 'Extracting…' : 'Extract last frame'}
+    </button>
+    {frameUrl && <a className="last-frame-preview" href={frameUrl} download={`${sourceType}_${sourceId}_last_frame.png`} title="Open or download extracted last frame">
+      <img src={frameUrl} alt="Extracted last frame" />
+      <span>Last frame · open/download</span>
+    </a>}
+    {error && <small className="last-frame-error" role="alert">{error}</small>}
+  </div>
+}
+
+function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
@@ -1823,12 +2150,16 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
     if (!job.video_url) return
     const url = new URL(job.video_url, location.href).href
     if (navigator.share) await navigator.share({ title: 'H3 Video', url })
-    else await navigator.clipboard.writeText(url)
+    else await copyTextToClipboard(url)
   }
   const copyPrompt = async () => {
-    await navigator.clipboard.writeText(job.prompt)
-    setPromptCopied(true)
-    window.setTimeout(() => setPromptCopied(false), 1600)
+    try {
+      await copyTextToClipboard(job.prompt)
+      setPromptCopied(true)
+      window.setTimeout(() => setPromptCopied(false), 1600)
+    } catch {
+      setPromptCopied(false)
+    }
   }
   return <article className={`job-card ${job.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
     {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
@@ -1839,7 +2170,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
       {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}<span>{encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
+      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -1864,6 +2195,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
       <div className="job-actions">
         {job.status === 'queued' && <><button onClick={onUp} disabled={index === 0}><ArrowUp size={17} /></button><button onClick={onDown} disabled={index === (total || 0) - 1}><ArrowDown size={17} /></button></>}
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
+        {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
         {onUseSeed && job.seed && <button className="seed-button" onClick={onUseSeed}><Zap size={15} /> השתמש ב־Seed</button>}
@@ -1876,7 +2208,7 @@ function JobCard({ job, assignment, index, total, selectedOrder, onSelect, onMan
   </article>
 }
 
-function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage, onDelete, onCancel, bulkMode, bulkSelected, onToggleBulk }: { sequence: Sequence; assignment?: AssetAssignment; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onDelete?: () => void; onCancel?: () => void; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
+function SequenceCard({ sequence, assignment, csrf, selectedOrder, onSelect, onManage, onDelete, onCancel, bulkMode, bulkSelected, onToggleBulk }: { sequence: Sequence; assignment?: AssetAssignment; csrf?: string; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onDelete?: () => void; onCancel?: () => void; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מתחיל', running: 'יוצר רצף', verifying: 'מחבר וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(sequence.status)
   const percent = Math.round(Math.max(0, Math.min(1, sequence.progress || 0)) * 100)
@@ -1886,7 +2218,7 @@ function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage,
     if (!sequence.video_url) return
     const url = new URL(sequence.video_url, location.href).href
     if (navigator.share) await navigator.share({ title: 'H3 Long Video', url })
-    else await navigator.clipboard.writeText(url)
+    else await copyTextToClipboard(url)
   }
   return <article className={`job-card sequence-card ${sequence.status} ${selectedOrder ? 'result-selected' : ''} ${bulkSelected ? 'bulk-selected' : ''}`}>
     {bulkMode && onToggleBulk && <button type="button" className={`bulk-card-select ${bulkSelected ? 'active' : ''}`} onClick={onToggleBulk} aria-pressed={bulkSelected} aria-label={bulkSelected ? 'הסר מהבחירה' : 'בחר נכס'}><Check size={16} /></button>}
@@ -1904,6 +2236,7 @@ function SequenceCard({ sequence, assignment, selectedOrder, onSelect, onManage,
       {sequence.error && <div className="job-error">{sequence.error}</div>}
       <div className="job-actions">
         {sequence.video_url && <><a href={sequence.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
+        {sequence.status === 'completed' && <LastFrameControl sourceType="sequence" sourceId={sequence.id} csrf={csrf} videoUrl={sequence.video_url} />}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
         {onCancel && <button className="danger cancel-action" onClick={onCancel}>ביטול</button>}
@@ -1940,7 +2273,37 @@ function modeLabel(mode: Mode) {
   return 'רפרנס'
 }
 
+const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
+  turbo: ['standard', 'sage', 'sla', 'sage_sla'],
+  fused_sla: ['standard', 'sage'],
+  standard: ['standard'],
+  spectrum: ['standard'],
+  ltx: ['standard'],
+}
+
+// Mirrors backend/generation.py LTX_SIZES: one full-resolution pass per aspect.
+const LTX_SIZES: Record<LtxQuality, Record<Aspect, [number, number]>> = {
+  balanced: { '9:16': [896, 1600], '16:9': [1600, 896], '1:1': [1216, 1216], '4:3': [1376, 1024], '3:4': [1024, 1376] },
+  high: { '9:16': [1056, 1888], '16:9': [1888, 1056], '1:1': [1408, 1408], '4:3': [1632, 1216], '3:4': [1216, 1632] },
+}
+
+function ltxQualityForSize(width: number, height: number): LtxQuality {
+  return Object.values(LTX_SIZES.high).some(([w, h]) => w === width && h === height) ? 'high' : 'balanced'
+}
+
+function isAttentionMode(value: unknown): value is AttentionMode {
+  return value === 'standard' || value === 'sage' || value === 'sla' || value === 'sage_sla'
+}
+
+function attentionLabel(mode: AttentionMode | string) {
+  if (mode === 'sage') return 'Sage'
+  if (mode === 'sla') return 'Sparse'
+  if (mode === 'sage_sla') return 'Sage + Sparse'
+  return 'רגיל'
+}
+
 function engineLabel(engine: Engine | string) {
+  if (engine === 'ltx') return 'LTX 2.5'
   if (engine === 'turbo') return 'Turbo'
   if (engine === 'spectrum') return 'Spectrum'
   if (engine === 'fused_sla') return 'H3 Fused SLA'

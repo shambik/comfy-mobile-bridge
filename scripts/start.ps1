@@ -10,7 +10,11 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 New-Item -ItemType Directory -Path $config.RuntimeRoot -Force | Out-Null
 
 $existing = Get-NetTCPConnection -LocalPort $config.AppPort -State Listen -ErrorAction SilentlyContinue
-if ($existing) { Write-Host "Bridge is already listening on $($config.AppPort)."; exit 0 }
+if ($existing) {
+    Write-Host "Bridge is already listening on $($config.AppPort)."
+    & (Join-Path $PSScriptRoot 'start-image-comfy.ps1')
+    exit 0
+}
 if (-not (Test-Path -LiteralPath $config.BridgePython -PathType Leaf)) {
     $fallback = Get-Command python -ErrorAction SilentlyContinue
     if (-not $fallback) { Write-Error 'Runtime Python is missing. Run bootstrap first.'; exit 2 }
@@ -28,4 +32,5 @@ if ($Wait) {
     if ($process.HasExited) { Write-Error "Bridge exited with code $($process.ExitCode)."; exit 5 }
     Write-Host "Bridge started on http://127.0.0.1:$($config.AppPort)."
 }
+& (Join-Path $PSScriptRoot 'start-image-comfy.ps1')
 exit 0

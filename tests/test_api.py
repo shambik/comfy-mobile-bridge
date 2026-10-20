@@ -113,6 +113,39 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("lip_sync", "standard", "native", 2.5, 6.0, "face.png", "trimmed.wav", 0))
 
+    def test_lip_sync_accepts_optional_closing_frame_with_uploaded_audio(self):
+        data = {
+            "prompt": "Music-driven motion",
+            "mode": "lip_sync", "duration": "5", "engine": "turbo",
+            "encoder": "native", "audio_start": "0", "audio_pretrimmed": "true",
+            "audio_original_start": "5",
+        }
+        files = {
+            "first_frame": ("runner.png", b"opening-placeholder", "image/png"),
+            "last_frame": ("shoe.png", b"closing-placeholder", "image/png"),
+            "audio": ("music.wav", b"audio-placeholder", "audio/wav"),
+        }
+        save_image_mock = AsyncMock(side_effect=[
+            ("C:/safe/runner.png", "runner.png"),
+            ("C:/safe/shoe.png", "shoe.png"),
+        ])
+        with patch("backend.main.save_image", new=save_image_mock), \
+             patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/music.wav", "music.wav"))), \
+             patch("backend.main.probe_audio_duration", return_value=5.0):
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute(
+                "SELECT mode,first_frame_name,last_frame_name,reference_audio_name,no_audio FROM jobs"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("lip_sync", "runner.png", "shoe.png", "music.wav", 0))
+
     def test_lip_sync_requires_audio(self):
         response = self.post(mode="lip_sync", engine="standard", encoder="native")
         self.assertEqual(response.status_code, 400)
@@ -242,6 +275,100 @@ class JobApiTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(row, ("fused_sla", "ref2va", 4))
+
+    def test_fused_ref2va_allows_long_duration_and_selected_steps(self):
+        files = {"image": ("reference.png", b"image-placeholder", "image/png")}
+        with patch("backend.main.fused_sla_ready", return_value=True), \
+             patch("backend.main.fused_workflow_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/reference.png", "reference.png"))):
+            response = self.client.post(
+                "/api/jobs",
+                data={"prompt": "A person walks through a neon city", "mode": "reference", "duration": "10", "engine": "fused_sla", "steps": "8"},
+                files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT workflow_variant,duration,steps FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("ref2va", 10.0, 8))
+
+    def test_completed_job_last_frame_can_be_extracted_and_served(self):
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            job_id = connection.execute("SELECT id FROM jobs").fetchone()[0]
+            connection.execute(
+                "UPDATE jobs SET status='completed',output_path=? WHERE id=?",
+                (str(Path(self.temp.name) / "generated.mp4"), job_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        source = Path(self.temp.name) / "generated.mp4"
+        source.write_bytes(b"video")
+        extracted = Path(self.temp.name) / "extracted"
+
+        def fake_extract(video, target, width, height):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"png")
+            return target
+
+        with patch("backend.main.resolve_asset_path", return_value=source), \
+             patch("backend.main.EXTRACTED_LAST_FRAMES", extracted), \
+             patch("backend.main.extract_last_frame", side_effect=fake_extract):
+            extracted_response = self.client.post(
+                f"/api/jobs/{job_id}/last-frame",
+                headers={"X-CSRF-Token": self.token},
+            )
+            served_response = self.client.get(f"/api/jobs/{job_id}/last-frame")
+
+        self.assertEqual(extracted_response.status_code, 200, extracted_response.text)
+        self.assertEqual(extracted_response.json()["width"], 736)
+        self.assertEqual(extracted_response.json()["height"], 416)
+        self.assertEqual(served_response.status_code, 200, served_response.text)
+        self.assertEqual(served_response.content, b"png")
+
+    def test_fused_ref2va_multiref_accepts_all_reference_media(self):
+        data = {
+            "prompt": "Use the image, motion and voice references consistently",
+            "mode": "reference", "duration": "5", "engine": "fused_sla",
+            "workflow_variant": "ref2va_multiref", "steps": "4",
+        }
+        files = [
+            ("reference_images", ("face.png", b"image-one", "image/png")),
+            ("reference_images", ("wardrobe.png", b"image-two", "image/png")),
+            ("reference_videos", ("motion.mp4", b"video-one", "video/mp4")),
+            ("reference_audio", ("voice.wav", b"audio-one", "audio/wav")),
+        ]
+        with patch("backend.main.fused_sla_ready", return_value=True), \
+             patch("backend.main.fused_workflow_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(side_effect=[
+                 ("C:/safe/face.png", "face.png"),
+                 ("C:/safe/wardrobe.png", "wardrobe.png"),
+             ])), \
+             patch("backend.main.save_video", new=AsyncMock(return_value=("C:/safe/motion.mp4", "motion.mp4"))), \
+             patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/voice.wav", "voice.wav"))):
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute(
+                "SELECT engine,workflow_variant,reference_images_json,reference_videos_json,reference_audio_name FROM jobs"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0:2], ("fused_sla", "ref2va_multiref"))
+        self.assertEqual(row[2], '["face.png", "wardrobe.png"]')
+        self.assertEqual(row[3], '["motion.mp4"]')
+        self.assertEqual(row[4], "voice.wav")
 
     def test_clipproj_profile_is_persisted(self):
         with patch("backend.main.clipproj_ready", return_value=True):

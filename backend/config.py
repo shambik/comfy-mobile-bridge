@@ -34,7 +34,6 @@ def _read_local_config() -> dict[str, Any]:
 
 LOCAL_CONFIG = _read_local_config()
 
-
 def _as_path(value: str | None, default: Path, *, relative_to: Path = ROOT) -> Path:
     if not value:
         return default.resolve()
@@ -42,6 +41,13 @@ def _as_path(value: str | None, default: Path, *, relative_to: Path = ROOT) -> P
     if not path.is_absolute():
         path = relative_to / path
     return path.resolve()
+
+
+# Optional external collection; never copy the bot's credentials into this app.
+BOT_IMAGE_WORKFLOWS_DIR = _as_path(
+    LOCAL_CONFIG.get("bot_image_workflows_dir"), ROOT / "workflows" / "bot_images"
+)
+QWEN_IMAGE_WORKFLOWS_DIR = ROOT / "workflows" / "qwen_image"
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -113,8 +119,27 @@ APP_PORT = _port(os.environ.get("H3_APP_PORT", app_config.get("port")), 8787, "a
 COMFY_HOST = _local_host(os.environ.get("H3_COMFY_HOST", comfy_config.get("host", "127.0.0.1")), "comfy.host")
 COMFY_PORT = _port(os.environ.get("H3_COMFY_PORT", comfy_config.get("port")), 8190, "comfy.port")
 COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
+image_comfy_config = LOCAL_CONFIG.get("image_comfy", {})
+if not isinstance(image_comfy_config, dict):
+    raise RuntimeError("image_comfy configuration section must be an object")
+IMAGE_COMFY_HOST = _local_host(image_comfy_config.get("host", "127.0.0.1"), "image_comfy.host")
+IMAGE_COMFY_PORT = _port(image_comfy_config.get("port"), 8192, "image_comfy.port")
+IMAGE_COMFY_URL = f"http://{IMAGE_COMFY_HOST}:{IMAGE_COMFY_PORT}"
 
 STATE = ROOT / "state"
+IMAGE_COMFY_INPUT = _as_path(image_comfy_config.get("input"), STATE / "image_comfy" / "input")
+IMAGE_COMFY_OUTPUT = _as_path(image_comfy_config.get("output"), STATE / "image_comfy" / "output")
+qwen_image_config = LOCAL_CONFIG.get("qwen_image_comfy", {})
+if not isinstance(qwen_image_config, dict):
+    raise RuntimeError("qwen_image_comfy configuration section must be an object")
+QWEN_IMAGE_COMFY_HOST = _local_host(qwen_image_config.get("host", "127.0.0.1"), "qwen_image_comfy.host")
+QWEN_IMAGE_COMFY_PORT = _port(qwen_image_config.get("port"), 8193, "qwen_image_comfy.port")
+QWEN_IMAGE_COMFY_URL = f"http://{QWEN_IMAGE_COMFY_HOST}:{QWEN_IMAGE_COMFY_PORT}"
+QWEN_IMAGE_COMFY_MODELS = _as_path(
+    qwen_image_config.get("models"), RUNTIME_ROOT / "qwen_image_models"
+)
+QWEN_IMAGE_COMFY_INPUT = _as_path(qwen_image_config.get("input"), STATE / "qwen_image_comfy" / "input")
+QWEN_IMAGE_COMFY_OUTPUT = _as_path(qwen_image_config.get("output"), STATE / "qwen_image_comfy" / "output")
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
 PRODUCTIONS = STATE / "productions"
@@ -166,14 +191,38 @@ VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 FUSED_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
 FUSED_WORKFLOW_DIR = STATE / "h3-new-flow" / "official"
+H3_STILL_WORKFLOW = ROOT / "workflows" / "minimax_h3_t2i_experimental_first_frame_api.json"
 FUSED_MOTION_ADAPTER = "minimax_h3\\minimax_h3_temporal_expansion_step375_r16.safetensors"
 FUSED_WORKFLOW_FILES = {
     "direct": FUSED_WORKFLOW_DIR / "01_reference_4step_sla_lowvram.api.json",
     "i2v_fl2v": FUSED_WORKFLOW_DIR / "04_i2v_fl2v_4step_sla_lowvram.api.json",
     "ref2va": FUSED_WORKFLOW_DIR / "05_ref2va_4step_sla_lowvram.api.json",
+    # The multi-reference variant uses the official Ref2VA graph as its
+    # topology template and expands its dynamic reference inputs in the
+    # bridge builder. Keeping the same source file preserves the verified
+    # fused model, VAE, and low-VRAM sampler chain.
+    "ref2va_multiref": FUSED_WORKFLOW_DIR / "05_ref2va_4step_sla_lowvram.api.json",
     "derope": FUSED_WORKFLOW_DIR / "02_derope_4plus4_sla_lowvram.api.json",
     "dyrope": FUSED_WORKFLOW_DIR / "03_derope_dyrope_pb3049_warm375_lowvram.api.json",
 }
+
+# LTX-2.5 image+audio-to-video lip-sync. Single distilled pass at full
+# resolution (no latent upscaler): the second refine pass loosened lip timing
+# in the speed-lab tests, so the app runs the one-pass graph only.
+LTX_WORKFLOW = ROOT / "workflows" / "ltx25_ia2v_single_pass_api.json"
+LTX_TRANSFORMER = "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+LTX_TEXT_ENCODER = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+LTX_VIDEO_VAE = "ltx-2.5-video-vae-bf16.safetensors"
+LTX_AUDIO_VAE = "ltx-2.5-audio-vae-bf16.safetensors"
+# Lightricks' Ingredients IC-LoRA (gated repo Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients),
+# used only by LTX reference mode.
+LTX_INGREDIENTS_LORA = "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
+LTX_MODEL_FILES = (
+    ("diffusion_models", LTX_TRANSFORMER),
+    ("text_encoders", LTX_TEXT_ENCODER),
+    ("vae", LTX_VIDEO_VAE),
+    ("vae", LTX_AUDIO_VAE),
+)
 
 TAILSCALE_ENABLED = bool(tailscale_config.get("enabled", True))
 TAILSCALE_SCOPE = str(tailscale_config.get("scope", "tailnet"))

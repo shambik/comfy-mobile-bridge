@@ -40,7 +40,7 @@ class GenerationSettingsTests(unittest.TestCase):
             ("text", "turbo", 13, "736x416"),
             ("text", "standard", 7, "736x416"),
             ("text", "standard", 31, "736x416"),
-            ("reference", "turbo", 5, "736x416"),
+            ("reference", "turbo", 3, "736x416"),
             ("text", "spectrum", 7, "736x416"),
             ("text", "spectrum", 31, "736x416"),
             ("text", "fused_sla", 9, "736x416"),
@@ -56,6 +56,9 @@ class GenerationSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_generation_settings("text", turbo_profile="unknown")
         self.assertEqual(normalize_generation_settings("lip_sync", "turbo", 4).engine, "turbo")
+        ref2va_turbo_8 = normalize_generation_settings("reference", "turbo", 8)
+        self.assertEqual(ref2va_turbo_8.engine, "turbo")
+        self.assertEqual(ref2va_turbo_8.steps, 8)
         fused_lip_sync = normalize_generation_settings("lip_sync", "fused_sla", 6)
         self.assertEqual(fused_lip_sync.engine, "fused_sla")
         self.assertEqual(fused_lip_sync.workflow_variant, "direct")
@@ -67,8 +70,16 @@ class GenerationSettingsTests(unittest.TestCase):
             normalize_generation_settings("reference", "fused_sla", 4).workflow_variant,
             "ref2va",
         )
+        ref2va_fused_8 = normalize_generation_settings("reference", "fused_sla", 8)
+        self.assertEqual(ref2va_fused_8.workflow_variant, "ref2va")
+        self.assertEqual(ref2va_fused_8.steps, 8)
         with self.assertRaises(ValueError):
             normalize_generation_settings("reference", "fused_sla", 4, workflow_variant="direct")
+        multiref = normalize_generation_settings(
+            "reference", "fused_sla", 8, workflow_variant="ref2va_multiref",
+        )
+        self.assertEqual(multiref.workflow_variant, "ref2va_multiref")
+        self.assertEqual(multiref.steps, 8)
         with self.assertRaises(ValueError):
             normalize_generation_settings("text", "fused_sla", 4, encoder="clipproj")
 
@@ -89,6 +100,22 @@ class WorkflowTests(unittest.TestCase):
         ref2va = official_fused_workflow("ref2va", "reference prompt", 10, 17, "ref", reference_image_name="face.png")
         self.assertEqual(ref2va["901"]["inputs"]["image"], "face.png")
         self.assertEqual(ref2va["131"]["inputs"]["ref_images.ref_image_0"], ["901", 0])
+
+        multiref = official_fused_workflow(
+            "ref2va_multiref", "multi-reference prompt", 5, 18, "multi",
+            reference_image_names=["face.png", "wardrobe.png"],
+            reference_video_names=["motion.mp4"],
+            reference_audio_name="voice.wav",
+        )
+        multiref_inputs = multiref["131"]["inputs"]
+        self.assertEqual(multiref_inputs["ref_images.ref_image_0"], ["1000", 0])
+        self.assertEqual(multiref_inputs["ref_images.ref_image_1"], ["1001", 0])
+        self.assertEqual(multiref_inputs["ref_videos.ref_video_0"], ["1021", 0])
+        self.assertEqual(multiref_inputs["ref_video_audios.ref_video_audio_0"], ["1021", 1])
+        self.assertEqual(multiref_inputs["ref_audios.ref_audio_0"], ["1040", 0])
+        self.assertNotIn("901", multiref)
+        self.assertEqual(multiref["1020"]["class_type"], "LoadVideo")
+        self.assertEqual(multiref["1040"]["class_type"], "LoadAudio")
 
         dyrope = official_fused_workflow("dyrope", "prompt", 10, 17, "dy", include_audio=False)
         self.assertEqual(dyrope["902"]["inputs"]["lora_name"], "minimax_h3\\minimax_h3_temporal_expansion_step375_r16.safetensors")
@@ -153,13 +180,14 @@ class WorkflowTests(unittest.TestCase):
     def test_native_audio_lock_uses_exact_audio_and_optional_first_frame(self):
         workflow = native_audio_lock_workflow(
             "natural lip sync", 5, 42, "lip-sync", "voice.wav",
-            first_frame_name="face.png", steps=20, width=864, height=480,
+            first_frame_name="face.png", last_frame_name="last.png", steps=20, width=864, height=480,
         )
         self.assertEqual(workflow["18"]["class_type"], "MiniMaxH3NativeAudioLock")
         self.assertEqual(workflow["23"], {
             "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
         })
         self.assertEqual(workflow["104"]["inputs"]["first_frame"], ["200", 0])
+        self.assertEqual(workflow["104"]["inputs"]["last_frame"], ["201", 0])
         self.assertEqual(workflow["14"]["inputs"]["latent_image"], ["18", 1])
         self.assertEqual(workflow["91"]["inputs"]["audio"], ["18", 2])
         self.assertNotIn("VAEDecodeAudio", {node["class_type"] for node in workflow.values()})

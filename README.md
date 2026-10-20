@@ -29,6 +29,28 @@ and make a generation appear stuck. The warning does not close Fortnite.
 The app's ComfyUI stop control stops only the ComfyUI process tree; it keeps
 the mobile bridge running so the UI and logs remain available.
 
+Image Lab uses a separately installed ComfyUI copy on local port 8192. Its
+Python environment and custom nodes live under `.runtime/image_comfy_venv`
+and `.runtime/image_comfy_code`, with inputs and outputs under
+`state/image_comfy`. It shares the configured model directory without
+modifying the H3 Python environment or custom nodes. Once installed,
+`scripts/start.ps1` also starts this image-only server; it can be started
+independently with `scripts/start-image-comfy.ps1`. The Image Lab page checks
+its own server status rather than the H3 server on port 8190.
+
+Qwen Image 2.1 is an optional, separate local Image Lab engine on port 8193. It
+uses its own ComfyUI checkout, Python environment, and model directory under
+`.runtime/qwen_image_*`, so it does not update the Image Lab engine on 8192 or
+the H3 runtime. The three official INT8/BF16 model files total about 17.3 GB
+(16.1 GiB).
+On a 10 GB GPU it starts in ComfyUI low-VRAM mode and may be slower due to
+offloading. The Qwen Research License permits research/evaluation only;
+commercial use requires a separate license. After reviewing and accepting the
+license, install with
+`powershell -File scripts\install-qwen-image.ps1 -AcceptNonCommercialLicense`.
+The engine can later be started separately with
+`powershell -File scripts\start-qwen-image-comfy.ps1`.
+
 For Ref2VA Turbo, bootstrap also downloads and verifies the dedicated
 `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` LoRA. If an
 existing ComfyUI installation is configured in `config.local.json`, bootstrap
@@ -66,6 +88,8 @@ the current machine's paths and detected Tailscale hostname and is ignored.
 
 - Bridge: `127.0.0.1:8787`.
 - ComfyUI: `127.0.0.1:8190`.
+- Image Lab ComfyUI: `127.0.0.1:8192`.
+- Optional Qwen Image 2.1 ComfyUI: `127.0.0.1:8193`.
 - Tailscale Serve: HTTPS to the bridge inside the current tailnet.
 - Funnel is never enabled.
 
@@ -83,6 +107,28 @@ npm ci
 npm run build
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+## Image workflow lab
+
+The separate **Image lab** page can load API-format image workflows from an
+external bot without executing its Python code or copying its credentials.
+Set `bot_image_workflows_dir` in the ignored `config.local.json` to that bot's
+`workflows` directory. The page discovers text-to-image, editing, multi-image,
+ControlNet, outpainting, and upscaling graphs, then exposes the bot's prompt,
+seed, steps, CFG, resolution, denoise, ControlNet, and outpainting controls.
+Enumerated fields such as sampler and scheduler use choices reported by the
+active ComfyUI server. Optional LoRAs use a recipe-specific multi-select menu
+(for example, Goofballs); LoRAs already enabled by a recipe are listed
+separately. Free text is kept only for inputs that ComfyUI defines as open-ended.
+Grain and simple-upscale modes are separate workflows in the selector;
+Telegram-only delivery flags are not generation parameters. Missing custom
+nodes or model dropdown entries are shown per workflow before submission. The
+current ComfyUI environment is never installed or changed by this page.
+
+The Qwen Image 2.1 recipes route only to the optional Qwen engine on 8193 and
+are explicitly limited to non-commercial research/evaluation. They include
+text-to-image and editing with one primary image plus up to nine ordered
+supporting references.
 
 The bridge supports text-to-video, first/last-frame video, reference video,
 native stereo audio, Turbo, Standard, Spectrum, and the optional ClipProj

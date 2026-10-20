@@ -12,13 +12,16 @@ from .comfy import (ComfyBusyError, ComfyCancellationError, ComfyClient,
 from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
-                     FUSED_WORKFLOW_FILES, INPUT, MODELS, REF2VA_MODEL,
-                     REF2VA_TURBO_LORA, SEQUENCES)
+                     FUSED_WORKFLOW_FILES, INPUT, LTX_INGREDIENTS_LORA, LTX_MODEL_FILES,
+                     MODELS, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
 from .library import finalize_completed_asset, resolve_asset_path
-from .workflows import (fused_sla_audio_lock_workflow, native_audio_lock_workflow,
+from .workflows import (apply_attention_mode, attention_node_classes,
+                        fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
+                        ltx_node_classes, ltx_video_workflow,
+                        native_audio_lock_workflow,
                         official_fused_workflow,
                         reference_workflow,
                         spectrum_workflow, standard_workflow, turbo_workflow)
@@ -625,6 +628,7 @@ class QueueWorker:
             job["mode"], job["duration"], job["engine"], job["steps"],
             job["width"], job["height"], job.get("encoder") or "native",
             job.get("turbo_profile") or "v1",
+            job.get("attention_mode") or "standard",
         )
         if estimated_total:
             update_job(job["id"], phase="starting", eta_seconds=round(estimated_total, 1))
@@ -634,6 +638,7 @@ class QueueWorker:
         runtime["job"] = {
             "mode": job["mode"], "engine": job["engine"],
             "turbo_profile": job.get("turbo_profile") or "v1",
+            "attention_mode": job.get("attention_mode") or "standard",
             "encoder": job.get("encoder") or "native", "duration": job["duration"],
             "steps": job["steps"], "width": job["width"], "height": job["height"],
             "megapixels": job.get("megapixels"), "aspect_ratio": job.get("aspect_ratio"),
@@ -659,7 +664,43 @@ class QueueWorker:
         else:
             required.add("CLIPLoader")
 
-        if job["mode"] == "lip_sync":
+        ltx_workflow = None
+        if job["engine"] == "ltx":
+            # LTX runs its own graph; none of the H3 node classes are involved.
+            missing_files = [
+                str(MODELS / folder / name) for folder, name in LTX_MODEL_FILES
+                if not (MODELS / folder / name).exists()
+            ]
+            if missing_files:
+                raise RuntimeError("LTX 2.5 is not fully installed: " + ", ".join(missing_files))
+            if job["mode"] == "lip_sync":
+                if not job.get("reference_audio_name"):
+                    raise RuntimeError("Lip-sync job has no uploaded audio")
+                if not job.get("first_frame_name"):
+                    raise RuntimeError("LTX 2.5 lip-sync job has no opening image")
+                required = ltx_node_classes()
+            else:
+                first_frame_name = job.get("first_frame_name")
+                last_frame_name = job.get("last_frame_name")
+                reference_image_name = None
+                if job["mode"] == "opening":
+                    first_frame_name = first_frame_name or job.get("input_name")
+                elif job["mode"] == "closing":
+                    last_frame_name = last_frame_name or job.get("input_name")
+                elif job["mode"] == "reference":
+                    sheets = json.loads(job.get("reference_images_json") or "[]") or [job.get("input_name")]
+                    reference_image_name = sheets[0]
+                    if not (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists():
+                        raise RuntimeError("LTX 2.5 reference mode needs the Ingredients IC-LoRA: " + LTX_INGREDIENTS_LORA)
+                ltx_workflow = ltx_video_workflow(
+                    job["mode"], job["prompt"], job["duration"], int(job["seed"]),
+                    f"h3_bridge_{job['id']}", job["width"], job["height"],
+                    first_frame_name=first_frame_name, last_frame_name=last_frame_name,
+                    include_audio=not bool(job.get("no_audio")),
+                    reference_image_name=reference_image_name,
+                )
+                required = {node["class_type"] for node in ltx_workflow.values()}
+        elif job["mode"] == "lip_sync":
             required |= {"KSamplerSelect", "LoadAudio", "MiniMaxH3NativeAudioLock"}
             if job["engine"] == "turbo":
                 required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
@@ -728,8 +769,14 @@ class QueueWorker:
                     "H3ClockRemap", "H3SaveHoldMap", "VAEEncode", "VAEEncodeAudio",
                 }
                 required_files.append(FUSED_MAINODES_DIR / "__init__.py")
-            if variant == "ref2va":
+            if variant in {"ref2va", "ref2va_multiref"}:
                 required.add("MiniMaxH3ReferenceToVideo")
+            if variant == "ref2va_multiref":
+                reference_videos = json.loads(job.get("reference_videos_json") or "[]")
+                if reference_videos:
+                    required |= {"LoadVideo", "GetVideoComponents"}
+                if job.get("reference_audio_name"):
+                    required.add("LoadAudio")
             if variant == "dyrope":
                 required |= {"H3DyRoPE", "LoraLoaderModelOnly"}
                 required_files.append(MODELS / "loras" / FUSED_MOTION_ADAPTER)
@@ -742,6 +789,8 @@ class QueueWorker:
             required |= {"KSamplerSelect", "MiniMaxH3SigmaShift", "SpectrumApplyMiniMaxH3"}
         else:
             required.add("KSamplerSelect")
+        attention_mode = job.get("attention_mode") or "standard"
+        required |= attention_node_classes(attention_mode)
         missing = sorted(required - set(info))
         if missing:
             raise RuntimeError("ComfyUI is missing node classes: " + ", ".join(missing))
@@ -750,13 +799,25 @@ class QueueWorker:
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
         workflow_builder = "unknown"
-        if job["mode"] == "lip_sync":
+        if ltx_workflow is not None:
+            workflow_builder = "ltx_video_workflow"
+            workflow = ltx_workflow
+        elif job["engine"] == "ltx":
+            workflow_builder = "ltx_lipsync_workflow"
+            workflow = ltx_lipsync_workflow(
+                job["prompt"], job["duration"], seed, prefix,
+                audio_name=job["reference_audio_name"],
+                first_frame_name=job["first_frame_name"],
+                width=job["width"], height=job["height"],
+            )
+        elif job["mode"] == "lip_sync":
             if job["engine"] == "fused_sla":
                 workflow_builder = "fused_sla_audio_lock_workflow"
                 workflow = fused_sla_audio_lock_workflow(
                     job["prompt"], job["duration"], seed, prefix,
                     audio_name=job["reference_audio_name"],
                     first_frame_name=job.get("first_frame_name"),
+                    last_frame_name=job.get("last_frame_name"),
                     steps=job["steps"], width=job["width"], height=job["height"],
                     megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 )
@@ -766,6 +827,7 @@ class QueueWorker:
                     job["prompt"], job["duration"], seed, prefix,
                     audio_name=job["reference_audio_name"],
                     first_frame_name=job.get("first_frame_name"),
+                    last_frame_name=job.get("last_frame_name"),
                     steps=job["steps"], width=job["width"], height=job["height"],
                     megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                     encoder=encoder,
@@ -796,12 +858,16 @@ class QueueWorker:
             reference_images = json.loads(job.get("reference_images_json") or "[]")
             if not reference_images and job["mode"] == "reference" and image_name:
                 reference_images = [image_name]
+            reference_videos = json.loads(job.get("reference_videos_json") or "[]")
             workflow_builder = f"official_{variant}_workflow"
             workflow = official_fused_workflow(
                 variant, job["prompt"], job["duration"], seed, prefix,
                 first_frame_name=first_frame_name,
                 last_frame_name=last_frame_name,
                 reference_image_name=reference_images[0] if reference_images else None,
+                reference_image_names=reference_images if variant == "ref2va_multiref" else None,
+                reference_video_names=reference_videos if variant == "ref2va_multiref" else None,
+                reference_audio_name=job.get("reference_audio_name") if variant == "ref2va_multiref" else None,
                 steps=job["steps"], width=job["width"], height=job["height"],
                 megapixels=job.get("megapixels"), aspect_ratio=job.get("aspect_ratio"),
                 include_audio=not bool(job.get("no_audio")),
@@ -834,8 +900,10 @@ class QueueWorker:
             )
             workflow_builder = workflow_builder_name
 
+        workflow = apply_attention_mode(workflow, attention_mode)
         runtime["workflow"] = {
             "builder": workflow_builder,
+            "attention_mode": attention_mode,
             "node_count": len(workflow),
             "node_classes": sorted({str(node.get("class_type")) for node in workflow.values()}),
         }
@@ -936,12 +1004,10 @@ class QueueWorker:
             consecutive_history_failures = 0
             consecutive_comfy_down_failures = 0
             total_history_failures = 0
-            history_poll_started = time.monotonic()
-            # Audio-locked jobs can spend many minutes in VAE/audio/video
-            # post-processing after the final diffusion step. The bridge must
-            # not label those jobs failed just because /history is temporarily
-            # unavailable. Keep a long safety limit for a genuinely lost job.
-            watchdog_seconds = max(3600.0, (estimated_total or 0) * 10 + 600)
+            # Keep polling until Comfy reports completion, the prompt becomes
+            # unreachable, or the user cancels the job. Generation time is
+            # deliberately unbounded because H3 runtime varies sharply with
+            # duration, resolution, VRAM, and model offload behavior.
             while True:
                 if job["id"] in self.cancelled:
                     raise RuntimeError("Generation canceled")
@@ -996,11 +1062,6 @@ class QueueWorker:
                             runtime=runtime,
                             error=None,
                         )
-                    if time.monotonic() - history_poll_started >= watchdog_seconds:
-                        raise RuntimeError(
-                            "ComfyUI status polling did not recover within "
-                            f"{int(watchdog_seconds)} seconds ({poll_error})"
-                        )
                     await asyncio.sleep(5)
                     continue
 
@@ -1031,11 +1092,6 @@ class QueueWorker:
                             raise RuntimeError("ComfyUI execution error: " + json.dumps(errors[-1][1], ensure_ascii=False)[:7500])
                     if status.get("completed"):
                         break
-                if time.monotonic() - history_poll_started >= watchdog_seconds:
-                    raise RuntimeError(
-                        "ComfyUI did not report a completed prompt within "
-                        f"{int(watchdog_seconds)} seconds"
-                    )
                 await asyncio.sleep(5)
 
             elapsed = time.monotonic() - started

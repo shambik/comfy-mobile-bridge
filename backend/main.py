@@ -30,17 +30,28 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR,
                      FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS,
+                     LTX_INGREDIENTS_LORA, LTX_MODEL_FILES, LTX_WORKFLOW,
+                     IMAGE_COMFY_INPUT, IMAGE_COMFY_URL,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
-                     REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT,
+                     QWEN_IMAGE_COMFY_URL,
+                     REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT, STATE,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
-from .generation import normalize_generation_settings
+from .generation import LTX_DURATION_RANGE, normalize_generation_settings
+from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
+from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
+                         get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
+                         inspect_run as inspect_bot_image_run, start_run as start_bot_image_run,
+                         workflow_engine as bot_image_engine, workflow_input_directory,
+                         workflow_upload_limit)
+from .comfy import ComfyClient
 from .library import (assign_asset, create_folder, create_project, delete_folder,
                       delete_project, init_library_db, list_library, remove_assignment,
                       rename_asset, rename_folder, rename_project, resolve_asset_path,
                       validate_location)
+from .media import extract_last_frame
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog, process_manager
 from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
@@ -66,7 +77,14 @@ from .video_vault import delete_video_item, list_video_vault, store_video, video
 from .worker import QueueWorker
 
 worker = QueueWorker()
+image_comfy = ComfyClient(base_url=IMAGE_COMFY_URL)
+qwen_image_comfy = ComfyClient(base_url=QWEN_IMAGE_COMFY_URL)
 logger = logging.getLogger(__name__)
+EXTRACTED_LAST_FRAMES = STATE / "extracted_last_frames"
+
+
+def bot_image_comfy(workflow_name: str) -> ComfyClient:
+    return qwen_image_comfy if bot_image_engine(workflow_name) == "qwen21" else image_comfy
 
 
 def fortnite_running() -> bool:
@@ -416,6 +434,18 @@ class AgentSettingsBody(BaseModel):
     agy_effort: str
 
 
+class H3StillRequest(BaseModel):
+    prompt: str
+    aspect_ratio: str = "1:1"
+    megapixels: float = 1.0
+    seed: int | None = None
+    input_mode: str = "text"
+    engine: str = "standard"
+    steps: int = 20
+    ref_image_size: str = "max"
+    turbo_profile: str = "v1"
+
+
 class SkillBody(BaseModel):
     enabled: bool
 
@@ -552,6 +582,12 @@ def fused_sla_ready() -> bool:
     ))
 
 
+def ltx_ready() -> bool:
+    return LTX_WORKFLOW.exists() and all(
+        (MODELS / folder / name).exists() for folder, name in LTX_MODEL_FILES
+    )
+
+
 def fused_workflow_ready(variant: str) -> bool:
     if variant not in FUSED_WORKFLOW_FILES or not fused_sla_ready():
         return False
@@ -578,8 +614,11 @@ def public_health():
         "fused_direct_ready": fused_workflow_ready("direct"),
         "fused_i2v_fl2v_ready": fused_workflow_ready("i2v_fl2v"),
         "fused_ref2va_ready": fused_workflow_ready("ref2va"),
+        "fused_ref2va_multiref_ready": fused_workflow_ready("ref2va_multiref"),
         "fused_derope_ready": fused_workflow_ready("derope"),
         "fused_dyrope_ready": fused_workflow_ready("dyrope"),
+        "ltx_ready": ltx_ready(),
+        "ltx_reference_ready": ltx_ready() and (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists(),
         "reference_10s_ready": REFERENCE_10S_MARKER.exists(),
         "spectrum_ready": (SPECTRUM_NODE_DIR / "nodes.py").exists(),
         "spectrum_version": SPECTRUM_NODE_VERSION,
@@ -642,6 +681,268 @@ async def comfy_status():
         "host": COMFY_HOST,
         "port": COMFY_PORT,
     }
+
+
+@app.post("/api/h3-still")
+async def create_h3_still(request: Request, body: H3StillRequest):
+    """Run the isolated H3 first-frame experiment without touching video jobs."""
+    require_csrf(request)
+    if worker.current_job:
+        raise HTTPException(409, "ComfyUI is already running a bridge video job; wait for it to finish")
+    if has_active_h3_still():
+        raise HTTPException(409, "An H3 still generation is already running")
+    if body.seed is not None and not 0 <= body.seed <= (1 << 64) - 1:
+        raise HTTPException(400, "Seed must be between 0 and 18446744073709551615")
+    if not await worker.comfy.ready():
+        raise HTTPException(503, "ComfyUI is not ready")
+    try:
+        run = await start_h3_still(
+            worker.comfy,
+            prompt=body.prompt,
+            aspect_ratio=body.aspect_ratio,
+            megapixels=body.megapixels,
+            seed=body.seed,
+            input_mode=body.input_mode,
+            engine=body.engine,
+            steps=body.steps,
+            ref_image_size=body.ref_image_size,
+            turbo_profile=body.turbo_profile,
+        )
+    except H3StillError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return run.public()
+
+
+@app.post("/api/h3-still/advanced")
+async def create_advanced_h3_still(
+    request: Request,
+    prompt: str = Form(...),
+    input_mode: str = Form("text"),
+    engine: str = Form("standard"),
+    steps: int = Form(20),
+    aspect_ratio: str = Form("1:1"),
+    megapixels: float = Form(1.0),
+    seed: str = Form(""),
+    ref_image_size: str = Form("max"),
+    turbo_profile: str = Form("v1"),
+    image: UploadFile | None = File(None),
+    reference_images: list[UploadFile] = File(default=[]),
+):
+    """Run H3 still generation with optional image-edit/reference uploads."""
+    require_csrf(request)
+    if worker.current_job:
+        raise HTTPException(409, "ComfyUI is already running a bridge video job; wait for it to finish")
+    if has_active_h3_still():
+        raise HTTPException(409, "An H3 still generation is already running")
+    if not await worker.comfy.ready():
+        raise HTTPException(503, "ComfyUI is not ready")
+    try:
+        selected_seed = normalize_seed(seed)
+        if selected_seed is not None:
+            selected_seed_int = int(selected_seed)
+        else:
+            selected_seed_int = None
+    except HTTPException:
+        raise
+
+    saved_paths: list[str] = []
+    image_name: str | None = None
+    reference_names: list[str] = []
+    try:
+        if image:
+            image_path, image_name = await save_image(image)
+            if image_path:
+                saved_paths.append(image_path)
+        for reference_image in reference_images:
+            reference_path, reference_name = await save_image(reference_image)
+            if reference_path and reference_name:
+                saved_paths.append(reference_path)
+                reference_names.append(reference_name)
+        run = await start_h3_still(
+            worker.comfy,
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            megapixels=megapixels,
+            seed=selected_seed_int,
+            input_mode=input_mode,
+            engine=engine,
+            steps=steps,
+            image_name=image_name,
+            reference_names=reference_names,
+            ref_image_size=ref_image_size,
+            turbo_profile=turbo_profile,
+        )
+    except H3StillError as exc:
+        for path in saved_paths:
+            Path(path).unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        for path in saved_paths:
+            Path(path).unlink(missing_ok=True)
+        raise
+    return run.public()
+
+
+@app.get("/api/h3-still/{run_id}")
+async def h3_still_status(run_id: str):
+    if not run_id.isalnum() or len(run_id) != 32:
+        raise HTTPException(404, "H3 still run not found")
+    if not get_h3_still(run_id):
+        raise HTTPException(404, "H3 still run not found")
+    try:
+        run = await inspect_h3_still(worker.comfy, run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "H3 still run not found") from exc
+    return run.public()
+
+
+@app.get("/api/h3-still/{run_id}/image")
+async def h3_still_image(run_id: str):
+    if not run_id.isalnum() or len(run_id) != 32:
+        raise HTTPException(404, "H3 still run not found")
+    run = get_h3_still(run_id)
+    if not run:
+        raise HTTPException(404, "H3 still run not found")
+    run = await inspect_h3_still(worker.comfy, run_id)
+    if run.status != "completed" or not run.image_path:
+        raise HTTPException(404, "H3 still image is not ready")
+    return FileResponse(run.image_path, media_type="image/png", filename=run.image_path.name)
+
+
+@app.delete("/api/h3-still/{run_id}")
+async def remove_h3_still(request: Request, run_id: str):
+    require_csrf(request)
+    if not run_id.isalnum() or len(run_id) != 32:
+        raise HTTPException(404, "H3 still run not found")
+    try:
+        delete_h3_still(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "H3 still run not found") from exc
+    except H3StillError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "deleted": run_id}
+
+
+@app.get("/api/bot-images/workflows")
+async def bot_image_workflows():
+    return {"workflows": bot_image_catalog()}
+
+
+@app.get("/api/bot-images/status")
+async def bot_image_server_status():
+    return {"ready": await image_comfy.ready(), "qwen21_ready": await qwen_image_comfy.ready()}
+
+
+@app.get("/api/bot-images/compatibility")
+async def bot_image_compatibility_status():
+    workflows = bot_image_catalog()
+    clients = {"image": image_comfy, "qwen21": qwen_image_comfy}
+    results: dict[str, Any] = {}
+    object_info_by_engine: dict[str, dict[str, Any]] = {}
+    for item in workflows:
+        engine = item.get("engine", "image")
+        client = clients[engine]
+        if engine not in object_info_by_engine:
+            if not await client.ready():
+                object_info_by_engine[engine] = {}
+            else:
+                try:
+                    object_info_by_engine[engine] = await client.object_info()
+                except Exception:
+                    object_info_by_engine[engine] = {}
+        if object_info_by_engine[engine]:
+            engine_status = bot_image_compatibility(object_info_by_engine[engine])
+            for entry in workflows:
+                if entry.get("engine", "image") == engine:
+                    results[entry["name"]] = engine_status.get(entry["name"], {
+                        "ready": False, "missing_nodes": [], "missing_models": [],
+                        "missing_inputs": ["Workflow is not part of this engine catalog"],
+                        "field_choices": {},
+                    })
+        else:
+            results[item["name"]] = {
+                "ready": False,
+                "missing_nodes": [],
+                "missing_models": ["Qwen 2.1 engine is offline" if engine == "qwen21" else "Image engine is offline"],
+                "missing_inputs": [],
+                "field_choices": {},
+            }
+    return {"workflows": results}
+
+
+@app.post("/api/bot-images/runs")
+async def create_bot_image_run(request: Request, payload: str = Form(...), images: list[UploadFile] = File(default=[])):
+    require_csrf(request)
+    if worker.current_job or has_active_h3_still() or has_active_bot_image_run():
+        raise HTTPException(409, "ComfyUI is already running a bridge generation")
+    try:
+        body = json.loads(payload)
+        if not isinstance(body, dict) or not isinstance(body.get("workflow"), str):
+            raise ValueError("Workflow is required")
+        if not isinstance(body.get("prompt", ""), str) or not isinstance(body.get("negative", ""), str):
+            raise ValueError("Prompts must be text")
+        if not isinstance(body.get("overrides", []), list) or not isinstance(body.get("flags", {}), dict):
+            raise ValueError("Invalid workflow options")
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        comfy = bot_image_comfy(body["workflow"])
+        input_directory = workflow_input_directory(body["workflow"])
+        upload_limit = workflow_upload_limit(body["workflow"])
+    except BotImageError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if len(images) > upload_limit:
+        raise HTTPException(400, f"This workflow accepts at most {upload_limit} source images")
+    if not await comfy.ready():
+        raise HTTPException(503, "The selected image engine is not ready")
+    paths: list[str] = []
+    names: list[str] = []
+    try:
+        for upload in images:
+            path, name = await save_image(upload, destination=input_directory)
+            if path and name:
+                paths.append(path)
+                names.append(name)
+        run = await start_bot_image_run(comfy, body["workflow"], body.get("prompt", ""),
+                                         body.get("negative", ""), names, body.get("overrides", []), body.get("flags", {}))
+    except BotImageError as exc:
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    except Exception:
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+        raise
+    return run.public()
+
+
+@app.get("/api/bot-images/runs/{run_id}")
+async def bot_image_run_status(run_id: str):
+    run = get_bot_image_run(run_id)
+    if not run:
+        raise HTTPException(404, "Image run not found")
+    await inspect_bot_image_run(bot_image_comfy(run.workflow), run)
+    return run.public()
+
+
+@app.get("/api/bot-images/runs/{run_id}/images/{index}")
+async def bot_image_output(run_id: str, index: int):
+    run = get_bot_image_run(run_id)
+    if not run or run.status != "completed" or not 0 <= index < len(run.paths):
+        raise HTTPException(404, "Generated image not found")
+    return FileResponse(run.paths[index], filename=run.paths[index].name)
+
+
+@app.delete("/api/bot-images/runs/{run_id}")
+async def remove_bot_image_run(request: Request, run_id: str):
+    require_csrf(request)
+    try:
+        delete_bot_image_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Image run not found") from exc
+    except BotImageError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True}
 
 
 @app.get("/api/comfy/logs")
@@ -2157,7 +2458,7 @@ async def production_events(production_id: str, request: Request):
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
 
-async def save_image(upload: UploadFile | None) -> tuple[str | None, str | None]:
+async def save_image(upload: UploadFile | None, *, destination: Path = INPUT) -> tuple[str | None, str | None]:
     if not upload or not upload.filename:
         return None, None
     allowed = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
@@ -2168,7 +2469,8 @@ async def save_image(upload: UploadFile | None) -> tuple[str | None, str | None]
         raise HTTPException(400, "Image is larger than 20 MB")
     suffix = allowed[upload.content_type]
     name = f"upload_{uuid.uuid4().hex}{suffix}"
-    target = INPUT / name
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / name
     target.write_bytes(data)
     try:
         with Image.open(target) as image:
@@ -2312,17 +2614,87 @@ async def save_video(upload: UploadFile | None) -> tuple[str | None, str | None]
     if not ffprobe:
         target.unlink(missing_ok=True)
         raise HTTPException(503, "ffprobe is required to validate reference video")
-    try:
+    prepared = INPUT / f".reference_video_{uuid.uuid4().hex}.part.mp4"
+
+    def probe(path: Path) -> tuple[float, float, float, bool]:
         result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration:stream=codec_type",
-             "-of", "json", str(target)], capture_output=True, text=True, timeout=60,
+            [ffprobe, "-v", "error", "-show_entries",
+             "format=duration:stream=codec_type,duration,avg_frame_rate,r_frame_rate",
+             "-of", "json", str(path)], capture_output=True, text=True, timeout=60,
         )
-        payload = json.loads(result.stdout) if result.returncode == 0 else {}
-        duration = float(payload.get("format", {}).get("duration") or 0)
-        has_video = any(stream.get("codec_type") == "video" for stream in payload.get("streams", []))
-        if not has_video or not 2 <= duration <= 15:
-            raise ValueError
+        if result.returncode:
+            raise ValueError("ffprobe could not read the reference video")
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams", [])
+        video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+        if video is None:
+            raise ValueError("Reference media has no video stream")
+        container_duration = float(payload.get("format", {}).get("duration") or 0)
+        video_duration = float(video.get("duration") or container_duration)
+        if not all(math.isfinite(value) and value > 0 for value in (container_duration, video_duration)):
+            raise ValueError("Reference video duration is invalid")
+        rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/0"
+        try:
+            numerator, denominator = (float(part) for part in rate.split("/", 1))
+            frame_rate = numerator / denominator if denominator else 0.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            frame_rate = 0.0
+        return container_duration, video_duration, frame_rate, any(
+            stream.get("codec_type") == "audio" for stream in streams
+        )
+
+    try:
+        container_duration, video_duration, frame_rate, has_audio = probe(target)
+        if video_duration < 2 or video_duration > 15.125:
+            raise HTTPException(400, f"Reference video is {video_duration:.3f} seconds; it must be between 2 and 15 seconds")
+        if max(container_duration, video_duration) > 15:
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise HTTPException(503, "ffmpeg is required to prepare a 15-second reference video")
+            common = [ffmpeg, "-hide_banner", "-v", "error", "-n", "-i", str(target), "-map", "0:v:0"]
+            if has_audio:
+                common += ["-map", "0:a:0", "-af", "atrim=duration=15,asetpts=PTS-STARTPTS",
+                           "-c:a", "aac", "-b:a", "192k"]
+            attempts: list[list[str]] = []
+            if math.isfinite(frame_rate) and 1 <= frame_rate <= 120:
+                attempts.append(common + ["-frames:v", str(math.floor(15 * frame_rate)),
+                                          "-c:v", "copy", "-movflags", "+faststart", str(prepared)])
+            attempts.append(common + ["-vf", "trim=duration=15,setpts=PTS-STARTPTS",
+                                      "-fps_mode:v", "passthrough", "-c:v", "libx264",
+                                      "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                                      "-movflags", "+faststart", str(prepared)])
+            for command in attempts:
+                prepared.unlink(missing_ok=True)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                if result.returncode or not prepared.is_file():
+                    continue
+                try:
+                    prepared_duration, prepared_video_duration, _, _ = probe(prepared)
+                    if 14.75 <= prepared_video_duration <= 15.005 and prepared_duration <= 15.005:
+                        decoded = subprocess.run(
+                            [ffmpeg, "-v", "error", "-xerror", "-i", str(prepared),
+                             "-map", "0:v:0", "-f", "null", "-"],
+                            capture_output=True, timeout=60,
+                        )
+                        if decoded.returncode == 0:
+                            break
+                except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+                    pass
+            else:
+                raise HTTPException(400, "Could not prepare the reference video within the 15-second limit")
+            normalized = target.with_suffix(".mp4")
+            os.replace(prepared, normalized)
+            original = target
+            target = normalized
+            if normalized != original:
+                original.unlink(missing_ok=True)
+            name = target.name
+    except HTTPException:
+        prepared.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        raise
     except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        prepared.unlink(missing_ok=True)
         target.unlink(missing_ok=True)
         raise HTTPException(400, "Reference video must contain video and be between 2 and 15 seconds")
     return str(target), name
@@ -2364,6 +2736,8 @@ async def create_jobs(
     megapixels: float | None = Form(None), aspect_ratio: str | None = Form(None),
     encoder: str | None = Form(None), turbo_profile: str | None = Form(None),
     workflow_variant: str | None = Form(None),
+    attention_mode: str | None = Form(None),
+    ltx_quality: str | None = Form(None),
     seed: str = Form(""),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
@@ -2393,7 +2767,8 @@ async def create_jobs(
         generation = normalize_generation_settings(
             mode, engine, steps, resolution, encoder, turbo_profile,
             megapixels=megapixels, aspect_ratio=aspect_ratio,
-            workflow_variant=workflow_variant,
+            workflow_variant=workflow_variant, attention_mode=attention_mode,
+            ltx_quality=ltx_quality,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -2409,8 +2784,8 @@ async def create_jobs(
         raise HTTPException(400, "H3 Fused SLA is currently available for standalone jobs only")
     if mode == "text" and any((image, reference_audio, first_frame, last_frame)):
         raise HTTPException(400, "Text mode does not accept reference media")
-    if mode == "lip_sync" and (reference_images or reference_videos or reference_audio or last_frame):
-        raise HTTPException(400, "Lip-sync accepts an optional opening frame and one uploaded audio track")
+    if mode == "lip_sync" and (reference_images or reference_videos or reference_audio):
+        raise HTTPException(400, "Lip-sync accepts optional opening and closing frames and one uploaded audio track")
     if mode == "lip_sync" and not audio:
         raise HTTPException(400, "Lip-sync requires an uploaded audio track")
     if mode == "lip_sync" and no_audio:
@@ -2454,8 +2829,26 @@ async def create_jobs(
         raise HTTPException(400, "Reference mode supports up to 3 videos")
     if mode not in ("reference",) and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
-    if mode == "lip_sync" and generation.engine not in ("standard", "turbo", "fused_sla"):
-        raise HTTPException(400, "Lip-sync supports the Standard, Turbo or Fused SLA engine")
+    if mode == "lip_sync" and generation.engine not in ("standard", "turbo", "fused_sla", "ltx"):
+        raise HTTPException(400, "Lip-sync supports the Standard, Turbo, Fused SLA or LTX 2.5 engine")
+    if generation.engine == "ltx":
+        if mode == "lip_sync" and not first_frame:
+            raise HTTPException(400, "LTX 2.5 lip-sync needs an opening image; a face close-up works best")
+        if mode == "lip_sync" and last_frame:
+            raise HTTPException(400, "LTX 2.5 lip-sync uses the opening image only")
+        if not LTX_DURATION_RANGE[0] <= duration <= LTX_DURATION_RANGE[1]:
+            raise HTTPException(400, "LTX 2.5 supports 1 to 10 seconds")
+        if connected:
+            raise HTTPException(400, "LTX 2.5 is available for standalone jobs only")
+        if mode == "reference":
+            sheets = len(reference_images) + (1 if image else 0)
+            if sheets != 1 or reference_videos or reference_audio:
+                raise HTTPException(400, "LTX 2.5 reference mode takes exactly one reference sheet image, no videos or audio")
+            if not (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists():
+                raise HTTPException(409, "LTX 2.5 reference mode needs the Ingredients IC-LoRA: " + LTX_INGREDIENTS_LORA)
+        missing_ltx = [name for folder, name in LTX_MODEL_FILES if not (MODELS / folder / name).exists()]
+        if missing_ltx or not LTX_WORKFLOW.exists():
+            raise HTTPException(409, "LTX 2.5 is not fully installed: " + ", ".join(missing_ltx or [LTX_WORKFLOW.name]))
     if mode == "lip_sync" and generation.encoder != "native":
         raise HTTPException(400, "Lip-sync uses the native 32B encoder")
     if mode == "lip_sync" and batch:
@@ -2464,8 +2857,6 @@ async def create_jobs(
         raise HTTPException(409, "Turbo v4 is not installed yet")
     if mode == "reference" and generation.engine == "turbo" and not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
         raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
-    if mode == "reference" and duration > 5 and not REFERENCE_10S_MARKER.exists():
-        raise HTTPException(409, "Reference mode above 5 seconds is not ready")
     prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
@@ -2546,23 +2937,23 @@ async def create_jobs(
             if connected:
                 db.execute(
                     """INSERT INTO jobs
-                       (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,
+                       (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,attention_mode,encoder,steps,width,height,megapixels,aspect_ratio,seed,
                         sequence_id,sequence_index,sequence_total,status,position,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
-                    (job_id, text, "text", duration, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.encoder,
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)""",
+                    (job_id, text, "text", duration, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.attention_mode, generation.encoder,
                      generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                      job_seed, sequence_id, index + 1, len(prompts), position, now, now),
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,audio_start,audio_duration,engine,workflow_variant,turbo_profile,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,audio_start,audio_duration,engine,workflow_variant,turbo_profile,attention_mode,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    source_audio_path,source_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.encoder,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.attention_mode, generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
@@ -2735,6 +3126,7 @@ async def delete_job(request: Request, job_id: str):
                 Path(path).unlink(missing_ok=True)
     if output_path:
         output_path.unlink(missing_ok=True)
+    _last_frame_target("job", job_id).unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -2775,9 +3167,74 @@ async def delete_sequence(request: Request, sequence_id: str):
         if sequence["kind"] == "connected":
             db.execute("DELETE FROM jobs WHERE sequence_id=?", (sequence_id,))
         db.execute("DELETE FROM sequences WHERE id=?", (sequence_id,))
-    for path in paths:
-        Path(path).unlink(missing_ok=True)
+        for path in paths:
+            Path(path).unlink(missing_ok=True)
+    _last_frame_target("sequence", sequence_id).unlink(missing_ok=True)
     return {"ok": True}
+
+
+def _last_frame_target(source_type: str, source_id: str) -> Path:
+    """Return a private, deterministic path for an extracted generated frame."""
+    safe_id = "".join(character if character.isalnum() or character in "-_" else "_" for character in source_id)
+    return EXTRACTED_LAST_FRAMES / f"{source_type}_{safe_id}.png"
+
+
+def _completed_generated_asset(source_type: str, source_id: str) -> tuple[dict[str, Any], Path]:
+    if source_type == "job":
+        asset = get_job(source_id, public=False)
+    elif source_type == "sequence":
+        asset = get_sequence(source_id, public=False)
+    else:
+        raise HTTPException(404, "Generated video not found")
+    if not asset or asset.get("status") != "completed":
+        raise HTTPException(404, "Generated video not found")
+    path = resolve_asset_path(source_type, source_id)
+    if not path:
+        raise HTTPException(404, "Generated video file is missing")
+    return asset, path
+
+
+async def _extract_generated_last_frame(source_type: str, source_id: str) -> dict[str, Any]:
+    asset, video_path = _completed_generated_asset(source_type, source_id)
+    width = int(asset.get("width") or 0)
+    height = int(asset.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(422, "Generated video dimensions are unavailable")
+    target = _last_frame_target(source_type, source_id)
+    temporary = target.with_name(f"{target.stem}.tmp.png")
+    try:
+        await asyncio.to_thread(extract_last_frame, video_path, temporary, width, height)
+        temporary.replace(target)
+    except (OSError, RuntimeError, ValueError) as exc:
+        temporary.unlink(missing_ok=True)
+        raise HTTPException(422, f"Could not extract the last frame: {exc}") from exc
+    return {
+        "source_type": source_type,
+        "source_id": source_id,
+        "image_url": f"/api/{source_type}s/{source_id}/last-frame",
+        "filename": target.name,
+        "width": width,
+        "height": height,
+    }
+
+
+def _serve_generated_last_frame(source_type: str, source_id: str) -> FileResponse:
+    _completed_generated_asset(source_type, source_id)
+    target = _last_frame_target(source_type, source_id)
+    if not target.is_file():
+        raise HTTPException(404, "Extract the last frame first")
+    return FileResponse(target, media_type="image/png", filename=target.name)
+
+
+@app.post("/api/jobs/{job_id}/last-frame")
+async def extract_job_last_frame(request: Request, job_id: str):
+    require_csrf(request)
+    return await _extract_generated_last_frame("job", job_id)
+
+
+@app.get("/api/jobs/{job_id}/last-frame")
+async def job_last_frame(job_id: str):
+    return _serve_generated_last_frame("job", job_id)
 
 
 @app.get("/api/jobs/{job_id}/video")
@@ -2852,6 +3309,17 @@ async def sequence_video(sequence_id: str):
     if not path:
         raise HTTPException(404, "Joined video file is missing")
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@app.post("/api/sequences/{sequence_id}/last-frame")
+async def extract_sequence_last_frame(request: Request, sequence_id: str):
+    require_csrf(request)
+    return await _extract_generated_last_frame("sequence", sequence_id)
+
+
+@app.get("/api/sequences/{sequence_id}/last-frame")
+async def sequence_last_frame(sequence_id: str):
+    return _serve_generated_last_frame("sequence", sequence_id)
 
 
 def _review_paths(production_id: str) -> tuple[Path, Path]:

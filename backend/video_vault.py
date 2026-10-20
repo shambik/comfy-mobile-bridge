@@ -23,6 +23,7 @@ from .db import connect, now_iso
 
 MAX_VIDEO_BYTES = 500 * 1024 * 1024
 READ_CHUNK_BYTES = 1024 * 1024
+FILE_LOCK_RETRIES = 10
 
 CONTENT_TYPE_SUFFIXES = {
     "video/mp4": ".mp4",
@@ -212,19 +213,20 @@ def video_file(item_id: str) -> tuple[dict[str, Any], Path] | None:
 
 
 def _unlink_with_retry(path: Path) -> None:
-    last_error: PermissionError | None = None
-    for attempt in range(8):
+    for attempt in range(FILE_LOCK_RETRIES):
         try:
             path.unlink()
             return
         except FileNotFoundError:
             return
-        except PermissionError as exc:
-            last_error = exc
-            if attempt < 7:
-                time.sleep(0.25)
-    if last_error:
-        raise last_error
+        except OSError as exc:
+            # Windows reports an open media preview as WinError 32. It is
+            # commonly surfaced as PermissionError. Retry only the transient
+            # sharing/lock errors; a real permissions or path error must still
+            # reach the API so the database row is preserved.
+            if getattr(exc, "winerror", None) not in {32, 33} or attempt == FILE_LOCK_RETRIES - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
 
 
 def delete_video_item(item_id: str) -> dict[str, Any]:
