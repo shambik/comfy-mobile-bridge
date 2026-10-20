@@ -10,10 +10,11 @@ import requests
 
 
 BASE = "http://127.0.0.1:8787"
-STATE = Path(r"D:\repository\state\e2e_music_video_belly_fresh_05")
-SONG = Path(r"C:\Users\<user>\Downloads\Belly of the Beast.wav")
-INITIAL = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\review_opening\opening_frame_fresh_04b.png")
-ROVER = Path(r"D:\repository\state\e2e_music_video_belly_fresh_04\references\rover_anchor_fresh_01.png")
+REPO = Path(__file__).resolve().parents[1]
+STATE = REPO / "state" / "e2e_music_video_belly_fresh_05"
+SONG = Path.home() / "Downloads" / "Belly of the Beast.wav"
+INITIAL = REPO / "state" / "e2e_music_video_belly_fresh_04" / "review_opening" / "opening_frame_fresh_04b.png"
+ROVER = REPO / "state" / "e2e_music_video_belly_fresh_04" / "references" / "rover_anchor_fresh_01.png"
 
 SHOTS = [
     (5, "INTRO: restrained opening at a hot concrete corner at night. Kairo and Mally stand low in deep shade, alert and silent, subtle heat haze and distant street atmosphere. No car yet, no weapon, no police action."),

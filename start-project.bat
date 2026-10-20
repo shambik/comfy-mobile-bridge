@@ -62,10 +62,17 @@ if errorlevel 1 (
     echo Bridge is already listening on port %BRIDGE_PORT%. Skipping it.
 )
 
+set "TAILSCALE_HOST="
+for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%REPO%scripts\tailscale-host.ps1"`) do set "TAILSCALE_HOST=%%H"
+
 echo.
 echo Project launch requested.
 echo Local app: http://127.0.0.1:%BRIDGE_PORT%/
-echo Tailscale: https://<your-pc>.<your-tailnet>.ts.net/
+if defined TAILSCALE_HOST (
+    echo Tailscale: https://%TAILSCALE_HOST%/
+) else (
+    echo Tailscale: hostname not set. Add tailscale.hostname to config.local.json.
+)
 echo.
 timeout /t 5 /nobreak >nul
 exit /b 0
