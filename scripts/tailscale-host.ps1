@@ -44,7 +44,7 @@ try {
         } catch { $detected = '' }
     }
     if (-not $detected -and -not $NoPrompt) {
-        $detected = (Read-Host 'Tailscale hostname for this PC (for example my-pc.your-tailnet.ts.net, leave empty to skip)').Trim()
+        $detected = (Read-Host 'Tailscale hostname for this PC (the full machine name shown in the Tailscale admin console, leave empty to skip)').Trim()
     }
     if ($detected) {
         Save-Hostname $detected
