@@ -5,7 +5,7 @@
     "os": "Windows 10/11",
     "architecture": "x64",
     "python": "3.12",
-    "node": "22",
+    "node": "22 or newer",
     "gpu": "NVIDIA CUDA GPU with at least 8 GiB VRAM",
     "ram_gib_min": 32,
     "free_disk_gib_min": 100

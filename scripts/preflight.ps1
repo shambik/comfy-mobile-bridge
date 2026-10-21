@@ -51,7 +51,7 @@ try {
     $nodeVersion = (& node --version 2>$null).Trim()
     $nodeMajor = 0
     if ($nodeVersion -match '^v(\d+)') { $nodeMajor = [int]$Matches[1] }
-    Add-Check 'node_22' ($nodeMajor -eq 22) $nodeVersion
+    Add-Check 'node_22_or_newer' ($nodeMajor -ge 22) $nodeVersion
 
     if (-not $SkipGpu) {
         $gpuOutput = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null
