@@ -38,6 +38,9 @@ def _create_jobs_table(db):
         workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla')),
+        ltx_reference_model TEXT CHECK(ltx_reference_model IS NULL OR ltx_reference_model IN ('2.5','2.3')),
+        ltx_sharp_decode INTEGER NOT NULL DEFAULT 0,
+        ltx_calm_sampler INTEGER NOT NULL DEFAULT 0,
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
         steps INTEGER NOT NULL,
         width INTEGER NOT NULL,
@@ -185,7 +188,8 @@ def _rebuild_jobs_table(db):
     _create_jobs_table(db)
 
     columns = [
-        "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "workflow_variant", "turbo_profile", "attention_mode", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+        "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "workflow_variant", "turbo_profile", "attention_mode",
+        "ltx_reference_model", "ltx_sharp_decode", "ltx_calm_sampler", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
@@ -200,6 +204,9 @@ def _rebuild_jobs_table(db):
         "workflow_variant": "'direct'",
         "turbo_profile": "'v1'",
         "attention_mode": "'standard'",
+        "ltx_reference_model": "NULL",
+        "ltx_sharp_decode": "0",
+        "ltx_calm_sampler": "0",
         "encoder": "'native'",
         "steps": "CASE WHEN mode='reference' THEN 20 ELSE 4 END",
         "width": "736",
@@ -284,6 +291,18 @@ def init_db():
                         "ALTER TABLE jobs ADD COLUMN attention_mode TEXT NOT NULL DEFAULT 'standard' "
                         "CHECK(attention_mode IN ('standard','sage','sla','sage_sla'))"
                     )
+                columns = _table_columns(db)
+                # LTX reference model and opt-in decode/sampler fixes: plain
+                # column adds, so old jobs keep the defaults (unset / off).
+                if "ltx_reference_model" not in columns:
+                    db.execute(
+                        "ALTER TABLE jobs ADD COLUMN ltx_reference_model TEXT "
+                        "CHECK(ltx_reference_model IS NULL OR ltx_reference_model IN ('2.5','2.3'))"
+                    )
+                if "ltx_sharp_decode" not in columns:
+                    db.execute("ALTER TABLE jobs ADD COLUMN ltx_sharp_decode INTEGER NOT NULL DEFAULT 0")
+                if "ltx_calm_sampler" not in columns:
+                    db.execute("ALTER TABLE jobs ADD COLUMN ltx_calm_sampler INTEGER NOT NULL DEFAULT 0")
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, position)")
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sequence ON jobs(sequence_id, sequence_index)")
         elif not table:

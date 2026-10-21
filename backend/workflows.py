@@ -3,8 +3,11 @@ from copy import deepcopy
 
 from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      FL2VA_MODEL, FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL,
-                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, LTX_AUDIO_VAE,
-                     LTX_INGREDIENTS_LORA, LTX_TEXT_ENCODER, LTX_TRANSFORMER,
+                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, LTX23_CHECKPOINT,
+                     LTX23_DISTILLED_LORA, LTX23_INGREDIENTS_LORA,
+                     LTX23_LATENT_UPSCALER, LTX23_TEXT_ENCODER,
+                     LTX25_INGREDIENTS_LORA, LTX25_LATENT_UPSCALER, LTX_AUDIO_VAE,
+                     LTX_TEXT_ENCODER, LTX_TRANSFORMER,
                      LTX_VIDEO_VAE, LTX_WORKFLOW,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, TEXT_ENCODER, TURBO_LORAS,
                      VIDEO_VAE)
@@ -817,16 +820,21 @@ def ltx_video_workflow(
     first_frame_name: str | None = None,
     last_frame_name: str | None = None,
     include_audio: bool = True,
-    reference_image_name: str | None = None,
+    sharp_decode: bool = False,
+    calm_sampler: bool = False,
 ) -> dict:
     """LTX-2.5 text/image-to-video with generated audio, one distilled pass.
 
     Modes: "text" (no image), "opening"/"frames" (first frame in place),
-    "closing"/"frames" (last frame pinned with LTXVAddGuide at frame -1),
-    "reference" (one reference sheet through the Ingredients IC-LoRA,
-    following Lightricks' official Ingredients graph).
+    "closing"/"frames" (last frame pinned with LTXVAddGuide at frame -1).
+    Reference mode has its own builder, ltx_reference_workflow.
     LTX always generates audio with the video; include_audio=False only
     leaves it out of the saved file.
+
+    sharp_decode swaps the temporal-tiled decode (whose chunk joins soften a
+    few frames every two seconds) for LTX's spatial-only tiled decode;
+    calm_sampler swaps euler_ancestral for euler, which adds no fresh noise
+    per step and flickers less. Both are opt-in.
     """
     if width % 32 or height % 32:
         raise ValueError("LTX width and height must be multiples of 32")
@@ -836,11 +844,7 @@ def ltx_video_workflow(
         raise ValueError(f"{mode} mode needs an opening image")
     if mode == "closing" and not last_frame_name:
         raise ValueError("Closing mode needs a closing image")
-    if mode == "reference" and not reference_image_name:
-        raise ValueError("Reference mode needs a reference sheet image")
-    if mode != "reference" and reference_image_name:
-        raise ValueError("Only reference mode takes a reference sheet")
-    if mode not in ("text", "opening", "closing", "frames", "reference"):
+    if mode not in ("text", "opening", "closing", "frames"):
         raise ValueError(f"Unsupported LTX mode: {mode}")
     frames = ltx_frame_count(duration)
     nodes = {
@@ -869,20 +873,6 @@ def ltx_video_workflow(
             "vae": ["3", 0], "image": prepared_image("10", first_frame_name),
             "latent": video_latent, "strength": 0.7, "bypass": False}}
         video_latent = ["12", 0]
-    model = ["1", 0]
-    if mode == "reference":
-        # Official Ingredients graph: IC-LoRA on the model, the sheet repeated
-        # as a guide clip at the IC-LoRA's own grid, guide frames cropped after.
-        nodes["50"] = {"class_type": "LTXICLoRALoaderModelOnly", "inputs": {
-            "model": ["1", 0], "lora_name": LTX_INGREDIENTS_LORA, "strength_model": 1.0}}
-        model = ["50", 0]
-        nodes["51"] = {"class_type": "RepeatImageBatch", "inputs": {
-            "image": prepared_image("50", reference_image_name), "amount": frames}}
-        nodes["52"] = {"class_type": "LTXAddVideoICLoRAGuide", "inputs": {
-            "positive": positive, "negative": negative, "vae": ["3", 0], "latent": video_latent,
-            "image": ["51", 0], "frame_idx": 0, "strength": 1.0, "latent_downscale_factor": ["50", 1],
-            "crop": "disabled", "use_tiled_encode": False, "tile_size": 256, "tile_overlap": 64}}
-        positive, negative, video_latent = ["52", 0], ["52", 1], ["52", 2]
     last_frame_guide = bool(last_frame_name and mode in ("closing", "frames"))
     if last_frame_guide:
         nodes["22"] = {"class_type": "LTXVAddGuide", "inputs": {
@@ -892,24 +882,165 @@ def ltx_video_workflow(
     nodes.update({
         "30": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": video_latent, "audio_latent": ["9", 0]}},
         "31": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-        "32": {"class_type": "CFGGuider", "inputs": {"model": model, "positive": positive, "negative": negative, "cfg": 1.0}},
-        "33": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler_ancestral"}},
+        "32": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": positive, "negative": negative, "cfg": 1.0}},
+        "33": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler" if calm_sampler else "euler_ancestral"}},
         "34": {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX_SIGMAS}},
         "35": {"class_type": "SamplerCustomAdvanced", "inputs": {
             "noise": ["31", 0], "guider": ["32", 0], "sampler": ["33", 0], "sigmas": ["34", 0], "latent_image": ["30", 0]}},
         "36": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["35", 0]}},
     })
     decoded_video = ["36", 0]
-    if last_frame_guide or mode == "reference":
-        # Drop the appended guide frames before decoding.
+    if last_frame_guide:
+        # Drop the appended guide frame before decoding.
         nodes["37"] = {"class_type": "LTXVCropGuides", "inputs": {"positive": positive, "negative": negative, "latent": ["36", 0]}}
         decoded_video = ["37", 2]
-    nodes["40"] = {"class_type": "VAEDecodeTiled", "inputs": {
-        "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 16,
-        "samples": decoded_video, "vae": ["3", 0]}}
+    if sharp_decode:
+        nodes["40"] = _ltx_seam_free_decode(decoded_video, ["3", 0], frames, width * height)
+    else:
+        nodes["40"] = {"class_type": "VAEDecodeTiled", "inputs": {
+            "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 16,
+            "samples": decoded_video, "vae": ["3", 0]}}
     video_inputs = {"images": ["40", 0], "fps": float(LTX_FPS)}
     if include_audio:
         nodes["41"] = {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": ["36", 1], "audio_vae": ["4", 0]}}
+        video_inputs["audio"] = ["41", 0]
+    nodes["42"] = {"class_type": "CreateVideo", "inputs": video_inputs}
+    nodes["43"] = {"class_type": "SaveVideo", "inputs": {"video": ["42", 0], "filename_prefix": prefix, "format": "auto", "codec": "auto"}}
+    return nodes
+
+
+def _ltx_seam_free_decode(samples: list, vae: list, frames: int, pixels: int) -> dict:
+    """LTX's spatial-only tiled decode: the whole clip in one temporal pass.
+
+    Lab peaks on the RTX 3080: 4x2 tiles at 1600x896 / 121 frames used 7.9 GB,
+    6x4 tiles at 1536x896 / 241 frames used 6.6 GB. Longer or larger clips
+    get the smaller 6x4 tiles.
+    """
+    small = frames <= 121 and pixels <= 1600 * 896
+    return {"class_type": "LTXVTiledVAEDecode", "inputs": {
+        "vae": vae, "latents": samples, "horizontal_tiles": 4 if small else 6,
+        "vertical_tiles": 2 if small else 4, "overlap": 1, "last_frame_fix": False}}
+
+
+# The Ingredients IC-LoRA grid (the only size Lightricks trained) and the x2
+# refine schedule shared by both reference recipes.
+LTX_REFERENCE_GRID = (768, 448)
+LTX_REFINE_SIGMAS = "0.85, 0.7250, 0.4219, 0.0"
+LTX_INGREDIENTS_NEGATIVE = "worst quality, inconsistent motion, blurry, jittery, distorted"
+# LTX 2.5 tends to open on the sheet itself; this line (lab R18) and the
+# matching negative terms keep the clip inside the scene from frame one.
+LTX25_REFERENCE_OPENING = (
+    "The video opens directly inside the scene from the very first frame and never shows "
+    "the reference sheet, its panels or a grey studio background."
+)
+LTX25_REFERENCE_NEGATIVE = "reference sheet, collage, split screen, panels, grey studio background, " + LTX_INGREDIENTS_NEGATIVE
+
+
+def ltx25_reference_prompt(prompt: str) -> str:
+    """Put the opening line where the target description starts (lab R18/R22).
+
+    The text after the line keeps exactly one separating space: in the lab a
+    doubled space alone was enough to flip a clean seed into opening on the sheet.
+    """
+    for marker, joiner in (("### Target Description\n", ""), ("Generated video:", " ")):
+        if marker in prompt:
+            head, tail = prompt.split(marker, 1)
+            return f"{head}{marker}{joiner}{LTX25_REFERENCE_OPENING} {tail.lstrip(' ')}"
+    return f"{LTX25_REFERENCE_OPENING} {prompt.lstrip(' ')}"
+
+
+def ltx_reference_workflow(
+    model: str,
+    prompt: str,
+    duration: float,
+    seed: int,
+    prefix: str,
+    sheet_name: str,
+    include_audio: bool = True,
+) -> dict:
+    """LTX reference mode, built exactly as tested in the speed lab.
+
+    One reference sheet goes through Lightricks' Ingredients IC-LoRA on the
+    768x448 grid it was trained on (letterboxed, never cropped). The latent is
+    then upscaled x2, refined in three steps without the IC-LoRA, and decoded
+    seam-free to 1536x896.
+
+    "2.5" (lab R20-R22): LTX-2.5 distilled with the 2.5 Ingredients LoRA,
+    euler_ancestral, plus the opening line that stops 2.5 showing the sheet.
+    "2.3" (lab R9-R14): LTX-2.3 dev fp8 with the distilled LoRA at 0.5 and
+    the 2.3 Ingredients LoRA, euler.
+    """
+    if model not in ("2.5", "2.3"):
+        raise ValueError("LTX reference model must be 2.5 or 2.3")
+    if not sheet_name:
+        raise ValueError("Reference mode needs a reference sheet image")
+    frames = ltx_frame_count(duration)
+    grid_w, grid_h = LTX_REFERENCE_GRID
+    if model == "2.5":
+        nodes = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": LTX_TRANSFORMER, "weight_dtype": "default"}},
+            "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": LTX_TEXT_ENCODER, "type": "ltxv", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_VIDEO_VAE}},
+            "4": {"class_type": "VAELoader", "inputs": {"vae_name": LTX_AUDIO_VAE}},
+            "50": {"class_type": "LTXICLoRALoaderModelOnly", "inputs": {
+                "model": ["1", 0], "lora_name": LTX25_INGREDIENTS_LORA, "strength_model": 1.0}},
+        }
+        base_model, clip, video_vae, audio_vae = ["1", 0], ["2", 0], ["3", 0], ["4", 0]
+        text, negative_text = ltx25_reference_prompt(prompt), LTX25_REFERENCE_NEGATIVE
+        sampler, upscaler = "euler_ancestral", LTX25_LATENT_UPSCALER
+    else:
+        nodes = {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": LTX23_CHECKPOINT}},
+            "2": {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": ["1", 0], "lora_name": LTX23_DISTILLED_LORA, "strength_model": 0.5}},
+            "50": {"class_type": "LTXICLoRALoaderModelOnly", "inputs": {
+                "model": ["2", 0], "lora_name": LTX23_INGREDIENTS_LORA, "strength_model": 1.0}},
+            "4": {"class_type": "LTXAVTextEncoderLoader", "inputs": {
+                "text_encoder": LTX23_TEXT_ENCODER, "ckpt_name": LTX23_CHECKPOINT, "device": "default"}},
+            "12": {"class_type": "LTXVAudioVAELoader", "inputs": {"ckpt_name": LTX23_CHECKPOINT}},
+        }
+        base_model, clip, video_vae, audio_vae = ["2", 0], ["4", 0], ["1", 2], ["12", 0]
+        text, negative_text = prompt, LTX_INGREDIENTS_NEGATIVE
+        sampler, upscaler = "euler", LTX23_LATENT_UPSCALER
+    nodes.update({
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": text, "clip": clip}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": negative_text, "clip": clip}},
+        "7": {"class_type": "LTXVConditioning", "inputs": {"positive": ["5", 0], "negative": ["6", 0], "frame_rate": float(LTX_FPS)}},
+        "8": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": grid_w, "height": grid_h, "length": frames, "batch_size": 1}},
+        "9": {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": frames, "frame_rate": LTX_FPS, "batch_size": 1, "audio_vae": audio_vae}},
+        "53": {"class_type": "LoadImage", "inputs": {"image": sheet_name}},
+        "54": {"class_type": "ResizeAndPadImage", "inputs": {
+            "image": ["53", 0], "target_width": grid_w, "target_height": grid_h,
+            "padding_color": "black", "interpolation": "lanczos"}},
+        "51": {"class_type": "RepeatImageBatch", "inputs": {"image": ["54", 0], "amount": frames}},
+        "52": {"class_type": "LTXAddVideoICLoRAGuide", "inputs": {
+            "positive": ["7", 0], "negative": ["7", 1], "vae": video_vae, "latent": ["8", 0],
+            "image": ["51", 0], "frame_idx": 0, "strength": 1.0, "latent_downscale_factor": ["50", 1],
+            "crop": "disabled", "use_tiled_encode": False, "tile_size": 256, "tile_overlap": 64}},
+        "30": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["52", 2], "audio_latent": ["9", 0]}},
+        "31": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "32": {"class_type": "CFGGuider", "inputs": {"model": ["50", 0], "positive": ["52", 0], "negative": ["52", 1], "cfg": 1.0}},
+        "33": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler}},
+        "34": {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX_SIGMAS}},
+        "35": {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": ["31", 0], "guider": ["32", 0], "sampler": ["33", 0], "sigmas": ["34", 0], "latent_image": ["30", 0]}},
+        "36": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["35", 0]}},
+        "37": {"class_type": "LTXVCropGuides", "inputs": {"positive": ["52", 0], "negative": ["52", 1], "latent": ["36", 0]}},
+        # x2 latent upscale, then a three-step refine on the base model (no IC-LoRA).
+        "70": {"class_type": "LatentUpscaleModelLoader", "inputs": {"model_name": upscaler}},
+        "71": {"class_type": "LTXVLatentUpsampler", "inputs": {"samples": ["37", 2], "upscale_model": ["70", 0], "vae": video_vae}},
+        "72": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["71", 0], "audio_latent": ["36", 1]}},
+        "73": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed + 1}},
+        "74": {"class_type": "CFGGuider", "inputs": {"model": base_model, "positive": ["37", 0], "negative": ["37", 1], "cfg": 1.0}},
+        "75": {"class_type": "ManualSigmas", "inputs": {"sigmas": LTX_REFINE_SIGMAS}},
+        "76": {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": ["73", 0], "guider": ["74", 0], "sampler": ["33", 0], "sigmas": ["75", 0], "latent_image": ["72", 0]}},
+        "77": {"class_type": "LTXVSeparateAVLatent", "inputs": {"av_latent": ["76", 0]}},
+    })
+    nodes["40"] = _ltx_seam_free_decode(["77", 0], video_vae, frames, grid_w * grid_h * 4)
+    video_inputs = {"images": ["40", 0], "fps": float(LTX_FPS)}
+    if include_audio:
+        nodes["41"] = {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": ["77", 1], "audio_vae": audio_vae}}
         video_inputs["audio"] = ["41", 0]
     nodes["42"] = {"class_type": "CreateVideo", "inputs": video_inputs}
     nodes["43"] = {"class_type": "SaveVideo", "inputs": {"video": ["42", 0], "filename_prefix": prefix, "format": "auto", "codec": "auto"}}

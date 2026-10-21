@@ -11,6 +11,7 @@ import { BotImagesPage } from './bot-images'
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
 type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx'
 type LtxQuality = 'balanced' | 'high'
+type LtxReferenceModel = '2.5' | '2.3'
 type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
@@ -36,7 +37,7 @@ type RuntimeMetadata = {
 type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
-  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
+  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; ltx_reference_model?: LtxReferenceModel | null; ltx_sharp_decode?: boolean | number; ltx_calm_sampler?: boolean | number; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
@@ -177,6 +178,9 @@ type Preferences = {
   turboProfile: TurboProfile
   attentionMode: AttentionMode
   ltxQuality: LtxQuality
+  ltxReferenceModel: LtxReferenceModel
+  ltxSharpDecode: boolean
+  ltxCalmSampler: boolean
   turboSteps: number
   fusedSlaSteps: number
   fusedWorkflow: FusedWorkflow
@@ -187,7 +191,7 @@ type Preferences = {
   megapixels: number
 }
 
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
@@ -199,6 +203,9 @@ function readPreferences(): Preferences {
       turboProfile: saved.turboProfile === 'v4' ? 'v4' : 'v1',
       attentionMode: isAttentionMode(saved.attentionMode) ? saved.attentionMode : 'standard',
       ltxQuality: saved.ltxQuality === 'high' ? 'high' : 'balanced',
+      ltxReferenceModel: saved.ltxReferenceModel === '2.3' ? '2.3' : '2.5',
+      ltxSharpDecode: saved.ltxSharpDecode === true,
+      ltxCalmSampler: saved.ltxCalmSampler === true,
       turboSteps: Number.isInteger(saved.turboSteps) && saved.turboSteps! >= 4 && saved.turboSteps! <= 12 ? saved.turboSteps! : 4,
       fusedSlaSteps: Number.isInteger(saved.fusedSlaSteps) && saved.fusedSlaSteps! >= 4 && saved.fusedSlaSteps! <= 8 ? saved.fusedSlaSteps! : 4,
       fusedWorkflow: saved.fusedWorkflow === 'i2v_fl2v' || saved.fusedWorkflow === 'ref2va' || saved.fusedWorkflow === 'ref2va_multiref' || saved.fusedWorkflow === 'derope' || saved.fusedWorkflow === 'dyrope' ? saved.fusedWorkflow : 'direct',
@@ -242,10 +249,10 @@ function AudioDropzone({ file, onChange, label = 'הוסף אודיו לרפרנ
   </label>
 }
 
-function MultiImageDropzone({ files, onChange }: { files: File[]; onChange: (files: File[]) => void }) {
+function MultiImageDropzone({ files, onChange, single = false }: { files: File[]; onChange: (files: File[]) => void; single?: boolean }) {
   return <label className={`dropzone multi-dropzone ${files.length ? 'has-image' : ''}`}>
     <input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={event => onChange(Array.from(event.target.files || []))} />
-    {files.length ? <><ImageIcon size={24} /><strong>{files.length} תמונות רפרנס</strong><span>עד 9 תמונות · JPG, PNG או WebP</span><button type="button" aria-label="הסרת תמונות" onClick={event => { event.preventDefault(); event.stopPropagation(); onChange([]) }}><X size={17} /></button></> : <><ImageIcon size={24} /><strong>הוסף תמונות רפרנס</strong><span>אפשר לבחור עד 9 תמונות</span></>}
+    {files.length ? <><ImageIcon size={24} /><strong>{files.length} תמונות רפרנס</strong><span>{single ? 'דף רפרנס אחד' : 'עד 9 תמונות'} · JPG, PNG או WebP</span><button type="button" aria-label="הסרת תמונות" onClick={event => { event.preventDefault(); event.stopPropagation(); onChange([]) }}><X size={17} /></button></> : <><ImageIcon size={24} /><strong>{single ? 'הוסף דף רפרנס' : 'הוסף תמונות רפרנס'}</strong><span>{single ? 'תמונה אחת בלבד' : 'אפשר לבחור עד 9 תמונות'}</span></>}
   </label>
 }
 
@@ -666,6 +673,8 @@ function App() {
   const [fusedSlaReady, setFusedSlaReady] = useState(false)
   const [ltxReady, setLtxReady] = useState(false)
   const [ltxReferenceReady, setLtxReferenceReady] = useState(false)
+  const [ltx25ReferenceReady, setLtx25ReferenceReady] = useState(false)
+  const [ltx23ReferenceReady, setLtx23ReferenceReady] = useState(false)
   const [fusedDirectReady, setFusedDirectReady] = useState(false)
   const [fusedI2vReady, setFusedI2vReady] = useState(false)
   const [fusedRef2vaReady, setFusedRef2vaReady] = useState(false)
@@ -719,6 +728,8 @@ function App() {
       setFusedSlaReady(Boolean(data.fused_sla_ready))
       setLtxReady(Boolean(data.ltx_ready))
       setLtxReferenceReady(Boolean(data.ltx_reference_ready))
+      setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
+      setLtx23ReferenceReady(Boolean(data.ltx23_reference_ready))
       setFusedDirectReady(Boolean(data.fused_direct_ready))
       setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
       setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
@@ -743,6 +754,8 @@ function App() {
     if ('fused_sla_ready' in data) setFusedSlaReady(Boolean(data.fused_sla_ready))
     if ('ltx_ready' in data) setLtxReady(Boolean(data.ltx_ready))
     if ('ltx_reference_ready' in data) setLtxReferenceReady(Boolean(data.ltx_reference_ready))
+    if ('ltx25_reference_ready' in data) setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
+    if ('ltx23_reference_ready' in data) setLtx23ReferenceReady(Boolean(data.ltx23_reference_ready))
     if ('fused_direct_ready' in data) setFusedDirectReady(Boolean(data.fused_direct_ready))
     if ('fused_i2v_fl2v_ready' in data) setFusedI2vReady(Boolean(data.fused_i2v_fl2v_ready))
     if ('fused_ref2va_ready' in data) setFusedRef2vaReady(Boolean(data.fused_ref2va_ready))
@@ -1037,7 +1050,7 @@ function App() {
     ? 'standard'
     : preferences.engine === 'fused_sla' && !fusedSlaReady
         ? 'turbo'
-      : preferences.engine === 'ltx' && (!ltxReady || (mode === 'reference' && !ltxReferenceReady))
+      : preferences.engine === 'ltx' && (mode === 'reference' ? !ltxReferenceReady : !ltxReady)
         ? 'turbo'
       : preferences.engine
   const allowedAttentionModes = ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
@@ -1071,7 +1084,12 @@ function App() {
     : effectiveEngine === 'turbo'
     ? preferences.turboProfile === 'v4' ? { min: 4, max: 8, recommended: 6 } : { min: 4, max: 12, recommended: 4 }
     : effectiveEngine === 'spectrum' ? { min: 8, max: 30, recommended: 16 } : { min: 8, max: 30, recommended: 20 }
-  const ltxSize = LTX_SIZES[preferences.ltxQuality][preferences.aspect]
+  const ltxReference = effectiveEngine === 'ltx' && mode === 'reference'
+  const effectiveLtxReferenceModel: LtxReferenceModel = preferences.ltxReferenceModel === '2.3'
+    ? ltx23ReferenceReady ? '2.3' : '2.5'
+    : ltx25ReferenceReady ? '2.5' : '2.3'
+  const ltxVideoOptions = effectiveEngine === 'ltx' && LTX_OPTION_MODES.includes(mode)
+  const ltxSize = ltxReference ? LTX_REFERENCE_SIZE : LTX_SIZES[preferences.ltxQuality][preferences.aspect]
   const calculatedResolution = effectiveEngine === 'ltx'
     ? { id: `${ltxSize[0]}x${ltxSize[1]}`, width: ltxSize[0], height: ltxSize[1] }
     : dimensionsFor(preferences.aspect, preferences.megapixels)
@@ -1330,6 +1348,9 @@ function App() {
         turboProfile: job.turbo_profile || current.turboProfile,
         attentionMode: isAttentionMode(job.attention_mode) ? job.attention_mode : 'standard',
         ltxQuality: jobEngine === 'ltx' ? ltxQualityForSize(job.width, job.height) : current.ltxQuality,
+        ltxReferenceModel: job.ltx_reference_model === '2.3' || job.ltx_reference_model === '2.5' ? job.ltx_reference_model : current.ltxReferenceModel,
+        ltxSharpDecode: jobEngine === 'ltx' ? Boolean(job.ltx_sharp_decode) : current.ltxSharpDecode,
+        ltxCalmSampler: jobEngine === 'ltx' ? Boolean(job.ltx_calm_sampler) : current.ltxCalmSampler,
         turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
         fusedSlaSteps: jobEngine === 'fused_sla' ? Math.max(4, Math.min(8, job.steps)) : current.fusedSlaSteps,
         fusedWorkflow: jobEngine === 'fused_sla' && isFusedWorkflow(job.workflow_variant) ? job.workflow_variant : current.fusedWorkflow,
@@ -1496,7 +1517,7 @@ function App() {
             : fusedDyropeReady
 
   const selectEngine = (engine: Engine) => {
-    if (engine === 'ltx' && (!ltxReady || (mode === 'reference' && !ltxReferenceReady))) return
+    if (engine === 'ltx' && (mode === 'reference' ? !ltxReferenceReady : !ltxReady)) return
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
     if (engine === 'fused_sla' && (!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady && !fusedRef2vaMultirefReady))) return
@@ -1555,6 +1576,7 @@ function App() {
     if (mode === 'frames' && !openingFrame) return setMainError('generation', 'צריך לצרף פריים פותח')
     if (effectiveEngine === 'ltx' && mode === 'lip_sync' && !openingFrame) return setMainError('generation', 'LTX 2.5 צריך פריים פותח — עדיף close-up של הפנים')
     if (effectiveEngine === 'ltx' && (duration < 1 || duration > 10)) return setMainError('generation', 'LTX 2.5 תומך ב־1 עד 10 שניות')
+    if (ltxReference && duration > LTX_REFERENCE_MAX_SECONDS) return setMainError('generation', `LTX רפרנס תומך עד ${LTX_REFERENCE_MAX_SECONDS} שניות — רק זה נבדק ועבד`)
     if (mode === 'lip_sync' && effectiveEngine !== 'ltx' && !audioLockReady) return setMainError('generation', 'Native AudioLock עדיין לא נטען ב־ComfyUI')
     if (mode === 'lip_sync' && !lipSyncAudio) return setMainError('generation', 'צריך לצרף אודיו לדיבוב')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setMainError('generation', 'צריך לצרף לפחות תמונת או סרטון רפרנס')
@@ -1577,6 +1599,8 @@ function App() {
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
       form.set('attention_mode', effectiveAttention)
       if (effectiveEngine === 'ltx') form.set('ltx_quality', preferences.ltxQuality)
+      if (ltxReference) { form.set('ltx_reference_model', effectiveLtxReferenceModel); form.set('aspect_ratio', '16:9') }
+      if (ltxVideoOptions) { form.set('ltx_sharp_decode', String(preferences.ltxSharpDecode)); form.set('ltx_calm_sampler', String(preferences.ltxCalmSampler)) }
       if (mode === 'frames') {
         form.set('first_frame', openingFrame!)
         if (closingFrame) form.set('last_frame', closingFrame)
@@ -1842,18 +1866,20 @@ function App() {
       </div>}
       {mode === 'reference' && <>
         <div className="reference-grid">
-          <MultiImageDropzone files={referenceImages} onChange={setReferenceImages} />
-          <VideoDropzone files={referenceVideos} onChange={setReferenceVideos} />
-          <AudioDropzone file={referenceAudio} onChange={setReferenceAudio} disabled={isRecording} />
+          <MultiImageDropzone files={referenceImages} onChange={setReferenceImages} single={effectiveEngine === 'ltx'} />
+          {effectiveEngine !== 'ltx' && <VideoDropzone files={referenceVideos} onChange={setReferenceVideos} />}
+          {effectiveEngine !== 'ltx' && <AudioDropzone file={referenceAudio} onChange={setReferenceAudio} disabled={isRecording} />}
         </div>
-        <div className="recording-controls reference-recording-controls">
+        {effectiveEngine !== 'ltx' && <div className="recording-controls reference-recording-controls">
           {!isRecording ? <button type="button" className="record-button" onClick={() => { void startRecording('reference') }} disabled={sending}>
             <Mic size={17} /><span>הקלט אודיו לרפרנס</span><small>מיקרופון · עד 60 שניות</small>
           </button> : <button type="button" className="record-button recording" onClick={stopRecording}>
             <Square size={15} /><span>עצור הקלטה</span><b dir="ltr">{formatClipTime(recordingSeconds)}</b>
           </button>}
-        </div>
-        <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>
+        </div>}
+        {effectiveEngine === 'ltx'
+          ? <div className="reference-limits-note"><ImageIcon size={14} /><span>LTX רפרנס: תמונת דף רפרנס אחת בלבד, עד 20MB · בלי סרטונים ובלי אודיו</span></div>
+          : <div className="reference-limits-note"><ImageIcon size={14} /><span>תמונות: עד 9 קבצים, עד 20MB לכל תמונה · סרטונים: עד 3 קבצים, עד 500MB לכל סרטון, באורך 2–15 שניות</span></div>}
         {effectiveEngine === 'fused_sla' && effectiveFusedWorkflow === 'ref2va' && <div className="reference-limits-note">Official Ref2VA uses exactly one reference image; reference video and audio inputs are unavailable for this workflow.</div>}
         {effectiveEngine === 'fused_sla' && effectiveFusedWorkflow === 'ref2va_multiref' && <div className="reference-limits-note">Ref2VA Multi-reference accepts up to 9 images, 3 videos, and 1 standalone reference audio.</div>}
         {referenceAudio && <div className="reference-audio-note"><AudioLines size={14} /><span>בפרומפט אפשר לכתוב <b dir="ltr">&lt;Picture 1&gt;</b> ו־<b dir="ltr">&lt;Audio 1&gt;</b>. H3 ישתמש בקול ובתזמון כרפרנס וייצר אודיו חדש יחד עם תנועת השפתיים.</span></div>}
@@ -1881,22 +1907,35 @@ function App() {
               <button type="button" className={effectiveEngine === 'fused_sla' ? 'active' : ''} aria-pressed={effectiveEngine === 'fused_sla'} disabled={!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady)} onClick={() => selectEngine('fused_sla')}>
                 <BrainCircuit size={16} /><span><strong>H3 Fused SLA</strong><small>INT8 · 4–8 steps</small></span>
               </button>
-              <button type="button" className={effectiveEngine === 'ltx' ? 'active' : ''} aria-pressed={effectiveEngine === 'ltx'} disabled={!ltxReady || (mode === 'reference' && !ltxReferenceReady)} onClick={() => selectEngine('ltx')}>
-                <Clapperboard size={16} /><span><strong>LTX 2.5</strong><small>מהיר · 8 סטפים</small></span>
+              <button type="button" className={effectiveEngine === 'ltx' ? 'active' : ''} aria-pressed={effectiveEngine === 'ltx'} disabled={mode === 'reference' ? !ltxReferenceReady : !ltxReady} onClick={() => selectEngine('ltx')}>
+                <Clapperboard size={16} /><span><strong>{mode === 'reference' ? 'LTX' : 'LTX 2.5'}</strong><small>{mode === 'reference' ? '2.5 או 2.3 · רפרנס' : 'מהיר · 8 סטפים'}</small></span>
               </button>
             </div>
-            {!ltxReady && <p className="setting-note">LTX 2.5 ייפתח כשקבצי המודל של LTX-2.5 נמצאים בתיקיית המודלים</p>}
-            {ltxReady && mode === 'reference' && !ltxReferenceReady && <p className="setting-note">LTX 2.5 ברפרנס דורש את ה־Ingredients IC-LoRA</p>}
+            {!ltxReady && mode !== 'reference' && <p className="setting-note">LTX 2.5 ייפתח כשקבצי המודל של LTX-2.5 נמצאים בתיקיית המודלים</p>}
+            {mode === 'reference' && !ltxReferenceReady && <p className="setting-note">LTX רפרנס ייפתח כשקבצי ה־Ingredients IC-LoRA וה־upscaler של LTX 2.5 או 2.3 נמצאים בתיקיית המודלים</p>}
             {effectiveEngine === 'ltx' && <>
-              <div className="setting-title turbo-profile-title"><span>איכות LTX</span><small>מעבר אחד ברזולוציה מלאה</small></div>
-              <div className="turbo-profile-toggle">
-                <button type="button" className={preferences.ltxQuality === 'balanced' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'balanced'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'balanced' }))}><strong dir="ltr">Balanced · {LTX_SIZES.balanced[preferences.aspect].join('×')}</strong><small>הסנכרון הטוב ביותר · ≈3–5 דק׳ ל־5 שנ׳</small></button>
-                <button type="button" className={preferences.ltxQuality === 'high' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'high'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'high' }))}><strong dir="ltr">High · {LTX_SIZES.high[preferences.aspect].join('×')}</strong><small>חד יותר, תנועת פה מעט קטנה יותר · ≈4–9 דק׳</small></button>
-              </div>
+              {ltxReference ? <>
+                <div className="setting-title turbo-profile-title"><span>מודל רפרנס</span><small>שני המתכונים שעבדו בבדיקות</small></div>
+                <div className="turbo-profile-toggle">
+                  <button type="button" className={effectiveLtxReferenceModel === '2.5' ? 'active' : ''} aria-pressed={effectiveLtxReferenceModel === '2.5'} disabled={!ltx25ReferenceReady} onClick={() => setPreferences(current => ({ ...current, ltxReferenceModel: '2.5' }))}><strong dir="ltr">LTX 2.5</strong><small>אותו מודל כמו שאר LTX · ≈3.5–5 דק׳ ל־5 שנ׳</small></button>
+                  <button type="button" className={effectiveLtxReferenceModel === '2.3' ? 'active' : ''} aria-pressed={effectiveLtxReferenceModel === '2.3'} disabled={!ltx23ReferenceReady} onClick={() => setPreferences(current => ({ ...current, ltxReferenceModel: '2.3' }))}><strong dir="ltr">LTX 2.3</strong><small>מודל נפרד · כ־43GB RAM · ≈4 דק׳ ל־5 שנ׳</small></button>
+                </div>
+              </> : <>
+                <div className="setting-title turbo-profile-title"><span>איכות LTX</span><small>מעבר אחד ברזולוציה מלאה</small></div>
+                <div className="turbo-profile-toggle">
+                  <button type="button" className={preferences.ltxQuality === 'balanced' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'balanced'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'balanced' }))}><strong dir="ltr">Balanced · {LTX_SIZES.balanced[preferences.aspect].join('×')}</strong><small>הסנכרון הטוב ביותר · ≈3–5 דק׳ ל־5 שנ׳</small></button>
+                  <button type="button" className={preferences.ltxQuality === 'high' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'high'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'high' }))}><strong dir="ltr">High · {LTX_SIZES.high[preferences.aspect].join('×')}</strong><small>חד יותר, תנועת פה מעט קטנה יותר · ≈4–9 דק׳</small></button>
+                </div>
+              </>}
+              {ltxVideoOptions && <>
+                <div className="setting-title turbo-profile-title"><span>תיקונים אופציונליים</span><small>כבויים כברירת מחדל</small></div>
+                <label className="seed-checkbox"><input type="checkbox" checked={preferences.ltxSharpDecode} onChange={event => setPreferences(current => ({ ...current, ltxSharpDecode: event.target.checked }))} /><span>פענוח חד</span><small>בלי טשטוש קצר כל 2 שניות</small></label>
+                <label className="seed-checkbox"><input type="checkbox" checked={preferences.ltxCalmSampler} onChange={event => setPreferences(current => ({ ...current, ltxCalmSampler: event.target.checked }))} /><span>סמפלר רגוע</span><small>פחות ריצוד בפרטים</small></label>
+              </>}
               {mode === 'lip_sync'
                 ? <p className="setting-note">לסנכרון שפתיים טוב: פריים פותח שבו הפנים ממלאות את רוב התמונה, ופרומפט שמתאר את אותו קדרור ומצלמה סטטית. 8 סטפים קבועים · 1–10 שניות · האודיו נשמר כמו שהוא.</p>
                 : mode === 'reference'
-                ? <p className="setting-note">LTX רפרנס (Ingredients): תמונת רפרנס אחת בלבד — דף שמרכז דמויות, אביזרים ולוקיישן. תארי בפרומפט כל פריט לפי המיקום שלו בדף, ואת הסצנה, התנועה והסאונד. בחרי יחס תמונה שמתאים לדף. 8 סטפים · 1–10 שניות.</p>
+                ? <p className="setting-note">LTX רפרנס (Ingredients): תמונת רפרנס אחת בלבד — דף שמרכז דמויות, אביזרים ולוקיישן. תארי בפרומפט כל פריט לפי המיקום שלו בדף, ואת הסצנה, התנועה והסאונד. לרוחב בלבד · 1536×896 · עד 5 שניות.</p>
                 : <p className="setting-note">LTX מייצר וידאו וסאונד יחד. תארי בפרומפט גם את התנועה, המצלמה והסאונד. 8 סטפים קבועים · 1–10 שניות{mode === 'frames' || mode === 'closing' ? ' · הפריים הסוגר נעול על הפריים האחרון' : ''}.</p>}
             </>}
             {mode === 'reference' && !referenceTurboReady && <p className="setting-note">Ref2VA Turbo יופיע אחרי הורדת ה־LoRA הייעודית</p>}
@@ -1972,7 +2011,7 @@ function App() {
 
           <div className="setting-block resolution-block">
             <div className="setting-title"><span>רזולוציה</span><small>כפולות 32 שמתאימות ל־H3</small></div>
-            <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={preferences.aspect === aspect ? 'active' : ''} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
+            <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={(ltxReference ? aspect === '16:9' : preferences.aspect === aspect) ? 'active' : ''} disabled={ltxReference && aspect !== '16:9'} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
             {effectiveEngine !== 'ltx' && <label className="numeric-control"><span>Megapixels</span><input dir="ltr" type="number" min="0.1" max="2" step="0.01" value={preferences.megapixels} onChange={event => setPreferences(current => ({ ...current, megapixels: Math.max(0.1, Math.min(2, Number(event.target.value) || 0.1)) }))} /><small>׳׳×׳¨׳•׳× 0.1–2.0 · H3 מעגל לכפולות 32</small></label>}
             <div className="calculated-resolution">{calculatedResolution.id} · {(calculatedResolution.width * calculatedResolution.height / 1_000_000).toFixed(2)} MP בפועל</div>
             <div className="seed-control">
@@ -1983,13 +2022,13 @@ function App() {
         </div>
 
         <div className="generation-summary">
-          <div className="profile-summary"><b dir="ltr">{engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && mode !== 'reference' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{effectiveEngine === 'ltx' ? 'Gemma 12B' : encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
+          <div className="profile-summary"><b dir="ltr">{ltxReference ? `LTX ${effectiveLtxReferenceModel} Ref` : engineLabel(effectiveEngine)}</b>{effectiveEngine === 'turbo' && mode !== 'reference' && <><i>·</i><b dir="ltr">{preferences.turboProfile.toUpperCase()}</b></>}<i>·</i><b dir="ltr">{effectiveEngine === 'ltx' ? 'Gemma 12B' : encoderLabel(effectiveEncoder)}</b><i>·</i><b>{generationSteps} סטפים</b><i>·</i><b dir="ltr">{calculatedResolution.id}</b></div>
           <small>{loadLevel === 'normal' ? 'מוכן ליצירה' : 'לפני השליחה יוצג אישור עומס'}</small>
         </div>
       </div>
 
       <div className="final-row">
-        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(value) }} /><small>{effectiveEngine === 'ltx' ? (mode === 'lip_sync' ? 'LTX 2.5 · 1–10 שניות · האודיו ייחתך לאורך הזה' : 'LTX 2.5 · 1–10 שניות') : mode === 'lip_sync' ? 'האודיו ייחתך או יושלם בשקט לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
+        <label className="duration-input"><span>משך בשניות</span><input dir="ltr" type="number" min="0.5" max="60" step="0.1" value={duration} onChange={event => { const value = Math.max(0.5, Math.min(60, Number(event.target.value) || 0.5)); setDuration(value) }} /><small>{effectiveEngine === 'ltx' ? (mode === 'lip_sync' ? 'LTX 2.5 · 1–10 שניות · האודיו ייחתך לאורך הזה' : ltxReference ? `LTX ${effectiveLtxReferenceModel} רפרנס · 1–${LTX_REFERENCE_MAX_SECONDS} שניות` : 'LTX 2.5 · 1–10 שניות') : mode === 'lip_sync' ? 'האודיו ייחתך או יושלם בשקט לאורך הזה' : 'H3 מעגל אוטומטית לפריים הקרוב'}</small></label>
         <button className="create-button" onClick={() => { void submit() }} disabled={sending || isRecording} aria-busy={sending}><span>{sending ? 'שולח…' : connected ? `צור רצף של ${paragraphCount} שוטים` : batch ? `הוסף ${paragraphCount} לתור` : 'צור וידאו'}</span>{sending ? <LoaderCircle className="spin" size={19} /> : connected ? <Route size={18} /> : <Send size={18} />}</button>
       </div>
       {mode === 'reference' && !referenceReady && <p className="quiet-warning">מודל הרפרנס עדיין בהתקנה. פריימים וטקסט זמינים כרגיל.</p>}
@@ -2170,7 +2209,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engineLabel(engine)}</span>{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
+      <div className="job-config"><span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -2281,6 +2320,11 @@ const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
   ltx: ['standard'],
 }
 
+// Mirrors backend/generation.py LTX_REFERENCE_SIZE / LTX_REFERENCE_MAX_DURATION /
+// LTX_OPTION_MODES: reference keeps only the lab-proven landscape 5 s recipe.
+const LTX_REFERENCE_SIZE: [number, number] = [1536, 896]
+const LTX_REFERENCE_MAX_SECONDS = 5
+const LTX_OPTION_MODES: Mode[] = ['text', 'opening', 'closing', 'frames']
 // Mirrors backend/generation.py LTX_SIZES: one full-resolution pass per aspect.
 const LTX_SIZES: Record<LtxQuality, Record<Aspect, [number, number]>> = {
   balanced: { '9:16': [896, 1600], '16:9': [1600, 896], '1:1': [1216, 1216], '4:3': [1376, 1024], '3:4': [1024, 1376] },

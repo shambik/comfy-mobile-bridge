@@ -214,15 +214,37 @@ LTX_TRANSFORMER = "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetens
 LTX_TEXT_ENCODER = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
 LTX_VIDEO_VAE = "ltx-2.5-video-vae-bf16.safetensors"
 LTX_AUDIO_VAE = "ltx-2.5-audio-vae-bf16.safetensors"
-# Lightricks' Ingredients IC-LoRA (gated repo Lightricks/LTX-2.3-22b-IC-LoRA-Ingredients),
-# used only by LTX reference mode.
-LTX_INGREDIENTS_LORA = "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
 LTX_MODEL_FILES = (
     ("diffusion_models", LTX_TRANSFORMER),
     ("text_encoders", LTX_TEXT_ENCODER),
     ("vae", LTX_VIDEO_VAE),
     ("vae", LTX_AUDIO_VAE),
 )
+# LTX reference mode runs one of two speed-lab-tested recipes: Lightricks'
+# Ingredients IC-LoRA on its own 768x448 grid, then a x2 latent upscale and a
+# short refine pass to 1536x896. "2.5" (lab R20-R22) uses the LTX-2.5 files
+# above plus these; "2.3" (lab R9-R14) runs the LTX-2.3 dev checkpoint with the
+# distilled LoRA at half strength. Both Ingredients repos are gated.
+LTX25_INGREDIENTS_LORA = "ltx-2.5-22b-ic-lora-ingredients-0.9.safetensors"
+LTX25_LATENT_UPSCALER = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+LTX23_CHECKPOINT = "ltx-2.3-22b-dev-fp8.safetensors"
+LTX23_DISTILLED_LORA = "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors"
+LTX23_INGREDIENTS_LORA = "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors"
+LTX23_TEXT_ENCODER = "gemma_3_12B_it_fp4_mixed.safetensors"
+LTX23_LATENT_UPSCALER = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+LTX_REFERENCE_FILES = {
+    "2.5": LTX_MODEL_FILES + (
+        ("loras", LTX25_INGREDIENTS_LORA),
+        ("latent_upscale_models", LTX25_LATENT_UPSCALER),
+    ),
+    "2.3": (
+        ("checkpoints", LTX23_CHECKPOINT),
+        ("loras", LTX23_DISTILLED_LORA),
+        ("loras", LTX23_INGREDIENTS_LORA),
+        ("text_encoders", LTX23_TEXT_ENCODER),
+        ("latent_upscale_models", LTX23_LATENT_UPSCALER),
+    ),
+}
 
 TAILSCALE_ENABLED = bool(tailscale_config.get("enabled", True))
 TAILSCALE_SCOPE = str(tailscale_config.get("scope", "tailnet"))

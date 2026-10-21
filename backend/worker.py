@@ -12,15 +12,16 @@ from .comfy import (ComfyBusyError, ComfyCancellationError, ComfyClient,
 from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_PROJECTION,
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
-                     FUSED_WORKFLOW_FILES, INPUT, LTX_INGREDIENTS_LORA, LTX_MODEL_FILES,
+                     FUSED_WORKFLOW_FILES, INPUT, LTX_MODEL_FILES, LTX_REFERENCE_FILES,
                      MODELS, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .media import assemble_clips, extract_last_frame
+from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .workflows import (apply_attention_mode, attention_node_classes,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
-                        ltx_node_classes, ltx_video_workflow,
+                        ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
                         native_audio_lock_workflow,
                         official_fused_workflow,
                         reference_workflow,
@@ -29,6 +30,20 @@ from .workflows import (apply_attention_mode, attention_node_classes,
 
 SAMPLER_NODE_ID = "14"
 ACTIVE_STATUSES = ("starting", "running", "verifying")
+# LTX reference clips are checked for frames that show the reference sheet
+# itself; a clip that does is set aside and re-rendered with a new seed.
+LTX_REFERENCE_ATTEMPTS = 3
+LTX_REFERENCE_SEED_STEP = 7919
+
+
+class ReferenceSheetShown(RuntimeError):
+    """An LTX reference render showed the reference sheet instead of the scene."""
+
+    def __init__(self, video: Path, check: dict):
+        frames = check["sheet_frames"]
+        super().__init__(f"The clip showed the reference sheet in frames {frames[0]}-{frames[-1]}")
+        self.video = video
+        self.check = check
 
 
 class QueueWorker:
@@ -381,7 +396,31 @@ class QueueWorker:
         self.current_job = job["id"]
         self.current_sequence = job.get("sequence_id")
         try:
-            await self.run_job(job, recovered_prompt=recovered_prompt)
+            reference_retries: list[dict] = []
+            while True:
+                try:
+                    await self.run_job(job, recovered_prompt=recovered_prompt,
+                                       reference_retries=reference_retries)
+                    break
+                except ReferenceSheetShown as exc:
+                    # Keep the rejected render beside the outputs under a name
+                    # find_video cannot match, then re-render with a new seed.
+                    rejected = exc.video.with_name(f"rejected{len(reference_retries) + 1}_{exc.video.name}")
+                    exc.video.replace(rejected)
+                    reference_retries.append({
+                        "seed": job.get("seed"), "sheet_frames": exc.check["sheet_frames"],
+                        "rejected_output": str(rejected),
+                    })
+                    if len(reference_retries) >= LTX_REFERENCE_ATTEMPTS or job["id"] in self.cancelled:
+                        raise RuntimeError(
+                            f"LTX reference kept showing the reference sheet after {len(reference_retries)} "
+                            "renders with different seeds; try a clearer sheet description in the prompt"
+                        ) from exc
+                    next_seed = str((int(job["seed"]) + LTX_REFERENCE_SEED_STEP) % (2 ** 53))
+                    update_job(job["id"], seed=next_seed, status="starting", phase="starting",
+                               progress=0, step=0, total_steps=0, prompt_id=None)
+                    job = get_job(job["id"], public=False) or {**job, "seed": next_seed}
+                    recovered_prompt = None
         except asyncio.CancelledError:
             raise
         except ComfyBusyError as exc:
@@ -622,7 +661,8 @@ class QueueWorker:
             eta_seconds=round(max(0.0, eta), 1) if eta is not None else None,
         )
 
-    async def run_job(self, job: dict, recovered_prompt: dict | None = None):
+    async def run_job(self, job: dict, recovered_prompt: dict | None = None,
+                      reference_retries: list | None = None):
         await self._ensure_continuity_frame(job)
         estimated_total = historical_generation_seconds(
             job["mode"], job["duration"], job["engine"], job["steps"],
@@ -667,13 +707,28 @@ class QueueWorker:
         ltx_workflow = None
         if job["engine"] == "ltx":
             # LTX runs its own graph; none of the H3 node classes are involved.
+            reference_model = (job.get("ltx_reference_model") or "2.5") if job["mode"] == "reference" else None
+            model_files = LTX_REFERENCE_FILES[reference_model] if reference_model else LTX_MODEL_FILES
             missing_files = [
-                str(MODELS / folder / name) for folder, name in LTX_MODEL_FILES
+                str(MODELS / folder / name) for folder, name in model_files
                 if not (MODELS / folder / name).exists()
             ]
             if missing_files:
-                raise RuntimeError("LTX 2.5 is not fully installed: " + ", ".join(missing_files))
-            if job["mode"] == "lip_sync":
+                label = f"LTX {reference_model} reference mode" if reference_model else "LTX 2.5"
+                raise RuntimeError(f"{label} is not fully installed: " + ", ".join(missing_files))
+            if reference_model:
+                sheets = json.loads(job.get("reference_images_json") or "[]") or [job.get("input_name")]
+                if reference_model == "2.3" and not recovered_prompt:
+                    # The 2.3 checkpoint stages about 43 GB of RAM; unload
+                    # whatever the previous job left resident first.
+                    await self.comfy.free_models()
+                ltx_workflow = ltx_reference_workflow(
+                    reference_model, job["prompt"], job["duration"], int(job["seed"]),
+                    f"h3_bridge_{job['id']}", sheets[0],
+                    include_audio=not bool(job.get("no_audio")),
+                )
+                required = {node["class_type"] for node in ltx_workflow.values()}
+            elif job["mode"] == "lip_sync":
                 if not job.get("reference_audio_name"):
                     raise RuntimeError("Lip-sync job has no uploaded audio")
                 if not job.get("first_frame_name"):
@@ -682,22 +737,17 @@ class QueueWorker:
             else:
                 first_frame_name = job.get("first_frame_name")
                 last_frame_name = job.get("last_frame_name")
-                reference_image_name = None
                 if job["mode"] == "opening":
                     first_frame_name = first_frame_name or job.get("input_name")
                 elif job["mode"] == "closing":
                     last_frame_name = last_frame_name or job.get("input_name")
-                elif job["mode"] == "reference":
-                    sheets = json.loads(job.get("reference_images_json") or "[]") or [job.get("input_name")]
-                    reference_image_name = sheets[0]
-                    if not (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists():
-                        raise RuntimeError("LTX 2.5 reference mode needs the Ingredients IC-LoRA: " + LTX_INGREDIENTS_LORA)
                 ltx_workflow = ltx_video_workflow(
                     job["mode"], job["prompt"], job["duration"], int(job["seed"]),
                     f"h3_bridge_{job['id']}", job["width"], job["height"],
                     first_frame_name=first_frame_name, last_frame_name=last_frame_name,
                     include_audio=not bool(job.get("no_audio")),
-                    reference_image_name=reference_image_name,
+                    sharp_decode=bool(job.get("ltx_sharp_decode")),
+                    calm_sampler=bool(job.get("ltx_calm_sampler")),
                 )
                 required = {node["class_type"] for node in ltx_workflow.values()}
         elif job["mode"] == "lip_sync":
@@ -800,7 +850,7 @@ class QueueWorker:
         image_name = job.get("input_name")
         workflow_builder = "unknown"
         if ltx_workflow is not None:
-            workflow_builder = "ltx_video_workflow"
+            workflow_builder = "ltx_reference_workflow" if job["mode"] == "reference" else "ltx_video_workflow"
             workflow = ltx_workflow
         elif job["engine"] == "ltx":
             workflow_builder = "ltx_lipsync_workflow"
@@ -1118,6 +1168,12 @@ class QueueWorker:
             probe = await asyncio.to_thread(
                 media_probe, video, require_audio=not bool(job.get("no_audio"))
             )
+            reference_check = None
+            if job["engine"] == "ltx" and job["mode"] == "reference":
+                sheets = json.loads(job.get("reference_images_json") or "[]") or [job.get("input_name")]
+                reference_check = await asyncio.to_thread(sheet_frames, video, INPUT / sheets[0])
+                if reference_check["shows_sheet"]:
+                    raise ReferenceSheetShown(video, reference_check)
 
             if job.get("sequence_id") and job["sequence_index"] < job["sequence_total"]:
                 frame_name = f"sequence_{job['sequence_id']}_shot{job['sequence_index']:02d}_last.png"
@@ -1150,6 +1206,9 @@ class QueueWorker:
                 "generation_seconds": elapsed, "peak_gpu": peak,
                 "samples": samples[-120:], "ffprobe": probe,
             }
+            if reference_check is not None:
+                metrics["reference_check"] = reference_check
+                metrics["reference_retries"] = reference_retries or []
             update_job(
                 job["id"], status="completed", phase="completed", progress=1,
                 eta_seconds=0, output_path=str(video), metrics=metrics,

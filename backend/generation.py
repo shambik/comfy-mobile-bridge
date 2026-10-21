@@ -43,6 +43,15 @@ ENGINE_ATTENTION_MODES = {
 LTX_STEPS = 8
 LTX_MODES = ("text", "opening", "closing", "frames", "lip_sync", "reference")
 LTX_DURATION_RANGE = (1.0, 10.0)
+# Reference mode keeps only what the speed lab proved: landscape 1536x896
+# (768x448 sheet grid upscaled x2), clips up to 5 s, one recipe per model.
+LTX_REFERENCE_MODELS = ("2.5", "2.3")
+LTX_REFERENCE_SIZE = (1536, 896)
+LTX_REFERENCE_MAX_DURATION = 5.0
+# Opt-in fixes for the other LTX video modes (not lip-sync): a seam-free
+# decode and the plain euler sampler. Both were proven on opening-frame clips
+# in the lab, so they stay off unless the user turns them on.
+LTX_OPTION_MODES = ("text", "opening", "closing", "frames")
 # Full-resolution single-pass sizes per aspect. "balanced" matches the tested
 # 896x1600 run; "high" is the tested 1088x1920 run trimmed to the app's
 # 2.0 MP safety limit. Every side is a multiple of 32.
@@ -66,6 +75,9 @@ class GenerationSettings:
     aspect_ratio: str = "16:9"
     workflow_variant: str = "direct"
     attention_mode: str = "standard"
+    ltx_reference_model: str | None = None
+    ltx_sharp_decode: bool = False
+    ltx_calm_sampler: bool = False
 
 
 def normalize_generation_settings(
@@ -80,15 +92,21 @@ def normalize_generation_settings(
     workflow_variant: str | None = None,
     attention_mode: str | None = None,
     ltx_quality: str | None = None,
+    ltx_reference_model: str | None = None,
+    ltx_sharp_decode: bool = False,
+    ltx_calm_sampler: bool = False,
 ) -> GenerationSettings:
     resolved_engine = engine or ("standard" if mode in ("reference", "lip_sync") else "turbo")
     if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla", "ltx"):
         raise ValueError("Engine must be turbo, standard, spectrum, fused_sla or ltx")
     if resolved_engine == "ltx":
         return _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
-                              workflow_variant, attention_mode, ltx_quality)
+                              workflow_variant, attention_mode, ltx_quality,
+                              ltx_reference_model, ltx_sharp_decode, ltx_calm_sampler)
     if ltx_quality is not None:
         raise ValueError("LTX quality is only available with the ltx engine")
+    if ltx_reference_model is not None or ltx_sharp_decode or ltx_calm_sampler:
+        raise ValueError("LTX options are only available with the ltx engine")
     resolved_variant = workflow_variant or ("ref2va" if mode == "reference" and resolved_engine == "fused_sla" else "direct")
     if resolved_variant not in FUSED_WORKFLOW_VARIANTS:
         raise ValueError("Fused workflow must be direct, i2v_fl2v, ref2va, ref2va_multiref, derope or dyrope")
@@ -185,7 +203,8 @@ def ltx_quality_for_size(width: int, height: int) -> str:
 
 
 def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
-                   workflow_variant, attention_mode, ltx_quality) -> GenerationSettings:
+                   workflow_variant, attention_mode, ltx_quality,
+                   reference_model=None, sharp_decode=False, calm_sampler=False) -> GenerationSettings:
     if mode not in LTX_MODES:
         raise ValueError("Unsupported mode for LTX 2.5")
     if steps not in (None, LTX_STEPS):
@@ -201,6 +220,22 @@ def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
     quality = ltx_quality or "balanced"
     if quality not in LTX_SIZES:
         raise ValueError("LTX quality must be balanced or high")
+    if mode != "reference" and reference_model is not None:
+        raise ValueError("The LTX reference model is only used in reference mode")
+    if (sharp_decode or calm_sampler) and mode not in LTX_OPTION_MODES:
+        raise ValueError("Sharp decode and calm sampler apply to LTX text and image-to-video modes only")
+    if mode == "reference":
+        model = reference_model or "2.5"
+        if model not in LTX_REFERENCE_MODELS:
+            raise ValueError("LTX reference model must be 2.5 or 2.3")
+        aspect = aspect_ratio or "16:9"
+        if aspect != "16:9":
+            raise ValueError("LTX reference mode is landscape only (16:9)")
+        width, height = LTX_REFERENCE_SIZE
+        return GenerationSettings(
+            "ltx", LTX_STEPS, width, height, "native", "v1",
+            round(width * height / 1_000_000, 2), aspect, "direct", "standard", model,
+        )
     aspect = aspect_ratio or "9:16"
     if aspect not in LTX_SIZES[quality]:
         raise ValueError("Aspect ratio must be one of 1:1, 16:9, 9:16, 4:3 or 3:4")
@@ -208,4 +243,5 @@ def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
     return GenerationSettings(
         "ltx", LTX_STEPS, width, height, "native", "v1",
         round(width * height / 1_000_000, 2), aspect, "direct", "standard",
+        None, bool(sharp_decode), bool(calm_sampler),
     )

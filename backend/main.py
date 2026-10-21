@@ -30,7 +30,7 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR,
                      FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS,
-                     LTX_INGREDIENTS_LORA, LTX_MODEL_FILES, LTX_WORKFLOW,
+                     LTX_MODEL_FILES, LTX_REFERENCE_FILES, LTX_WORKFLOW,
                      IMAGE_COMFY_INPUT, IMAGE_COMFY_URL,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
@@ -39,7 +39,7 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
-from .generation import LTX_DURATION_RANGE, normalize_generation_settings
+from .generation import LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, normalize_generation_settings
 from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
 from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
                          get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
@@ -588,6 +588,10 @@ def ltx_ready() -> bool:
     )
 
 
+def ltx_reference_ready(model: str) -> bool:
+    return all((MODELS / folder / name).exists() for folder, name in LTX_REFERENCE_FILES[model])
+
+
 def fused_workflow_ready(variant: str) -> bool:
     if variant not in FUSED_WORKFLOW_FILES or not fused_sla_ready():
         return False
@@ -618,7 +622,9 @@ def public_health():
         "fused_derope_ready": fused_workflow_ready("derope"),
         "fused_dyrope_ready": fused_workflow_ready("dyrope"),
         "ltx_ready": ltx_ready(),
-        "ltx_reference_ready": ltx_ready() and (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists(),
+        "ltx_reference_ready": ltx_reference_ready("2.5") or ltx_reference_ready("2.3"),
+        "ltx25_reference_ready": ltx_reference_ready("2.5"),
+        "ltx23_reference_ready": ltx_reference_ready("2.3"),
         "reference_10s_ready": REFERENCE_10S_MARKER.exists(),
         "spectrum_ready": (SPECTRUM_NODE_DIR / "nodes.py").exists(),
         "spectrum_version": SPECTRUM_NODE_VERSION,
@@ -2738,6 +2744,9 @@ async def create_jobs(
     workflow_variant: str | None = Form(None),
     attention_mode: str | None = Form(None),
     ltx_quality: str | None = Form(None),
+    ltx_reference_model: str | None = Form(None),
+    ltx_sharp_decode: bool = Form(False),
+    ltx_calm_sampler: bool = Form(False),
     seed: str = Form(""),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
@@ -2768,7 +2777,8 @@ async def create_jobs(
             mode, engine, steps, resolution, encoder, turbo_profile,
             megapixels=megapixels, aspect_ratio=aspect_ratio,
             workflow_variant=workflow_variant, attention_mode=attention_mode,
-            ltx_quality=ltx_quality,
+            ltx_quality=ltx_quality, ltx_reference_model=ltx_reference_model or None,
+            ltx_sharp_decode=ltx_sharp_decode, ltx_calm_sampler=ltx_calm_sampler,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -2841,14 +2851,20 @@ async def create_jobs(
         if connected:
             raise HTTPException(400, "LTX 2.5 is available for standalone jobs only")
         if mode == "reference":
+            label = f"LTX {generation.ltx_reference_model} reference mode"
             sheets = len(reference_images) + (1 if image else 0)
             if sheets != 1 or reference_videos or reference_audio:
-                raise HTTPException(400, "LTX 2.5 reference mode takes exactly one reference sheet image, no videos or audio")
-            if not (MODELS / "loras" / LTX_INGREDIENTS_LORA).exists():
-                raise HTTPException(409, "LTX 2.5 reference mode needs the Ingredients IC-LoRA: " + LTX_INGREDIENTS_LORA)
-        missing_ltx = [name for folder, name in LTX_MODEL_FILES if not (MODELS / folder / name).exists()]
-        if missing_ltx or not LTX_WORKFLOW.exists():
-            raise HTTPException(409, "LTX 2.5 is not fully installed: " + ", ".join(missing_ltx or [LTX_WORKFLOW.name]))
+                raise HTTPException(400, f"{label} takes exactly one reference sheet image, no videos or audio")
+            if duration > LTX_REFERENCE_MAX_DURATION:
+                raise HTTPException(400, f"{label} supports up to {LTX_REFERENCE_MAX_DURATION:g} seconds")
+            missing_reference = [name for folder, name in LTX_REFERENCE_FILES[generation.ltx_reference_model]
+                                 if not (MODELS / folder / name).exists()]
+            if missing_reference:
+                raise HTTPException(409, f"{label} is not fully installed: " + ", ".join(missing_reference))
+        else:
+            missing_ltx = [name for folder, name in LTX_MODEL_FILES if not (MODELS / folder / name).exists()]
+            if missing_ltx or not LTX_WORKFLOW.exists():
+                raise HTTPException(409, "LTX 2.5 is not fully installed: " + ", ".join(missing_ltx or [LTX_WORKFLOW.name]))
     if mode == "lip_sync" and generation.encoder != "native":
         raise HTTPException(400, "Lip-sync uses the native 32B encoder")
     if mode == "lip_sync" and batch:
@@ -2946,14 +2962,16 @@ async def create_jobs(
                 )
             else:
                 db.execute("""INSERT INTO jobs
-                  (id,prompt,mode,duration,audio_start,audio_duration,engine,workflow_variant,turbo_profile,attention_mode,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
+                  (id,prompt,mode,duration,audio_start,audio_duration,engine,workflow_variant,turbo_profile,attention_mode,
+                   ltx_reference_model,ltx_sharp_decode,ltx_calm_sampler,encoder,steps,width,height,megapixels,aspect_ratio,seed,status,position,input_path,input_name,
                    reference_images_json,reference_videos_json,no_audio,
                    reference_audio_path,reference_audio_name,
                    source_audio_path,source_audio_name,
                    first_frame_path,first_frame_name,last_frame_path,last_frame_name,
                    created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.attention_mode, generation.encoder,
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (job_id, text, mode, duration, stored_audio_start, selected_audio_duration if mode == "lip_sync" else None, generation.engine, generation.workflow_variant, generation.turbo_profile, generation.attention_mode,
+                   generation.ltx_reference_model, int(generation.ltx_sharp_decode), int(generation.ltx_calm_sampler), generation.encoder,
                    generation.steps, generation.width, generation.height, generation.megapixels, generation.aspect_ratio,
                    job_seed, position + index,
                    input_path, input_name, json.dumps(reference_image_names), json.dumps(reference_video_names), int(no_audio),
