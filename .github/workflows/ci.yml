@@ -14,6 +14,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history, so the Git check can read the pushed or PR commit range.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -67,4 +70,19 @@ jobs:
 
       - name: Check Git and ignored paths
         shell: pwsh
-        run: .\scripts\validate-git.ps1 -Range HEAD
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        # Only the commits this push or pull request adds are checked; older
+        # history predates the Git standards and is left as it is.
+        run: |
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            .\scripts\validate-git.ps1 -Range "origin/$($env:BASE_REF)..HEAD" -Branch $env:HEAD_REF
+          } elseif ($env:BEFORE -and $env:BEFORE -notmatch '^0+$') {
+            .\scripts\validate-git.ps1 -Range "$($env:BEFORE)..$($env:AFTER)" -Branch main
+          } else {
+            .\scripts\validate-git.ps1 -Range "$($env:AFTER)~1..$($env:AFTER)" -Branch main
+          }

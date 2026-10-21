@@ -192,8 +192,17 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
         client._present_process_ids = lambda: [6972]
         client.shutdown = AsyncMock()
 
-        with self.assertRaises(ComfyBusyError):
-            await client.ensure_started()
+        # A stand-in installation, so the check reaches the busy-process guard
+        # on machines without a real ComfyUI checkout (CI).
+        with tempfile.TemporaryDirectory(prefix="h3-fake-comfy-") as temp:
+            code = Path(temp) / "ComfyUI"
+            code.mkdir()
+            (code / "main.py").write_text("", encoding="utf-8")
+            python = Path(temp) / "python.exe"
+            python.write_bytes(b"")
+            with patch("backend.comfy.COMFY_CODE", code), patch("backend.comfy.COMFY_PYTHON", python), \
+                 self.assertRaises(ComfyBusyError):
+                await client.ensure_started()
 
         client.shutdown.assert_not_awaited()
 

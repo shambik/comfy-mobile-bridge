@@ -180,7 +180,10 @@ class PortabilityTests(unittest.TestCase):
 
     def test_selected_skill_context_references_file_without_injecting_body(self):
         with tempfile.TemporaryDirectory(prefix="skill-manifest-test-") as directory:
-            skill_root = Path(directory) / "specialist"
+            # Resolve the temp folder: Windows may hand out its 8.3 short form
+            # (RUNNER~1 instead of the full user folder name), while the
+            # manifest reports the long path.
+            skill_root = Path(directory).resolve() / "specialist"
             skill_root.mkdir()
             (skill_root / "SKILL.md").write_text(
                 "---\nname: specialist\ndescription: Test specialist\n---\nSECRET BODY\n",

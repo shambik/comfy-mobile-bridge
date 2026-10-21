@@ -231,7 +231,7 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(row, ("spectrum", 16, 736, 416, "queued"))
 
     def test_fused_sla_profile_is_persisted_at_four_steps(self):
-        with patch("backend.main.fused_sla_ready", return_value=True):
+        with patch("backend.main.fused_sla_ready", return_value=True),              patch("backend.main.fused_workflow_ready", return_value=True):
             response = self.post(engine="fused_sla", steps="4", resolution="512x288")
         self.assertEqual(response.status_code, 200, response.text)
         connection = sqlite3.connect(self.path)
@@ -242,7 +242,7 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(row, ("fused_sla", 4, 512, 288, "queued"))
 
     def test_fused_sla_accepts_eight_step_quality_mode(self):
-        with patch("backend.main.fused_sla_ready", return_value=True):
+        with patch("backend.main.fused_sla_ready", return_value=True),              patch("backend.main.fused_workflow_ready", return_value=True):
             response = self.post(engine="fused_sla", steps="8", resolution="512x288")
         self.assertEqual(response.status_code, 200, response.text)
         connection = sqlite3.connect(self.path)
@@ -253,7 +253,8 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(row, ("fused_sla", 8))
 
     def test_fused_sla_reference_requires_reference_media(self):
-        response = self.post(mode="reference", engine="fused_sla", steps="4")
+        with patch("backend.main.fused_sla_ready", return_value=True),              patch("backend.main.fused_workflow_ready", return_value=True):
+            response = self.post(mode="reference", engine="fused_sla", steps="4")
         self.assertEqual(response.status_code, 400)
         self.assertIn("at least one image or video", response.text)
 

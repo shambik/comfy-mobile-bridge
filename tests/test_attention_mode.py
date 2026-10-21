@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import backend.db as db_module
+from backend.config import FUSED_WORKFLOW_FILES
 from backend.generation import normalize_generation_settings
 from backend.main import app, worker
 from backend.workflows import (apply_attention_mode, attention_node_classes,
@@ -30,6 +31,12 @@ def model_chain(workflow: dict) -> list[str]:
             return chain
         current = patches[0]
         chain.append(workflow[current]["class_type"])
+
+
+needs_official_fused = unittest.skipUnless(
+    FUSED_WORKFLOW_FILES["direct"].exists(),
+    "needs the official Fused workflows in state/h3-new-flow/official (never committed)",
+)
 
 
 class AttentionSettingsTests(unittest.TestCase):
@@ -99,6 +106,7 @@ class AttentionWorkflowTests(unittest.TestCase):
             model_chain(apply_attention_mode(reference, "sla"))[-1], "H3SLAAttention",
         )
 
+    @needs_official_fused
     def test_fused_sla_gets_sage_before_its_sparse_node(self):
         for workflow in (fused_sla_workflow("test", 5, 1, "p"),
                          official_fused_workflow("direct", "test", 5, 1, "p")):

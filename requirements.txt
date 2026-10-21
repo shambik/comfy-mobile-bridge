@@ -5,3 +5,5 @@ pydantic==2.13.4
 python-multipart==0.0.20
 Pillow==12.2.0
 websockets==15.0.1
+av==17.1.0
+numpy==2.1.0

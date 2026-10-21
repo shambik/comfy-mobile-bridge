@@ -3,11 +3,20 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from backend.bot_images import BotImageError, build_graph, catalog, compatibility
-from backend.config import IMAGE_COMFY_URL, QWEN_IMAGE_COMFY_URL
+from backend.config import BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_URL, QWEN_IMAGE_COMFY_URL
 from backend.main import app, image_comfy, qwen_image_comfy, worker
 
 
+# Most bot-image workflows live in the user's own bot folder (bot_image_workflows_dir
+# in config.local.json); they are private and never part of the repository.
+needs_bot_workflows = unittest.skipUnless(
+    (BOT_IMAGE_WORKFLOWS_DIR / "wan_2_2_4steps_t2i.json").exists(),
+    "needs the local bot image workflow folder (bot_image_workflows_dir)",
+)
+
+
 class BotImageWorkflowTests(unittest.TestCase):
+    @needs_bot_workflows
     def test_catalog_discovers_image_workflows_only(self):
         items = catalog()
         self.assertGreaterEqual(len(items), 32)
@@ -26,6 +35,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         self.assertIn("Research/evaluation only", t2i["description"])
         self.assertIn("<image1>", edit["description"])
 
+    @needs_bot_workflows
     def test_multi_image_assignment_and_seed(self):
         graph, seed = build_graph("qwen2509_i2i_2inputs.json", prompt="A test edit",
                                   images=["first.png", "second.png"], flags={"seed": 27}, run_id="a" * 32)
@@ -58,6 +68,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         with self.assertRaises(BotImageError):
             build_graph("qwen21_edit_refs_api.json", images=[f"image-{index}.png" for index in range(11)])
 
+    @needs_bot_workflows
     def test_power_lora_choices_and_selection_flag(self):
         items = {item["name"]: item for item in catalog()}
         workflow = items["wan_2_2_4steps_t2i.json"]
@@ -73,6 +84,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         with self.assertRaises(BotImageError):
             build_graph(workflow["name"], flags={"powerlora": ["not-in-this-recipe.safetensors"]})
 
+    @needs_bot_workflows
     def test_legacy_power_lora_keyword_flag_is_still_supported(self):
         graph, _ = build_graph("wan_2_2_4steps_t2i.json", flags={"powerlora": "goofball"})
         loader = next(node for node in graph.values() if node["class_type"] == "Power Lora Loader (rgthree)")
@@ -87,6 +99,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         self.assertEqual(status["field_choices"]["6:sampler_name:"], ["euler", "dpmpp_2m"])
         self.assertEqual(status["field_choices"]["6:scheduler:"], ["simple", "karras"])
 
+    @needs_bot_workflows
     def test_outpaint_margins_and_extra_image_rejected(self):
         graph, _ = build_graph("extend_image_outpainting_qwen.json", images=["source.jpg"],
                                flags={"extend": {"left": 100, "top": 0, "right": 120, "bottom": 20}})
@@ -95,6 +108,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         with self.assertRaises(BotImageError):
             build_graph("extend_image_outpainting_qwen.json", images=["one.png", "two.png"])
 
+    @needs_bot_workflows
     def test_advanced_override_is_constrained_to_existing_literal(self):
         workflow = next(item for item in catalog() if item["name"] == "krea_t2i_workflow.json")
         field = next(item for item in workflow["fields"] if item["key"] == "cfg")
@@ -107,6 +121,7 @@ class BotImageWorkflowTests(unittest.TestCase):
         with self.assertRaises(BotImageError):
             build_graph("../config.local.json")
 
+    @needs_bot_workflows
     def test_legacy_workflows_gain_new_required_node_defaults(self):
         graph, _ = build_graph("nunchaku_qwen2509_i2i_1input_edit.json", images=["source.png"])
         scaled = [node for node in graph.values() if node["class_type"] == "ImageScaleToTotalPixels"]
@@ -115,12 +130,14 @@ class BotImageWorkflowTests(unittest.TestCase):
         grain, _ = build_graph("wan_t2i_workflow.json")
         self.assertEqual(next(node for node in grain.values() if node["class_type"] == "FastFilmGrain")["inputs"]["batch_size"], 4)
 
+    @needs_bot_workflows
     def test_compatibility_detects_new_required_inputs(self):
         object_info = {"ImageScaleToTotalPixels": {"input": {"required": {"future_required": ["INT", {}]}}}}
         status = compatibility(object_info)["nunchaku_qwen2509_i2i_1input_edit.json"]
         self.assertFalse(status["ready"])
         self.assertIn("ImageScaleToTotalPixels.future_required", status["missing_inputs"])
 
+    @needs_bot_workflows
     def test_catalog_api_and_csrf(self):
         client = TestClient(app)
         response = client.get("/api/bot-images/workflows")

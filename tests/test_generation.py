@@ -1,10 +1,17 @@
 import unittest
 
+from backend.config import FUSED_WORKFLOW_FILES
 from backend.generation import GenerationSettings, normalize_generation_settings
 from backend.workflows import (fused_sla_audio_lock_workflow, fused_sla_workflow,
                                native_audio_lock_workflow,
                                official_fused_workflow, reference_workflow,
                                spectrum_workflow, standard_workflow, turbo_workflow)
+
+
+needs_official_fused = unittest.skipUnless(
+    FUSED_WORKFLOW_FILES["direct"].exists(),
+    "needs the official Fused workflows in state/h3-new-flow/official (never committed)",
+)
 
 
 class GenerationSettingsTests(unittest.TestCase):
@@ -90,6 +97,7 @@ class GenerationSettingsTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    @needs_official_fused
     def test_official_fused_graphs_receive_request_values(self):
         direct = official_fused_workflow("direct", "prompt", 10, 17, "direct", steps=4, megapixels=0.7)
         self.assertEqual(direct["1"]["inputs"]["value"], "prompt")

@@ -27,6 +27,14 @@ from backend.production_db import (add_decision, ensure_agent_settings,
                                    recover_productions, update_production, update_shot, update_shot_attempt)
 
 
+# A fixed model catalog: these tests cover the settings flow, not which models
+# the locally installed codex/agy CLIs happen to list today.
+TEST_MODEL_CATALOG = {
+    "codex": [{"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]}],
+    "agy": [{"id": "gemini-3.1-pro-high", "name": "Gemini 3.1 Pro", "efforts": ["low", "medium", "high"]}],
+}
+
+
 class ProductionStudioTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="production-studio-test-")
@@ -44,6 +52,7 @@ class ProductionStudioTests(unittest.TestCase):
         self.production_patches = [
             patch("backend.main.PRODUCTIONS", self.root / "productions"),
             patch("backend.main.INPUT", self.root / "input"),
+            patch("backend.main.model_catalog", return_value=TEST_MODEL_CATALOG),
             patch.object(production_module, "PRODUCTIONS", self.root / "productions"),
             patch.object(production_module, "INPUT", self.root / "input"),
             patch.object(production_orchestrator, "notify"),
