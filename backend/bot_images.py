@@ -18,8 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import (BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_INPUT, IMAGE_COMFY_OUTPUT,
-                     QWEN_IMAGE_COMFY_INPUT, QWEN_IMAGE_COMFY_OUTPUT,
-                     QWEN_IMAGE_WORKFLOWS_DIR, STATE)
+                     STATE)
 from .comfy import ComfyClient
 
 
@@ -28,51 +27,40 @@ class BotImageError(ValueError):
 
 
 EXCLUDED_NAMES = ("vibevoice", "minimax_h3", " - copy")
-PROMPT_CLASSES = ("CLIPTextEncode", "TextEncodeQwenImageEdit", "TextEncodeQwenImageEditPlus", "TextEncodeQwenImage21", "PrimitiveStringMultiline")
+PROMPT_CLASSES = ("CLIPTextEncode", "TextEncodeQwenImageEdit", "TextEncodeQwenImageEditPlus", "PrimitiveStringMultiline")
 _runs: dict[str, "ImageRun"] = {}
 _watchers: dict[str, asyncio.Task] = {}
 _submit_lock = asyncio.Lock()
 RUN_STATE_DIR = STATE / "bot_image_runs"
-QWEN_REFERENCE_WORKFLOW = "qwen21_edit_refs_api.json"
 
 
 def _workflow_path(name: str) -> Path | None:
     if Path(name).name != name or not name.endswith(".json"):
         return None
-    for directory in (QWEN_IMAGE_WORKFLOWS_DIR, BOT_IMAGE_WORKFLOWS_DIR):
-        path = directory / name
-        if path.is_file() and path in _workflow_files():
-            return path
-    return None
+    path = BOT_IMAGE_WORKFLOWS_DIR / name
+    return path if path.is_file() and path in _workflow_files() else None
 
 
 def _workflow_files() -> list[Path]:
-    files = []
-    for directory in (BOT_IMAGE_WORKFLOWS_DIR, QWEN_IMAGE_WORKFLOWS_DIR):
-        if directory.is_dir():
-            files.extend(p for p in sorted(directory.glob("*.json"))
-                         if not any(part in p.name.lower() for part in EXCLUDED_NAMES))
-    return files
-
-
-def workflow_engine(name: str) -> str:
-    path = _workflow_path(name)
-    if path is None:
-        raise BotImageError("Image workflow not found")
-    return "qwen21" if path.parent.resolve() == QWEN_IMAGE_WORKFLOWS_DIR.resolve() else "image"
+    if not BOT_IMAGE_WORKFLOWS_DIR.is_dir():
+        return []
+    return [p for p in sorted(BOT_IMAGE_WORKFLOWS_DIR.glob("*.json"))
+            if not any(part in p.name.lower() for part in EXCLUDED_NAMES)]
 
 
 def workflow_input_directory(name: str) -> Path:
-    return QWEN_IMAGE_COMFY_INPUT if workflow_engine(name) == "qwen21" else IMAGE_COMFY_INPUT
+    if _workflow_path(name) is None:
+        raise BotImageError("Image workflow not found")
+    return IMAGE_COMFY_INPUT
 
 
 def workflow_output_directory(name: str) -> Path:
-    return QWEN_IMAGE_COMFY_OUTPUT if workflow_engine(name) == "qwen21" else IMAGE_COMFY_OUTPUT
+    if _workflow_path(name) is None:
+        raise BotImageError("Image workflow not found")
+    return IMAGE_COMFY_OUTPUT
 
 
 def workflow_image_bounds(name: str, graph: dict[str, Any] | None = None) -> tuple[int, int]:
-    if name == QWEN_REFERENCE_WORKFLOW:
-        return 1, 10
     selected = graph if graph is not None else _graph(name)
     count = len(_image_nodes(selected))
     return count, count
@@ -128,10 +116,9 @@ def _prompt_node(graph: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def _negative_node(graph: dict[str, Any]) -> tuple[str, str] | None:
-    for class_name, key in (("TextEncodeQwenImage21", "negative_prompt"), ("CLIPTextEncode", "text")):
-        for node_id, node in _nodes(graph, class_name):
-            if class_name == "TextEncodeQwenImage21" or "negative" in str(node.get("_meta", {}).get("title", "")).lower():
-                return node_id, key
+    for node_id, node in _nodes(graph, "CLIPTextEncode"):
+        if "negative" in str(node.get("_meta", {}).get("title", "")).lower():
+            return node_id, "text"
     return None
 
 
@@ -253,14 +240,6 @@ def _input_roles(name: str, graph: dict[str, Any], task: str, control_kind: str 
     roles: list[dict[str, str]] = []
     if not image_nodes:
         return roles
-    if name == QWEN_REFERENCE_WORKFLOW:
-        return [
-            {"label": "Main image to edit", "help": "Image 1 is the edit target and sets the output shape. Describe what to change and what must stay the same."},
-            *[{
-                "label": f"Supporting reference {index + 1}",
-                "help": f"Optional visual reference {index + 1}. Say what to take from <image{index + 1}>.",
-            } for index in range(1, 10)],
-        ]
     if task == "expand":
         return [{"label": "Image to expand", "help": "The existing image stays inside the frame; the prompt should describe what to add outside its edges."}]
     if task == "upscale":
@@ -302,16 +281,7 @@ def _workflow_card(name: str, graph: dict[str, Any]) -> dict[str, Any]:
     classes = {node["class_type"] for node in graph.values()}
     image_count = len(_image_nodes(graph))
     model_files = _model_files(graph)
-    qwen21 = name.startswith("qwen21_")
-    if qwen21 and name == "qwen21_t2i_api.json":
-        task = "create"
-        title = "Qwen Image 2.1 · Text to image"
-        description = "Generate an image from text. Local INT8 model; start at 1 MP and up to 2048 px per side. Research/evaluation only. Commercial use requires a separate license."
-    elif qwen21 and name == QWEN_REFERENCE_WORKFLOW:
-        task = "edit"
-        title = "Qwen Image 2.1 · Edit + up to 10 references"
-        description = "Upload 1–10 images. Image 1 is the edit target and sets output aspect/size; later images are supporting references. Mention them as <image1>, <image2>, etc. Local INT8 model. Research/evaluation only. Commercial use requires a separate license."
-    elif "ImagePadForOutpaint" in classes:
+    if "ImagePadForOutpaint" in classes:
         task = "expand"
         title = "Extend an image"
         description = "Add space around the source image while keeping its original content."
@@ -328,9 +298,7 @@ def _workflow_card(name: str, graph: dict[str, Any]) -> dict[str, Any]:
         title = "Create from a prompt"
         description = "Generate a new image from your text description."
 
-    if qwen21:
-        model = "Qwen Image 2.1"
-    elif "wan_2_2" in lowered:
+    if "wan_2_2" in lowered:
         model = "Wan 2.2"
     elif "wan_2_1" in lowered:
         model = "Wan 2.1"
@@ -354,9 +322,7 @@ def _workflow_card(name: str, graph: dict[str, Any]) -> dict[str, Any]:
     steps = _workflow_steps(graph)
     control_kind = _control_kind(graph)
     variants = []
-    if qwen21:
-        variants.append("Local INT8 · non-commercial")
-    elif "nunchaku" in lowered:
+    if "nunchaku" in lowered:
         variants.append("Nunchaku INT4")
     elif "q8_0" in model_files:
         variants.append("GGUF Q8")
@@ -385,11 +351,7 @@ def _workflow_card(name: str, graph: dict[str, Any]) -> dict[str, Any]:
     if "simple_upscaler" in lowered:
         variants.append("single-pass model upscale")
 
-    if qwen21:
-        # Qwen-specific labels/descriptions above are written for the user,
-        # rather than exposing implementation details from the Comfy graph.
-        pass
-    elif task == "expand":
+    if task == "expand":
         title = f"{model} · Outpaint"
         description = "Keep the original image in the center and generate the missing areas around it. The input image is the canvas to expand."
     elif task == "upscale":
@@ -464,7 +426,7 @@ def _workflow_card(name: str, graph: dict[str, Any]) -> dict[str, Any]:
 
     return {"task": task, "title": title, "description": description, "model": model,
             "variant": " · ".join(variants), "input_roles": _input_roles(name, graph, task, control_kind),
-            "control_kind": control_kind or "", "engine": "qwen21" if qwen21 else "image"}
+            "control_kind": control_kind or ""}
 
 
 def catalog() -> list[dict[str, Any]]:
@@ -566,19 +528,6 @@ def build_graph(name: str, *, prompt: str = "", negative: str = "",
         if Path(image_name).name != image_name:
             raise BotImageError("Invalid image filename")
         node["inputs"]["image"] = image_name
-    if name == QWEN_REFERENCE_WORKFLOW:
-        encoders = _nodes(graph, "TextEncodeQwenImage21")
-        if len(encoders) != 1:
-            raise BotImageError("Qwen reference workflow must contain one Qwen Image 2.1 encoder")
-        encoder_inputs = encoders[0][1]["inputs"].get("images")
-        if not isinstance(encoder_inputs, dict):
-            raise BotImageError("Qwen reference inputs are not configured correctly")
-        for index, (node_id, _) in enumerate(input_nodes, start=1):
-            if index <= len(images):
-                encoder_inputs[f"image_{index}"] = [node_id, 0]
-            else:
-                encoder_inputs.pop(f"image_{index}", None)
-                graph.pop(node_id, None)
     prompt_ref = _prompt_node(graph)
     if prompt and prompt_ref:
         graph[prompt_ref[0]]["inputs"][prompt_ref[1]] = prompt[:8000]

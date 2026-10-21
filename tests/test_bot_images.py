@@ -1,10 +1,13 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from backend.bot_images import BotImageError, build_graph, catalog, compatibility
-from backend.config import BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_URL, QWEN_IMAGE_COMFY_URL
-from backend.main import app, image_comfy, qwen_image_comfy, worker
+from backend.config import BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_URL
+from backend.main import app, image_comfy, worker
 
 
 # Most bot-image workflows live in the user's own bot folder (bot_image_workflows_dir
@@ -23,18 +26,6 @@ class BotImageWorkflowTests(unittest.TestCase):
         self.assertTrue(all(item["fields"] for item in items))
         self.assertTrue(all("vibevoice" not in item["name"] for item in items))
 
-    def test_qwen21_recipes_are_separate_and_explain_their_use(self):
-        items = {item["name"]: item for item in catalog()}
-        t2i = items["qwen21_t2i_api.json"]
-        edit = items["qwen21_edit_refs_api.json"]
-        self.assertEqual(t2i["engine"], "qwen21")
-        self.assertEqual(t2i["task"], "create")
-        self.assertEqual(edit["task"], "edit")
-        self.assertEqual((edit["min_images"], edit["max_images"]), (1, 10))
-        self.assertTrue(edit["multi_image_picker"])
-        self.assertIn("Research/evaluation only", t2i["description"])
-        self.assertIn("<image1>", edit["description"])
-
     @needs_bot_workflows
     def test_multi_image_assignment_and_seed(self):
         graph, seed = build_graph("qwen2509_i2i_2inputs.json", prompt="A test edit",
@@ -44,29 +35,6 @@ class BotImageWorkflowTests(unittest.TestCase):
         self.assertEqual(seed, 27)
         self.assertTrue(any(node["inputs"].get("filename_prefix") == "bot_image_" + "a" * 32
                             for node in graph.values() if node["class_type"] == "SaveImage"))
-
-    def test_qwen21_text_to_image_resolution_and_random_seed(self):
-        graph, seed = build_graph("qwen21_t2i_api.json", prompt="A test image",
-                                  flags={"seed": 123, "steps": 30, "cfg": 1.2, "res": [1280, 768]})
-        latent = next(node for node in graph.values() if node["class_type"] == "EmptyLatentImage")
-        sampler = next(node for node in graph.values() if node["class_type"] == "KSampler")
-        self.assertEqual((latent["inputs"]["width"], latent["inputs"]["height"]), (1280, 768))
-        self.assertEqual((sampler["inputs"]["seed"], sampler["inputs"]["steps"], sampler["inputs"]["cfg"]), (123, 30, 1.2))
-        self.assertEqual(seed, 123)
-
-    def test_qwen21_edit_accepts_one_to_ten_ordered_references(self):
-        graph, _ = build_graph("qwen21_edit_refs_api.json", prompt="Keep <image1>; use <image2> for color",
-                               images=["main.png", "style.png"], run_id="b" * 32)
-        encoder = next(node for node in graph.values() if node["class_type"] == "TextEncodeQwenImage21")
-        self.assertEqual(encoder["inputs"]["images"], {"image_1": ["10", 0], "image_2": ["11", 0]})
-        self.assertEqual(sum(node["class_type"] == "LoadImage" for node in graph.values()), 2)
-        one_image, _ = build_graph("qwen21_edit_refs_api.json", images=["main.png"])
-        one_encoder = next(node for node in one_image.values() if node["class_type"] == "TextEncodeQwenImage21")
-        self.assertEqual(one_encoder["inputs"]["images"], {"image_1": ["10", 0]})
-        with self.assertRaises(BotImageError):
-            build_graph("qwen21_edit_refs_api.json")
-        with self.assertRaises(BotImageError):
-            build_graph("qwen21_edit_refs_api.json", images=[f"image-{index}.png" for index in range(11)])
 
     @needs_bot_workflows
     def test_power_lora_choices_and_selection_flag(self):
@@ -95,7 +63,13 @@ class BotImageWorkflowTests(unittest.TestCase):
             "sampler_name": [["euler", "dpmpp_2m"], {}],
             "scheduler": [["simple", "karras"], {}],
         }}}}
-        status = compatibility(object_info)["qwen21_t2i_api.json"]
+        graph = {"6": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 4, "cfg": 1.0, "sampler_name": "euler",
+                                                             "scheduler": "simple", "denoise": 1.0}},
+                 "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "test", "images": ["6", 0]}}}
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "sampler_test.json").write_text(json.dumps(graph), encoding="utf-8")
+            with patch("backend.bot_images.BOT_IMAGE_WORKFLOWS_DIR", Path(folder)):
+                status = compatibility(object_info)["sampler_test.json"]
         self.assertEqual(status["field_choices"]["6:sampler_name:"], ["euler", "dpmpp_2m"])
         self.assertEqual(status["field_choices"]["6:scheduler:"], ["simple", "karras"])
 
@@ -148,12 +122,10 @@ class BotImageWorkflowTests(unittest.TestCase):
 
     def test_image_lab_uses_separate_comfy_server(self):
         self.assertEqual(image_comfy.base_url, IMAGE_COMFY_URL)
-        self.assertEqual(qwen_image_comfy.base_url, QWEN_IMAGE_COMFY_URL)
         self.assertNotEqual(image_comfy.base_url, worker.comfy.base_url)
         with patch.object(image_comfy, "ready", new_callable=AsyncMock, return_value=True):
-            with patch.object(qwen_image_comfy, "ready", new_callable=AsyncMock, return_value=False):
-                response = TestClient(app).get("/api/bot-images/status")
-        self.assertEqual(response.json(), {"ready": True, "qwen21_ready": False})
+            response = TestClient(app).get("/api/bot-images/status")
+        self.assertEqual(response.json(), {"ready": True})
 
 
 if __name__ == "__main__":

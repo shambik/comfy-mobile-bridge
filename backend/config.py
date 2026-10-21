@@ -47,7 +47,6 @@ def _as_path(value: str | None, default: Path, *, relative_to: Path = ROOT) -> P
 BOT_IMAGE_WORKFLOWS_DIR = _as_path(
     LOCAL_CONFIG.get("bot_image_workflows_dir"), ROOT / "workflows" / "bot_images"
 )
-QWEN_IMAGE_WORKFLOWS_DIR = ROOT / "workflows" / "qwen_image"
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -129,17 +128,6 @@ IMAGE_COMFY_URL = f"http://{IMAGE_COMFY_HOST}:{IMAGE_COMFY_PORT}"
 STATE = ROOT / "state"
 IMAGE_COMFY_INPUT = _as_path(image_comfy_config.get("input"), STATE / "image_comfy" / "input")
 IMAGE_COMFY_OUTPUT = _as_path(image_comfy_config.get("output"), STATE / "image_comfy" / "output")
-qwen_image_config = LOCAL_CONFIG.get("qwen_image_comfy", {})
-if not isinstance(qwen_image_config, dict):
-    raise RuntimeError("qwen_image_comfy configuration section must be an object")
-QWEN_IMAGE_COMFY_HOST = _local_host(qwen_image_config.get("host", "127.0.0.1"), "qwen_image_comfy.host")
-QWEN_IMAGE_COMFY_PORT = _port(qwen_image_config.get("port"), 8193, "qwen_image_comfy.port")
-QWEN_IMAGE_COMFY_URL = f"http://{QWEN_IMAGE_COMFY_HOST}:{QWEN_IMAGE_COMFY_PORT}"
-QWEN_IMAGE_COMFY_MODELS = _as_path(
-    qwen_image_config.get("models"), RUNTIME_ROOT / "qwen_image_models"
-)
-QWEN_IMAGE_COMFY_INPUT = _as_path(qwen_image_config.get("input"), STATE / "qwen_image_comfy" / "input")
-QWEN_IMAGE_COMFY_OUTPUT = _as_path(qwen_image_config.get("output"), STATE / "qwen_image_comfy" / "output")
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
 PRODUCTIONS = STATE / "productions"
