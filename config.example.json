@@ -17,13 +17,6 @@
     "input": "state/image_comfy/input",
     "output": "state/image_comfy/output"
   },
-  "qwen_image_comfy": {
-    "host": "127.0.0.1",
-    "port": 8193,
-    "models": ".runtime/qwen_image_models",
-    "input": "state/qwen_image_comfy/input",
-    "output": "state/qwen_image_comfy/output"
-  },
   "agents": {
     "codex_command": "codex",
     "agy_command": "agy",

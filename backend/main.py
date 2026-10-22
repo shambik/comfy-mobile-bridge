@@ -34,7 +34,6 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      IMAGE_COMFY_INPUT, IMAGE_COMFY_URL,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
-                     QWEN_IMAGE_COMFY_URL,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT, STATE,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
@@ -44,7 +43,7 @@ from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3
 from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
                          get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
                          inspect_run as inspect_bot_image_run, start_run as start_bot_image_run,
-                         workflow_engine as bot_image_engine, workflow_input_directory,
+                         workflow_input_directory,
                          workflow_upload_limit)
 from .comfy import ComfyClient
 from .library import (assign_asset, create_folder, create_project, delete_folder,
@@ -78,13 +77,8 @@ from .worker import QueueWorker
 
 worker = QueueWorker()
 image_comfy = ComfyClient(base_url=IMAGE_COMFY_URL)
-qwen_image_comfy = ComfyClient(base_url=QWEN_IMAGE_COMFY_URL)
 logger = logging.getLogger(__name__)
 EXTRACTED_LAST_FRAMES = STATE / "extracted_last_frames"
-
-
-def bot_image_comfy(workflow_name: str) -> ComfyClient:
-    return qwen_image_comfy if bot_image_engine(workflow_name) == "qwen21" else image_comfy
 
 
 def fortnite_running() -> bool:
@@ -836,43 +830,27 @@ async def bot_image_workflows():
 
 @app.get("/api/bot-images/status")
 async def bot_image_server_status():
-    return {"ready": await image_comfy.ready(), "qwen21_ready": await qwen_image_comfy.ready()}
+    return {"ready": await image_comfy.ready()}
 
 
 @app.get("/api/bot-images/compatibility")
 async def bot_image_compatibility_status():
     workflows = bot_image_catalog()
-    clients = {"image": image_comfy, "qwen21": qwen_image_comfy}
+    object_info: dict[str, Any] = {}
+    if await image_comfy.ready():
+        try:
+            object_info = await image_comfy.object_info()
+        except Exception:
+            object_info = {}
+    status = bot_image_compatibility(object_info) if object_info else {}
     results: dict[str, Any] = {}
-    object_info_by_engine: dict[str, dict[str, Any]] = {}
     for item in workflows:
-        engine = item.get("engine", "image")
-        client = clients[engine]
-        if engine not in object_info_by_engine:
-            if not await client.ready():
-                object_info_by_engine[engine] = {}
-            else:
-                try:
-                    object_info_by_engine[engine] = await client.object_info()
-                except Exception:
-                    object_info_by_engine[engine] = {}
-        if object_info_by_engine[engine]:
-            engine_status = bot_image_compatibility(object_info_by_engine[engine])
-            for entry in workflows:
-                if entry.get("engine", "image") == engine:
-                    results[entry["name"]] = engine_status.get(entry["name"], {
-                        "ready": False, "missing_nodes": [], "missing_models": [],
-                        "missing_inputs": ["Workflow is not part of this engine catalog"],
-                        "field_choices": {},
-                    })
-        else:
-            results[item["name"]] = {
-                "ready": False,
-                "missing_nodes": [],
-                "missing_models": ["Qwen 2.1 engine is offline" if engine == "qwen21" else "Image engine is offline"],
-                "missing_inputs": [],
-                "field_choices": {},
-            }
+        results[item["name"]] = status.get(item["name"], {
+            "ready": False, "missing_nodes": [],
+            "missing_models": [] if object_info else ["Image engine is offline"],
+            "missing_inputs": ["Workflow is not part of this engine catalog"] if object_info else [],
+            "field_choices": {},
+        })
     return {"workflows": results}
 
 
@@ -892,7 +870,7 @@ async def create_bot_image_run(request: Request, payload: str = Form(...), image
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        comfy = bot_image_comfy(body["workflow"])
+        comfy = image_comfy
         input_directory = workflow_input_directory(body["workflow"])
         upload_limit = workflow_upload_limit(body["workflow"])
     except BotImageError as exc:
@@ -927,7 +905,7 @@ async def bot_image_run_status(run_id: str):
     run = get_bot_image_run(run_id)
     if not run:
         raise HTTPException(404, "Image run not found")
-    await inspect_bot_image_run(bot_image_comfy(run.workflow), run)
+    await inspect_bot_image_run(image_comfy, run)
     return run.public()
 
 

@@ -13,7 +13,6 @@ terms before downloading them.
 | Spectrum node | `xmarre/ComfyUI-Spectrum-MiniMax-H3` | [Upstream repository](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3) |
 | ClipProj node and weights | `nicolab28/ComfyUI-ClipProj` and linked model sources | [Upstream repository](https://github.com/nicolab28/ComfyUI-ClipProj) |
 | Official workflows | `Comfy-Org/workflow_templates` | [ComfyUI repository terms](https://github.com/comfyanonymous/ComfyUI/blob/master/LICENSE) |
-| Qwen Image 2.1 weights | `Comfy-Org/Qwen-Image-2.1` | [Qwen Research License Agreement](https://github.com/QwenLM/Qwen-Image-2.1/blob/main/LICENSE) — non-commercial research/evaluation only; commercial use requires a separate license |
 | PyTorch and CUDA wheels | PyTorch package index, versions in `manifests/python-lock.txt` | [PyTorch terms](https://github.com/pytorch/pytorch/blob/main/LICENSE) and NVIDIA CUDA terms |
 | React, Vite, TypeScript, and dependencies | `package-lock.json` | Each package license is recorded by npm metadata |
 
