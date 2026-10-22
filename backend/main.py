@@ -31,7 +31,6 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS,
                      LTX_MODEL_FILES, LTX_REFERENCE_FILES, LTX_WORKFLOW,
-                     IMAGE_COMFY_INPUT, IMAGE_COMFY_URL,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT, STATE,
@@ -76,7 +75,6 @@ from .video_vault import delete_video_item, list_video_vault, store_video, video
 from .worker import QueueWorker
 
 worker = QueueWorker()
-image_comfy = ComfyClient(base_url=IMAGE_COMFY_URL)
 logger = logging.getLogger(__name__)
 EXTRACTED_LAST_FRAMES = STATE / "extracted_last_frames"
 
@@ -830,16 +828,16 @@ async def bot_image_workflows():
 
 @app.get("/api/bot-images/status")
 async def bot_image_server_status():
-    return {"ready": await image_comfy.ready()}
+    return {"ready": await worker.comfy.ready()}
 
 
 @app.get("/api/bot-images/compatibility")
 async def bot_image_compatibility_status():
     workflows = bot_image_catalog()
     object_info: dict[str, Any] = {}
-    if await image_comfy.ready():
+    if await worker.comfy.ready():
         try:
-            object_info = await image_comfy.object_info()
+            object_info = await worker.comfy.object_info()
         except Exception:
             object_info = {}
     status = bot_image_compatibility(object_info) if object_info else {}
@@ -870,7 +868,7 @@ async def create_bot_image_run(request: Request, payload: str = Form(...), image
     except (ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(400, str(exc)) from exc
     try:
-        comfy = image_comfy
+        comfy = worker.comfy
         input_directory = workflow_input_directory(body["workflow"])
         upload_limit = workflow_upload_limit(body["workflow"])
     except BotImageError as exc:
@@ -905,7 +903,7 @@ async def bot_image_run_status(run_id: str):
     run = get_bot_image_run(run_id)
     if not run:
         raise HTTPException(404, "Image run not found")
-    await inspect_bot_image_run(image_comfy, run)
+    await inspect_bot_image_run(worker.comfy, run)
     return run.public()
 
 

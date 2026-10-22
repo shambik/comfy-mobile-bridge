@@ -17,8 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import (BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_INPUT, IMAGE_COMFY_OUTPUT,
-                     STATE)
+from .config import BOT_IMAGE_WORKFLOWS_DIR, INPUT, OUTPUT, STATE
 from .comfy import ComfyClient
 
 
@@ -51,13 +50,13 @@ def _workflow_files() -> list[Path]:
 def workflow_input_directory(name: str) -> Path:
     if _workflow_path(name) is None:
         raise BotImageError("Image workflow not found")
-    return IMAGE_COMFY_INPUT
+    return INPUT
 
 
 def workflow_output_directory(name: str) -> Path:
     if _workflow_path(name) is None:
         raise BotImageError("Image workflow not found")
-    return IMAGE_COMFY_OUTPUT
+    return OUTPUT
 
 
 def workflow_image_bounds(name: str, graph: dict[str, Any] | None = None) -> tuple[int, int]:

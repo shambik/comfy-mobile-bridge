@@ -29,14 +29,12 @@ and make a generation appear stuck. The warning does not close Fortnite.
 The app's ComfyUI stop control stops only the ComfyUI process tree; it keeps
 the mobile bridge running so the UI and logs remain available.
 
-Image Lab uses a separately installed ComfyUI copy on local port 8192. Its
-Python environment and custom nodes live under `.runtime/image_comfy_venv`
-and `.runtime/image_comfy_code`, with inputs and outputs under
-`state/image_comfy`. It shares the configured model directory without
-modifying the H3 Python environment or custom nodes. Once installed,
-`scripts/start.ps1` also starts this image-only server; it can be started
-independently with `scripts/start-image-comfy.ps1`. The Image Lab page checks
-its own server status rather than the H3 server on port 8190.
+Image Lab runs on the app's own ComfyUI (port 8190), so the app never runs a
+second ComfyUI. Its recipes need the image add-ons (for example Nunchaku and
+MagCache) and their Python packages in that ComfyUI; the Image Lab page shows,
+per recipe, any node or model that is still missing. Image Lab runs and video
+jobs share the GPU one at a time: a new image run is refused while a video job
+is running.
 
 For Ref2VA Turbo, bootstrap also downloads and verifies the dedicated
 `minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors` LoRA. If an
@@ -75,7 +73,6 @@ the current machine's paths and detected Tailscale hostname and is ignored.
 
 - Bridge: `127.0.0.1:8787`.
 - ComfyUI: `127.0.0.1:8190`.
-- Image Lab ComfyUI: `127.0.0.1:8192`.
 - Tailscale Serve: HTTPS to the bridge inside the current tailnet.
 - Funnel is never enabled.
 

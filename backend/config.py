@@ -118,16 +118,8 @@ APP_PORT = _port(os.environ.get("H3_APP_PORT", app_config.get("port")), 8787, "a
 COMFY_HOST = _local_host(os.environ.get("H3_COMFY_HOST", comfy_config.get("host", "127.0.0.1")), "comfy.host")
 COMFY_PORT = _port(os.environ.get("H3_COMFY_PORT", comfy_config.get("port")), 8190, "comfy.port")
 COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
-image_comfy_config = LOCAL_CONFIG.get("image_comfy", {})
-if not isinstance(image_comfy_config, dict):
-    raise RuntimeError("image_comfy configuration section must be an object")
-IMAGE_COMFY_HOST = _local_host(image_comfy_config.get("host", "127.0.0.1"), "image_comfy.host")
-IMAGE_COMFY_PORT = _port(image_comfy_config.get("port"), 8192, "image_comfy.port")
-IMAGE_COMFY_URL = f"http://{IMAGE_COMFY_HOST}:{IMAGE_COMFY_PORT}"
 
 STATE = ROOT / "state"
-IMAGE_COMFY_INPUT = _as_path(image_comfy_config.get("input"), STATE / "image_comfy" / "input")
-IMAGE_COMFY_OUTPUT = _as_path(image_comfy_config.get("output"), STATE / "image_comfy" / "output")
 LOGS = STATE / "logs"
 SEQUENCES = STATE / "sequences"
 PRODUCTIONS = STATE / "productions"
