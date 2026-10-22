@@ -13,7 +13,9 @@ $branchName = if ($Branch) { $Branch } else { (git -C $repo branch --show-curren
 if ($branchName -and $branchName -ne 'main' -and $branchName -notmatch "^($types)/[0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*$") {
     throw "Branch does not follow <type>/<issue-number>-<short-slug>: $branchName"
 }
-$subjects = if ($Range) { @(git -C $repo log $Range --format=%s) } else { @(git -C $repo log -1 --format=%s) }
+# Pull-request CI checks out GitHub's temporary merge commit; merges are never
+# authored here (PRs are squash-merged), so only real commits are checked.
+$subjects = if ($Range) { @(git -C $repo log $Range --no-merges --format=%s) } else { @(git -C $repo log -1 --no-merges --format=%s) }
 foreach ($subject in $subjects) {
     if ($subject.Length -gt 72 -or $subject -notmatch $subjectPattern) {
         throw "Commit subject violates Git standards: $subject"
