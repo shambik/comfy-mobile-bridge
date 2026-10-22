@@ -4,6 +4,26 @@ Portable private bridge for local MiniMax H3 video generation on Windows 10/11
 x64 with an NVIDIA GPU. The bridge stays on `127.0.0.1`; Tailscale Serve gives
 private HTTPS access only to devices allowed in the current user's tailnet.
 
+## Start here
+
+| You want to… | Read |
+| --- | --- |
+| Install or repair it | Quick start below, then `.agents/skills/h3-environment-bootstrap/SKILL.md` |
+| Understand the hardware limits, or run it on a bigger GPU | [`docs/HARDWARE_AND_VRAM.md`](docs/HARDWARE_AND_VRAM.md) |
+| Use LTX (lip-sync, reference sheets, the optional fixes) | [`docs/ltx-2.5-ia2v-workflow.md`](docs/ltx-2.5-ia2v-workflow.md) |
+| Reach it from a phone | [`docs/TAILSCALE.md`](docs/TAILSCALE.md) |
+| Change the code (people and agents) | [`AGENTS.md`](AGENTS.md), then `.agents/skills/h3-mobile-bridge-codebase/SKILL.md` |
+| Commit or release | `.agents/skills/git-standards/SKILL.md`, `.agents/skills/release-process/SKILL.md` |
+
+## Built for a 10 GB GPU
+
+The app is tuned for an **NVIDIA RTX 3080 with 10 GB of VRAM** (and 64 GB of
+RAM): quantized INT8/FP8/4-bit models, a 2.0 MP frame cap, memory-saving
+ComfyUI flags, tiled decoding and one GPU job at a time. It runs safely there
+but leaves speed and quality on the table on bigger cards. See
+[`docs/HARDWARE_AND_VRAM.md`](docs/HARDWARE_AND_VRAM.md) for where each setting
+lives and the checklist for tuning it to other hardware.
+
 ## Quick start
 
 ```powershell
@@ -46,7 +66,9 @@ switching them to the portable layout.
 
 - Windows 10/11 x64.
 - NVIDIA GPU with at least 8 GiB VRAM, 32 GiB RAM, and 100 GB free disk.
-- Git, Python 3.12, Node.js 22, FFmpeg/ffprobe, and Tailscale.
+  Only an RTX 3080 10 GB with 64 GB of RAM has been tested; LTX 2.3 reference
+  mode needs about 43 GB of free RAM.
+- Git, Python 3.12, Node.js 22 or newer, FFmpeg/ffprobe, and Tailscale.
 - A Tailscale login for the user who owns this computer. Do not use another
   person's tailnet or hostname.
 - License review for downloaded model and node files before bootstrap.
@@ -108,10 +130,23 @@ Telegram-only delivery flags are not generation parameters. Missing custom
 nodes or model dropdown entries are shown per workflow before submission. The
 current ComfyUI environment is never installed or changed by this page.
 
-The bridge supports text-to-video, first/last-frame video, reference video,
-native stereo audio, Turbo, Standard, Spectrum, and the optional ClipProj
-encoder. Turbo remains the default profile. No paid API nodes and no
-SageAttention are part of this release.
+## Engines and modes
+
+The Studio page makes videos in six modes: text only, opening frame, closing
+frame, opening + closing frame (I2V), reference, and lip-sync to an uploaded
+audio track. Engines:
+
+| Engine | What it is |
+| --- | --- |
+| Turbo (default) | MiniMax H3 with a 4–12 step Turbo LoRA (v1 or v4) |
+| Standard / Spectrum | MiniMax H3 with full sampling (Spectrum adds its own acceleration node) |
+| H3 Fused SLA | MiniMax's official fused INT8 graphs with sparse attention (direct, I2V/FL2V, Ref2VA, de-rope variants) |
+| LTX 2.5 | Lightricks LTX 2.5, 8 distilled steps, video with generated audio; reference mode offers LTX 2.5 or 2.3 recipes |
+
+Per-job options include Sage and sparse (SLA) attention speed-ups where the
+engine supports them, the ClipProj 4B text encoder as a memory saver, and for
+LTX the opt-in "sharp decode" and "calm sampler" fixes. No paid API nodes are
+used: ComfyUI runs with `--disable-api-nodes`.
 
 ## Studio asset library
 

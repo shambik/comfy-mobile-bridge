@@ -13,13 +13,27 @@ contracts, media validation, startup, or tests.
 ## Code map
 
 - backend/main.py: FastAPI routes, upload validation, health, and static UI.
-- backend/config.py: safe defaults and ignored local configuration.
-- backend/worker.py: one owned generation queue and ComfyUI lifecycle.
-- backend/comfy.py: localhost HTTP/WebSocket client and media proof.
-- backend/workflows.py: H3 workflow builders and model names.
-- backend/db.py: SQLite job and sequence state.
-- src/: React mobile UI.
+- backend/config.py: safe defaults, model file names, ignored local configuration.
+- backend/generation.py: per-engine settings and limits (steps, sizes, LTX
+  sizes and reference limits, attention modes, the 2.0 MP cap).
+- backend/worker.py: one owned generation queue and the ComfyUI lifecycle.
+  Image Lab and H3 still runs use the worker's ComfyUI client and are refused
+  while a video job is running.
+- backend/comfy.py: localhost HTTP/WebSocket client, ComfyUI launch flags
+  (VRAM settings), and media proof.
+- backend/workflows.py: H3 and LTX workflow builders.
+- backend/reference_check.py: detects LTX reference clips that open on the
+  sheet, so the worker can re-render them.
+- backend/media.py: FFmpeg helpers (audio probing and trimming, last and
+  review frames, clip assembly, attaching a song).
+- backend/bot_images.py, backend/h3_still.py: Image Lab and H3 still runs.
+- backend/library.py, backend/video_vault.py: Studio projects and the vault.
+- backend/db.py: SQLite job and sequence state (schema and migrations).
+- src/main.tsx: React mobile UI (Studio); src/bot-images.tsx: Image Lab.
 - tests/: Python API, database, worker, media, and workflow tests.
+
+Memory and size limits are documented in docs/HARDWARE_AND_VRAM.md; keep that
+file in sync when you change a limit, a model, tiling or ComfyUI flags.
 
 ## Required patterns
 

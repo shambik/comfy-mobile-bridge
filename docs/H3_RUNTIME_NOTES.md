@@ -12,7 +12,10 @@ Observed environment on 2026-08-15:
 - CUDA available: yes
 - GPU: RTX 3080 10 GB
 
-The direct ComfyUI run that behaved well used these launch flags:
+The direct ComfyUI run that behaved well used these launch flags (that test
+ran on port 8188; the bridge's own ComfyUI uses port 8190). For what each
+memory setting does and how to tune it on other GPUs, see
+`docs/HARDWARE_AND_VRAM.md`.
 
 ```text
 --listen 127.0.0.1 --port 8188 --disable-auto-launch

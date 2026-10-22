@@ -39,6 +39,12 @@ successful check.
 - Bridge and ComfyUI bind only to 127.0.0.1.
 - Tailscale Serve is allowed; Funnel is forbidden.
 
+## Hardware
+
+The defaults are tuned for an RTX 3080 with 10 GB of VRAM and 64 GB of RAM.
+On a different GPU, run the app with the defaults first, then follow
+docs/HARDWARE_AND_VRAM.md to tune it one setting at a time.
+
 ## Failure handling
 
 Exit 2 means the computer or tool requirements failed. Exit 3 means the user
