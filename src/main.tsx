@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
-import { FrameReviewPage } from './review'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 import { BotImagesPage } from './bot-images'
@@ -19,7 +18,7 @@ type AttentionMode = 'standard' | 'sage' | 'sla' | 'sage_sla'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
-type Page = 'studio' | 'production' | 'comfy' | 'review' | 'video_vault' | 'h3_still' | 'bot_images'
+type Page = 'studio' | 'production' | 'comfy' | 'video_vault' | 'h3_still' | 'bot_images'
 type RuntimeMetadata = {
   captured_at?: string
   capture_error?: string
@@ -1792,7 +1791,7 @@ function App() {
     return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) })
   }
 
-  return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''} ${page === 'review' ? 'review-shell-host' : ''}`}>
+  return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>
     <header className="topbar">
       <div className="brand-mark"><Clapperboard size={22} /></div>
       <div><h1>H3 Studio</h1><p>יוצרים וידאו מהמחשב שלך</p></div>
@@ -1803,10 +1802,10 @@ function App() {
         <button className="icon-button" onClick={() => { if (page === 'comfy') { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) } else { void loadSession(); void load(true) } }} aria-label="רענון"><RefreshCw size={18} /></button>
       </div>
     </header>
-    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'h3_still' ? 'active' : ''} onClick={() => setPage('h3_still')}><Sparkles size={15} /> H3 still</button><button className={page === 'bot_images' ? 'active' : ''} onClick={() => setPage('bot_images')}><ImageIcon size={15} /> Image lab</button><button className={page === 'review' ? 'active' : ''} onClick={() => setPage('review')}><ImageIcon size={15} /> Frame review</button><button className={page === 'video_vault' ? 'active' : ''} onClick={() => setPage('video_vault')}><Download size={15} /> Video Vault</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
+    <nav className="page-tabs" aria-label="Navigation"><button className={page === 'studio' ? 'active' : ''} onClick={() => setPage('studio')}><Clapperboard size={15} /> Studio</button><button className={page === 'production' ? 'active' : ''} onClick={() => setPage('production')}><Sparkles size={15} /> Production</button><button className={page === 'h3_still' ? 'active' : ''} onClick={() => setPage('h3_still')}><Sparkles size={15} /> H3 still</button><button className={page === 'bot_images' ? 'active' : ''} onClick={() => setPage('bot_images')}><ImageIcon size={15} /> Image lab</button><button className={page === 'video_vault' ? 'active' : ''} onClick={() => setPage('video_vault')}><Download size={15} /> Video Vault</button><button className={page === 'comfy' ? 'active' : ''} onClick={() => setPage('comfy')}><Terminal size={15} /> ComfyUI logs</button></nav>
     {gpuConflict && <div className="gpu-conflict-note"><ShieldAlert size={16} /><div><span>Fortnite is running and may use the GPU. Generation can become slow or stall; close Fortnite before starting ComfyUI jobs.</span><button type="button" className="gpu-close-button" onClick={() => { void closeFortnite() }} disabled={gpuBusy}>{gpuBusy ? 'Closing…' : 'Close Fortnite'}</button></div></div>}
     <MainSectionError message={mainErrors.system} onDismiss={() => clearMainError('system')} />
-    {page === 'comfy' ? <ComfyPage running={comfyRunning} responsive={comfyResponsive} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'bot_images' ? <BotImagesPage csrf={csrf} /> : page === 'h3_still' ? <H3StillPage csrf={csrf} comfyRunning={comfyRunning} comfyResponsive={comfyResponsive} /> : page === 'review' ? <FrameReviewPage /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : page === 'video_vault' ? <VideoVaultPage csrf={csrf} askConfirm={appModal.askConfirm} /> : <>
+    {page === 'comfy' ? <ComfyPage running={comfyRunning} responsive={comfyResponsive} loading={comfyLoading} busy={comfyBusy} lines={comfyLogs} error={comfyError} onClear={() => { setComfyLogCleared(true); setComfyLogs([]) }} onRefresh={() => { setComfyLogCleared(false); setComfyLogOffset(null); void loadComfy(true) }} /> : page === 'bot_images' ? <BotImagesPage csrf={csrf} /> : page === 'h3_still' ? <H3StillPage csrf={csrf} comfyRunning={comfyRunning} comfyResponsive={comfyResponsive} /> : page === 'production' ? <ProductionStudio csrf={csrf} /> : page === 'video_vault' ? <VideoVaultPage csrf={csrf} askConfirm={appModal.askConfirm} /> : <>
     {jobsLoading && <div className="app-loading-strip" role="status" aria-live="polite"><LoaderCircle className="spin" size={14} /> Loading generation history and asset library…</div>}
 
     <section className="asset-library-panel">
