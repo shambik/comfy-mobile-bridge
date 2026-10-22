@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from backend.bot_images import BotImageError, build_graph, catalog, compatibility
-from backend.config import BOT_IMAGE_WORKFLOWS_DIR, IMAGE_COMFY_URL
-from backend.main import app, image_comfy, worker
+from backend.config import BOT_IMAGE_WORKFLOWS_DIR
+from backend.main import app, worker
 
 
 # Most bot-image workflows live in the user's own bot folder (bot_image_workflows_dir
@@ -120,10 +120,8 @@ class BotImageWorkflowTests(unittest.TestCase):
         response = client.post("/api/bot-images/runs", data={"payload": '{}'})
         self.assertIn(response.status_code, (401, 403))
 
-    def test_image_lab_uses_separate_comfy_server(self):
-        self.assertEqual(image_comfy.base_url, IMAGE_COMFY_URL)
-        self.assertNotEqual(image_comfy.base_url, worker.comfy.base_url)
-        with patch.object(image_comfy, "ready", new_callable=AsyncMock, return_value=True):
+    def test_image_lab_uses_the_app_comfy_server(self):
+        with patch.object(worker.comfy, "ready", new_callable=AsyncMock, return_value=True):
             response = TestClient(app).get("/api/bot-images/status")
         self.assertEqual(response.json(), {"ready": True})
 
