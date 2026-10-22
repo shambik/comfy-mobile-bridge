@@ -3316,43 +3316,6 @@ async def sequence_last_frame(sequence_id: str):
     return _serve_generated_last_frame("sequence", sequence_id)
 
 
-def _review_paths(production_id: str) -> tuple[Path, Path]:
-    """Resolve a review package without allowing paths outside productions."""
-    if not production_id or not all(
-        character.isalnum() or character in {"_", "-"} for character in production_id
-    ):
-        raise HTTPException(404, "Review not found")
-    productions_root = PRODUCTIONS.resolve()
-    production_root = (PRODUCTIONS / production_id).resolve()
-    if production_root.parent != productions_root or not production_root.is_dir():
-        raise HTTPException(404, "Review not found")
-    review_root = (production_root / "review").resolve()
-    if review_root.parent != production_root or not review_root.is_dir():
-        raise HTTPException(404, "Review package not found")
-    return production_root, review_root
-
-
-@app.get("/api/reviews/{production_id}/manifest")
-async def review_manifest(production_id: str):
-    _, review_root = _review_paths(production_id)
-    path = review_root / "manifest.json"
-    if not path.is_file():
-        raise HTTPException(404, "Review manifest not found")
-    return FileResponse(path, media_type="application/json")
-
-
-@app.get("/api/reviews/{production_id}/asset/{asset_path:path}")
-async def review_asset(production_id: str, asset_path: str):
-    production_root, _ = _review_paths(production_id)
-    target = (production_root / Path(asset_path)).resolve()
-    if not target.is_relative_to(production_root) or not target.is_file():
-        raise HTTPException(404, "Review asset not found")
-    if target.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise HTTPException(404, "Review asset not found")
-    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    return FileResponse(target, media_type=media_type, filename=target.name)
-
-
 dist = ROOT / "dist"
 if dist.exists():
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
