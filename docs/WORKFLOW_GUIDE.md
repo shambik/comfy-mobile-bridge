@@ -1,0 +1,423 @@
+# Workflow guide
+
+## LTX 2.5 nine-second production comparison (2026-10-25)
+
+Two native-audio opening-frame jobs on the RTX 3080 10 GB used the same
+1600×896 image, seed 1060001, Balanced quality, 8 steps, sharp decode on,
+calm sampler off and 9-second request. Only the action/camera prompt changed.
+Job `1d40b1ba00b8465593ce567998f2c63f` took 540.9 seconds of generation;
+job `b120685b9f33412fa061c8d2be7abc42` took 835.4 seconds. Both produced
+217 frames at 24 fps with native audio and passed ffprobe/full FFmpeg decode.
+Peak recorded VRAM was 9893 and 9877 MiB respectively. In the slower run,
+sampling reached step 8 after approximately 371 seconds and decoding/finishing
+occupied approximately another 464 seconds, including several minutes on one
+spatial decode tile. This is evidence of a decode bottleneck; memory pressure
+is plausible but the logs do not establish why the repeat was slower.
+
+The second source lowered the kite but had user-reported rope defects and did
+not establish a reliable internal hard cut. Neither run is artistic approval.
+The revised episode uses separate camera-angle clips and explicit first/last
+frames for selected prop-state transitions, through the existing bridge queue.
+No model, environment, tiling or runtime flags were changed. Per-shot durations
+and queue requests are recorded under the ignored production state directory;
+the queued batch is not yet proof of a faster or defect-free recipe.
+
+## MiniMax pinwheel recovery measurement (2026-10-23)
+
+On the RTX 3080 10 GB, a five-second **H3 Fused SLA Direct** opening-frame job
+at **1.5 MP**, six steps, native encoder/audio and sparse 0.90/64 completed in
+**597.9 s**, job `212e3b3be95748cf92f4294fec7b09d9`. Actual output: 1664×928,
+24 fps, 124 frames, 5.167 s. The lab used legacy loading with dynamic VRAM,
+async offloading and pinned memory disabled. Peak GPU use was 9851 MiB and
+system RAM 64174 MiB. Actual SLA execution: 300 calls, zero dense fall-throughs;
+effective sparsity was 83.5% after protecting the audio/conditioning prefix.
+
+The eight-second 1.5 MP attempts stalled or advanced too slowly with GPU
+allocations spilling into shared memory. Use the tested five-second production
+request for this scene; the recovery settings are not proof that longer clips
+fit. Both native and music-mixed MP4s passed full FFmpeg decode. The mixed file
+adds an original mallet/plucked-string cue while retaining generated foley and
+copying the picture stream. Artistic review remains with the user. Exact
+requests, repair comparisons and restart instructions:
+`docs/ltx25_test/TUMBLE_PUFFS_HANDOFF_PLAN.md`.
+
+A repeat through the main bridge with seed 1023611 completed in **660.3 s**
+(job `93c2578c1bdb4a0e9b0da3738b01a516`), with the same dimensions, frame count
+and actual SLA call/fallback results. Peak GPU/system RAM was 9845/64801 MiB.
+Native and music-mixed files passed full decode; the mixed repeat is also
+stored in the main bridge's Video Vault.
+
+Which workflow to use for what, the settings that worked best, and how long
+each takes. Every time and finding below was measured on the reference machine
+(RTX 3080 10 GB, 64 GB RAM; see `docs/HARDWARE_AND_VRAM.md`) with real jobs.
+Test IDs in brackets point to the speed-lab and app test runs behind each claim.
+Anything marked **untested** is a reasonable default, not a measured result.
+
+## Quick pick
+
+| You want | Use | Settings that worked best |
+| --- | --- | --- |
+| A person singing or talking to your audio track | **H3 lip-sync** (most natural mouth) or **LTX lip-sync** (faster) | H3: Turbo + Sage + sparse attention. LTX: face close-up as the opening image, Balanced size, a prompt that describes that same close-up |
+| A video from a text prompt only | **Text** mode, H3 Turbo or LTX | H3 Turbo + Sage + sparse is fastest; LTX also generates matching sound |
+| Animate one still image | **Opening frame** mode | H3 Turbo + sparse, or LTX with "sharp decode" on |
+| Move from one image to another | **First + last frame** (I2V) | H3 Turbo + Sage + sparse, Fused SLA I2V/FL2V, or LTX |
+| End on a chosen image | **Closing frame** mode | H3 or LTX |
+| Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s |
+| A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
+| Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
+| Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
+
+## H3 engines
+
+| Engine | Steps (recommended) | Best for | Notes |
+| --- | --- | --- | --- |
+| Turbo v1 (default) | 4 (4–12) | Fast everyday clips | Steadier with fast motion |
+| Turbo v4 | 6 (4–8) | Faces and fine detail | Uses its own Turbo LoRA; needs it installed |
+| Standard | 20 (8–30) | Reference mode without Turbo; maximum fidelity | Slow; **untested** for speed in the lab |
+| Spectrum | 16 (8–30) | Native sampling with its own acceleration | **Untested** for speed or quality in the lab |
+| H3 Fused SLA | 4 (4–8; some variants fixed at 4) | Low-VRAM official graphs with sparse attention built in | 8 steps is slower and can sharpen detail |
+
+Fused SLA variants: **Direct** (text or images, 4–8 steps), **I2V/FL2V**
+(opening/closing frame), **Ref2VA** (exactly one reference image),
+**Ref2VA multi-reference** (up to 9 images, 3 videos, one audio), **De-rope**
+(two-pass recovery) and **DyRoPE** (temporal adapter). Measured: Fused SLA
+first + last frame 2:41, Fused SLA reference 6:44 [Results by mode].
+
+Lip-sync with H3 uses the native 32B text encoder and Native AudioLock, which
+keeps the uploaded audio exact. The music-video skills
+(`lipsync-skill`, `agy-turbo-lipsync-pipeline`,
+`realistic-rap-turbo-music-video`) cover song analysis, shot planning and when
+to use lip-sync versus regular Turbo; `h3-prompt-writing-master` covers prompt
+structure for every H3 mode.
+
+## H3 speed options: attention modes
+
+Same job, same seed, re-rendered with each mode on Turbo (5 s clips, 6 steps,
+around 0.7–1.5 MP) [Results by mode, job45cc]:
+
+| Mode | Original | Sage | Sparse (SLA) | Sage + sparse |
+| --- | --- | --- | --- | --- |
+| Lip-sync | 12:17 | 9:13 | 8:43 | **5:01** |
+| Opening frame | 12:12 | 7:48 | **4:58** | 5:06 |
+| First + last frame | 12:17 | 7:53 | 4:58 | **4:51** |
+| Text to video | 17:33 | 7:09 | 4:29 | **3:55** |
+| Turbo reference | 7:55 | 5:42 | **3:32** | 3:37 |
+| Fused SLA reference | 6:44 | 9:03 (slower) | built in | — |
+| Fused SLA first + last | 2:41 | 2:07 | built in | — |
+
+- **Sage** keeps the same image and is about 25–35% faster.
+- **Sparse (SLA)** is about 55–75% faster but changes the image slightly;
+  compare faces, lips and hands against the original before trusting it.
+- **Sage + sparse** is the fastest on most modes; on opening frame and Turbo
+  reference, sparse alone is as fast.
+- **Do not use Sage on Fused SLA reference** (slower there), and check Sage on
+  Fused SLA at 1.5 MP against the standard mode; its speed is inconsistent.
+- **Chunked feed-forward** was tested and gave no speed-up (it only saves
+  memory), so it is not offered [C].
+- **ClipProj 4B** is a lighter text encoder, marked experimental in the app;
+  its quality and speed are **untested** in the lab.
+
+## LTX
+
+LTX 2.5 runs one distilled 8-step pass and generates sound with the video. All
+modes accept 1–10 s, except reference (up to 5 s).
+
+| Mode | Size | Time for 5 s | Source |
+| --- | --- | --- | --- |
+| Text | 1600×896 (Balanced, 16:9) | 3:25–3:45 | app T10, T7 |
+| Opening frame | 896×1600 (Balanced, 9:16) | 2:49 (4:50 with both options on) | app T11, lab AV1 |
+| Closing frame | 896×1600 | 3:50 | app T8 |
+| First + last frame | 896×1600 | 3:45 | app T9 |
+| Lip-sync | 896×1600 | 2:54–3:46 | app T12, lab D2 |
+| Reference, LTX 2.5 | 1536×896 | 3:12–4:21 | app T1–T3 |
+| Reference, LTX 2.3 | 1536×896 | 5:08–5:23 | app T4, T5 |
+| Opening frame, 10 s | 896×1600 | 7:23 with both options on | lab AV2 |
+
+### LTX lip-sync
+
+- Use a **close-up opening image** (face filling most of the frame) and a
+  prompt that describes **that same framing** with a **static camera**. A
+  prompt asking for different framing (for example "knees to head") made the
+  camera pull back and the face drift [T2 vs T3]; close-ups made the mouth
+  movement big and clear on every seed [C1, C2].
+- **Balanced (896×1600) is the sweet spot**: lip-sync as good as the 1 MP run
+  and clearly sharper [D2]. **High (1056×1888)** is sharper but the mouth moves
+  less [D1]. Upscaling a finished clip adds sharpening, not detail [D3].
+- One full-size pass, no latent upscaler: the two-stage graph loosened lip
+  timing [C3, C4].
+- Compared with H3 on the same audio: LTX is faster, but H3's mouth movement
+  was more natural, and LTX occasionally warped the face for a frame or two on
+  a 7-second speech clip [E-D1, E-D2].
+
+### LTX text and image-to-video
+
+- **Describe motion, camera and sound** in the prompt; LTX makes the audio.
+- **Keep actions gentle.** A fast spin made the character's parts pop between
+  frames; removing the spin cut flicker by 25% [V4 vs V7].
+- **"Sharp decode"** removes the soft frames that the default decode leaves at
+  every 2-second mark (seen at 4 s on [T11], absent on [T6]). It was slower in
+  the app while another ComfyUI held GPU memory [T6]. Turn it on for anything
+  you will watch closely.
+- **"Calm sampler"** reduced detail flicker by 14% in the lab [V6], but only
+  1–4% in the app tests [T6 vs T11, T7 vs T10]. Optional.
+- Both options apply to text, opening, closing and first + last frame only.
+
+### LTX reference
+
+- **One reference sheet** (characters, props and location laid out in panels).
+  Describe each element by its position on the sheet, then the scene, motion,
+  camera and sound.
+- **Landscape only, 1536×896, up to 5 s.** The Ingredients LoRA was trained only
+  at 768×448; vertical sheets [R8] and other sizes [R15, R16] animated the sheet
+  instead of making a scene, and 10 s clips cut to a new shot halfway [R13, R14].
+- **2.5 or 2.3:** 2.5 kept every character in frame in the lab where 2.3 lost
+  one [R9 vs R21, R22] and is faster; 2.3 is a separate checkpoint that needs
+  about 43 GB of RAM.
+- **Both models sometimes open on the sheet** before cutting to the scene
+  (2.5: [T1, A1]; 2.3: [T4, T5]). The app checks every reference clip and
+  re-renders it with a new seed, up to three times
+  (`backend/reference_check.py`). The reference times in the table are single
+  renders measured before that check existed; a re-rendered clip takes
+  proportionally longer.
+- For 2.5, prompts in the `### Reference Sheet Description` /
+  `### Target Description` format needed fewer re-renders than
+  `Reference sheet:` / `Generated video:`.
+- **Vertical character scenes:** make a vertical still from the sheet, then use
+  opening-frame mode. That route gave the cleanest vertical clips [V1, AV1, AV2].
+
+Details of each LTX recipe: `docs/ltx-2.5-ia2v-workflow.md`.
+
+### High-resolution comedy production measurement (2026-10-22)
+
+The first Snack Cartel opening-frame job (`a1e979661e104d909841d09a91acff9f`)
+used LTX 2.5, High landscape 1888×1056, 8 steps, sharp decode and calm
+sampler enabled, native generated audio, and an 8-second request. Generation
+took **574.4 seconds (9:34)** on the reference machine. The actual file had
+193 decoded frames at 24 fps (8.041667 seconds), with one audio stream
+(8.010 seconds). FFprobe and full FFmpeg audio/video decode passed. This is
+one measured run, not a timing guarantee for all clips or a quality benchmark.
+
+For a native last-frame continuation, preserve the source and extract frame
+`nb_read_frames - 1` by decoded frame index. The current `backend/media.py`
+helper seeks 0.20 seconds before EOF and takes the first frame there, so it is
+a near-end frame rather than the exact final decoded frame. The production
+uses a project-local exact-frame extraction without changing the app helper.
+
+### Night Train image preparation (2026-10-23)
+
+Through the app's Image Lab on the same RTX 3080 10 GB, Flux Krea's
+`krea_t2i_simplified_workflow.json` made 1600×896 masters in **63.6–71.2 s**
+(20 steps; corridor, dining car and luggage van). A character sheet took
+50.9 s. These are render timings, not perceptual-quality acceptance.
+
+Qwen Image Edit 2509's `qwen2509_i2i_1input.json` defaults to the encoded
+source-image latent scaled to about 1 MP, even when the app's output size is
+1600×896. Select its exposed **Switch latent** option (`boolean=true`) so the
+empty-latent width and height govern the output. An actual native 1600×896
+edit completed in **165.2 s**, seed 102302, app run
+`4e15201822e74eb18f6a16ff625875f0`. This used normal per-run controls; no
+saved workflow or runtime was modified. The app currently treats an integer
+default for the image-scale megapixel field as an integer-only override;
+do not pass a fractional override for that field.
+
+Night Train's user performs visual/listening review and requested that strict
+inspection gates be skipped. Exact submissions and timing records are in
+`state/night_train/execution.json`; pilot comparisons are documented in
+`docs/ltx25_test/PILOT_RESULTS.md` once rendered.
+
+The first real Night Train LTX first+last-frame pilot
+(`2ba038d02a8c458ebac5f9e279bfe4df`, seed 102351) took **262.1 s** at
+Balanced 1600×896, 5 s, 8 steps, sharp decode on and calm sampler off.
+App-recorded peak VRAM was **9908 MiB / 10240 MiB**. Its file has 121 frames
+at 24 fps, duration 5.041667 s and AAC audio; ffprobe and full FFmpeg decode
+passed. This is a technical result; visual acceptance belongs to the user.
+
+### Tumble Puffs opening-image sample (2026-10-23)
+
+The six-second Tumble Puffs opening-image job
+(`a857ca583bce433a9389470ae6736820`, seed 1023603) used **LTX High
+1888×1056**, 8 steps, sharp decode on, calm sampler off and generated audio.
+It took **415.8 s (6:56)**, with app-recorded peak VRAM **9339 MiB** and RAM
+37641 MiB. The file has 145 frames at 24 fps, duration 6.041667 s and AAC
+audio. FFprobe and full FFmpeg decode passed. This is a technical proof;
+the user supplies visual feedback.
+
+The selected cast and opening images were generated directly with **Codex
+built-in ImageGen**, following the user's correction. Their source files
+are 1672×941; the LTX job used the app's High landscape output size. Exact
+image prompts and video settings are retained under `state/tumble_puffs/`.
+The Tumble Puffs runner refuses app image submissions. Use built-in ImageGen
+for future stills and the bridge app for LTX video generation.
+
+### Fluffies native-audio production measurements (2026-10-23)
+
+The main bridge rendered Fluffies using **LTX 2.5 Balanced landscape
+1600×896**, eight steps, sharp decode enabled, calm sampler disabled and
+native audio enabled. These measurements used the existing legacy ComfyUI
+memory mode on the RTX 3080 10 GB; no model, workflow or environment change
+was made for production.
+
+| Job / mode | Request | Generation time | Peak VRAM | Source file |
+| --- | --- | --- | --- | --- |
+| `b3f6adb0caf7449d9a600d6085adf638` / first + last frame logo | 8 s | 433.0 s | 8817 MiB | 193 frames, AAC |
+| `2405e969351044bb97f9b7c465eb84b2` / opening image E01 | 8 s | 402.8 s | 8817 MiB | 193 frames, AAC |
+| `043411bc0ea54de6a13254fcdb3c98ea` / opening image E02 | 6 s | 285.0 s | 7825 MiB | 145 frames, AAC |
+| `2630d65f261044d98a21cf0e1c3c5181` / opening image, eight-character intro | 10 s | 519.5 s | 9755 MiB | 241 frames, AAC |
+
+All four passed ffprobe and full FFmpeg audio/video decode. Sources have
+one extra video frame at 24 fps; exact edits use 192 frames for eight seconds
+and 144 for six. The 22-second intro/E01/E02 preview has exactly 528 frames
+and preserves native sounds with an original instrumental score mixed below
+them. These are measured technical results; the user reviews movement,
+character sounds and creative quality.
+
+Production handoff: `docs/ltx25_test/FLUFFIES_PRODUCTION_PLAN.md`. The
+native-audio editor is `docs/ltx25_test/fluffies_shortcut_finish.py`; do not
+use the older silent-source assembler for this episode.
+
+User feedback on the initial 22-second preview identified posed opening holds
+and an unstable generated logo letter. A corrected nine-second demonstration
+cuts 2.5 seconds off each of the first two story sources. The active episode
+revision renders ten-second sources and uses eight-second cuts after a
+two-second lead-in. The eight-character intro v4 preserves the selected full
+RGBA wordmark as a separate animated foreground layer over app-generated
+character motion; the model does not synthesize letters. See
+`docs/ltx25_test/FLUFFIES_MOTION_REVISION.md` for current manifests, exact trims,
+output IDs and resume commands.
+
+The later **Wobbly Surprise** production keeps the user's uploaded ten-second
+1080p opener and uses variable-length story cuts with a 2.5-second source
+lead-in removed. Same main-app LTX Balanced settings, native audio, sharp
+decode and legacy runtime. Measured source renders:
+
+| Job | Request | Generation time | Peak VRAM |
+| --- | --- | --- | --- |
+| `8f444a1475f34d8a829fcba6f77ec006` / C01 | 9 s | 498.2 s | 9639 MiB |
+| `78772d66eb6b4c318b9b107ecdc86677` / C02 | 9 s | 462.2 s | 9637 MiB |
+| `e3f3e26368a04e3798db1e980810ff03` / C03 | 7 s | 345.2 s | 8904 MiB |
+| `d80cd147d7824bc18f8e39ffb92c1795` / C04 | 8 s | 401.8 s | 9159 MiB |
+
+All four source renders passed ffprobe and full decode. The 31.5-second
+1080p preview has exactly 756 frames at 24 fps and includes the selected
+opener plus all eight characters across four settings. The story source
+frames are normalized from native 1600×896 into the opener's 1920×1080 canvas
+in post; the app generation size was not changed. Current production plan:
+`docs/ltx25_test/FLUFFIES_WOBBLY_SURPRISE_PLAN.md`.
+
+### Rainbow Engine source measurement (2026-10-24)
+
+Fluffies Episode 05 uses the existing main-app LTX 2.5 Balanced landscape
+recipe (1600×896, eight steps, sharp decode and calm sampler enabled, native
+audio, existing legacy runtime). Its first nine-second source, job
+`ea741934e07d4b5c8d75fb00cfe21325`, took **555.3 seconds** and peaked at
+**9711 MiB** of VRAM and 46273 MiB of system RAM. The actual file has 217
+frames at 24 fps, duration 9.041667 seconds, and AAC audio. FFprobe and full
+FFmpeg audio/video decode passed. This is one measured source, not a timing
+guarantee for every shot.
+
+The superseded draft authored 100 seconds of story plus the selected ten-second intro
+and outro. Each story source includes three extra seconds; the initial edit
+begins two seconds into the source and retains its authored six or seven
+seconds. This reserves room for removing reference-pose holds without
+shortening the story action. The first cut's body/foot changes were inspected
+at 0.125-second intervals; camera/water pixel changes alone are not accepted
+as evidence of character motion. Remaining sources and the final master
+require their own checks. Plan, exact in-points and evidence:
+`state/fluffies_ep05_rainbow_engine/`.
+
+**Creative correction, 2026-10-25:** the user rejected the initial sources
+for green ribbon-like intrusions, inconsistent wheel motion, opening holds
+and an unstable indigo character. The narrow onset checks above did not
+establish full action quality. Technical decode proofs remain valid; the
+original scenes are not approved final footage. Full production is held
+while prompt revisions are researched and tested. See
+`docs/ltx25_test/FLUFFIES_LTX25_PROMPT_REVIEW.md`.
+
+**Revised production, 2026-10-25:** the active plan is
+`state/fluffies_ep05_rainbow_engine/review_v3/`. The user clarified **120
+seconds of story excluding bookends**, so the master target is **140 seconds /
+3360 frames** at 24 fps. The wheel is removed entirely; a stationary stone
+basin supplies the obstruction. Lumi now has an upright two-arm/two-leg body
+without a tail. A wheel-free test that duplicated its tail was rejected.
+
+With the same Balanced/eight-step/sharp/calm/native-audio recipe, accepted
+Lumi source `6e8f3312bbf94113908f228c54e2f593` requested nine seconds and took
+**520.6 seconds**, peaking at **9384 MiB VRAM / 44397 MiB system RAM**.
+Delivery source `723397d02f0f400cbcd8c7fbfb7385cd` requested ten seconds and
+took **597.9 seconds**, peaking at **9867 MiB VRAM / 46551 MiB system RAM**.
+They contain 217 and 241 frames respectively, with AAC audio and passed full
+FFmpeg decode. These are individual measured runs, not a duration or memory
+guarantee for other settings.
+
+The actual delivery cut starts at frame 90 for six seconds; the Lumi cut
+starts at frame 18 for seven seconds. A replacement arrival source, job
+`8dcc30610333441786dba8a2ba6d34c2`, also passed frame-based motion/anatomy
+review with a frame-18 six-second cut; a preceding side-profile walk was
+rejected for an invented Bobo tail. Do not apply a universal two-second trim
+or count water/camera pixel changes as body motion. The complete source and
+the chosen action window both require inspection. The original Python score
+was regenerated to the corrected timeline. The full episode remains in
+production and has not yet been assembled or uploaded.
+
+**Story replacement, 2026-10-25:** the user subsequently rejected the entire
+basin treatment for repetitive staging, one location and weak storytelling.
+Its sources remain preserved but must not be assembled or published. The
+active production is now `state/fluffies_ep05_runaway_light_seed/`: 32 shots
+across six sequences and five connected locations, retaining exactly 120
+seconds of story plus the selected 10-second intro and 10-second outro.
+
+The new lighthouse establishing source, job
+`94cf6ae4b0e749a2875d16f523d30f39`, requested eight seconds using the unchanged
+Balanced 1600x896/eight-step/sharp/calm/native-audio recipe. App metrics report
+**432.8 seconds**, peaking at **8939 MiB VRAM / 44041 MiB system RAM**. Its
+193 frames at 24 fps, H.264 video and AAC audio passed ffprobe and full FFmpeg
+decode. A frame-based review selected source frames 48-131 for the 3.5-second
+establishing cut. This is an environment-only shot: its moving camera and
+clouds establish no evidence about character animation. The complete new
+episode is still in production; no replacement master has been published.
+
+## Singularity, Pika and the official LTX templates
+
+Ported from the H3 skin lab (October 2026). Each job is a single shot; none of these work in connected jobs.
+
+**Singularity** (engine `singularity`, realistic skin): Prompt Mastery's model on the T8 Dual-Clock sampler, or on the
+app's Turbo v4 graph (tier App flow). 2-7 s, 1.0 or 1.5 MP, 9:16 or 16:9, 4-16 steps (default 8), Sage or standard
+attention, native encoder. The tiers pick the LoRAs: God (People + Turbo v4), Balanced (People + Ref2V 8-step), Max
+(Ref2V 8-step), App flow (People on the Turbo v4 graph, no reference). Well tested: reference (about 40 jobs) and
+lip-sync (8 jobs, keepers `cef0958e`, `d8dd0490`). Reference mode redraws the face: it never held the singer's intricate
+paint and jewellery, so use an opening frame or lip-sync for an exact face.
+
+**Pika** (engine `pika`, action): H3's own pruned base + the matching Pika H3 Flex LoRA, Pika's fixed 6 knots, ref size
+`match`. 1.5 MP, 9:16 or 16:9, 2-7 s. Standard attention by default: a 5 s job takes about 10.5-13 min (reference 630 s,
+text 667 s, lip-sync 713 s, opening 692-734 s, first + last 780 s). Clearly ahead of LTX for fights (keeper `620f17b2`), but
+standard-attention quality has not been compared with that Sage keeper. Closing frame is refused because it was never
+tested. Use timed beats ("0-1 s: ...") and "NO slow motion" in prompts. Never stack it with a Turbo LoRA.
+
+Pika with Sage runs with the Steady Memory node (see `HARDWARE_AND_VRAM.md`) and is faster than standard: 453-501 s for
+an opening frame or reference, 516-582 s for first + last (2026-11-03, 5 s, 1.5 MP). Sparse attention is still refused for
+opening frame and first + last. Close games, launchers and browsers before long H3 batches: other programs on the GPU
+make H3 jobs spill and run 2-4x slower.
+
+**Reference prompts:** define each person and name their picture ("<Subject 1> is the man from <Picture 1> (left): ...").
+A short "the two fighters from the pictures" ignored the sheet on both Pika (`985f52a1`) and Singularity God (`a6732612`);
+the same recipes with subject definitions kept both faces (`cab0a33f`, `8c355493`). Many hard cuts and whip pans in 5 s look
+chaotic; prefer one or two shots.
+
+**LTX recipe** (`ltx_recipe=official`, opening frame and first + last): ComfyUI's own LTX-2.5 templates instead of the app's
+one-pass recipe. i2v is two-stage; both run about 5-15% faster. No consistent quality gain: official i2v was fine on two
+Fluffies shots; official first + last was rejected in review.
+
+LTX group dances: LTX moves everyone in a group with one shared motion, so give each of 2-3 characters a physically
+different move; a character drawn mid-air floats for the whole clip; a dense far crowd freezes, so draw a few big close
+extras; low-passed lip-sync audio makes characters freeze, so always send the real track.
+
+## Not tested yet
+
+- Standard and Spectrum engine speed and quality on this card.
+- ClipProj quality versus the native 32B encoder.
+- "Sharp decode" and "calm sampler" on closing and first + last frame beyond a
+  single app run each [T8, T9].
+- LTX 2.5 reference in vertical (2.3 vertical failed [R8]).
+- Any GPU other than the RTX 3080 10 GB.
+
+When you test one of these, add the result here with the test conditions.

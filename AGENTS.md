@@ -6,6 +6,8 @@ used from a phone over Tailscale. Tuned for an RTX 3080 with 10 GB of VRAM.
 ## Start here
 
 1. `README.md`: what the app does, engines and modes, setup.
+   `docs/WORKFLOW_GUIDE.md`: which workflow to use for what, with measured
+   settings and times; update it when you test a workflow.
 2. `docs/HARDWARE_AND_VRAM.md`: why every memory setting is what it is, and the
    checklist for adapting the app to a different GPU. Read it before touching
    sizes, models, tiling, ComfyUI flags or the job queue.

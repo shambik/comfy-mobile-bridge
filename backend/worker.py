@@ -13,18 +13,22 @@ from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
                      FUSED_WORKFLOW_FILES, INPUT, LTX_MODEL_FILES, LTX_REFERENCE_FILES,
-                     MODELS, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES)
+                     LOGS, MODELS, PIKA_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
+                     SKIN_FILES, SKIN_MODELS)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
+from .diagnostics import (JobTimeline, comfy_log_lines, host_snapshot, keep_samples,
+                          log_offset, workflow_graph)
 from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
-from .workflows import (apply_attention_mode, attention_node_classes,
+from .generation import PIKA_OPTIONS
+from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
                         native_audio_lock_workflow,
                         official_fused_workflow,
-                        reference_workflow,
+                        reference_workflow, singularity_app_workflow, singularity_workflow,
                         spectrum_workflow, standard_workflow, turbo_workflow)
 
 
@@ -34,6 +38,11 @@ ACTIVE_STATUSES = ("starting", "running", "verifying")
 # itself; a clip that does is set aside and re-rendered with a new seed.
 LTX_REFERENCE_ATTEMPTS = 3
 LTX_REFERENCE_SEED_STEP = 7919
+# Time for ComfyUI's queue thread to apply /free before the next prompt.
+MODEL_UNLOAD_SETTLE_SECONDS = 2.0
+# Running jobs persist their diagnostics every this many 5-second polls, so a
+# stuck or failed job keeps its evidence.
+DIAGNOSTICS_PERSIST_POLLS = 6
 
 
 class ReferenceSheetShown(RuntimeError):
@@ -44,6 +53,12 @@ class ReferenceSheetShown(RuntimeError):
         super().__init__(f"The clip showed the reference sheet in frames {frames[0]}-{frames[-1]}")
         self.video = video
         self.check = check
+
+
+def history_retry_phase(sampling_started: float | None) -> dict:
+    """Once sampling has started, keep the phase the progress events set: a slow
+    history poll during a long step does not mean the video is being processed."""
+    return {} if sampling_started is not None else {"phase": "starting"}
 
 
 class QueueWorker:
@@ -63,6 +78,38 @@ class QueueWorker:
         # ComfyUI prompts survive a bridge restart.  Recovery uses this map to
         # resume those prompts instead of submitting duplicate generations.
         self.recovered_prompts: dict[str, dict[str, str | None]] = {}
+        # Engine family of the last prompt this worker submitted.  ComfyUI keeps
+        # every loaded model in RAM, so LTX and H3 together overflow 64 GB;
+        # switching families unloads the previous one first.
+        self.loaded_engine_family: str | None = None
+
+    @staticmethod
+    def _engine_family(job: dict) -> str:
+        if job["engine"] == "ltx":
+            return "ltx"
+        if job["engine"] == "fused_sla":
+            return "fused_sla"
+        # Their models are not the Turbo family's: unload when switching, as between LTX and H3.
+        if job["engine"] in ("singularity", "pika"):
+            return job["engine"]
+        return "h3"
+
+    async def _free_comfy_models(self):
+        """Unload ComfyUI models before the next prompt is submitted.
+
+        ComfyUI applies /free between prompts: the request only wakes its
+        queue thread.  Pausing lets that thread unload before the next prompt
+        arrives, otherwise the unload would run after that prompt instead.
+        """
+        await self.comfy.free_models()
+        await asyncio.sleep(MODEL_UNLOAD_SETTLE_SECONDS)
+        self.loaded_engine_family = None
+
+    async def _unload_other_engine_family(self, job: dict):
+        family = self._engine_family(job)
+        if self.loaded_engine_family not in (None, family):
+            await self._free_comfy_models()
+        self.loaded_engine_family = family
 
     @staticmethod
     def _error_text(exc: BaseException) -> str:
@@ -570,6 +617,7 @@ class QueueWorker:
                     await asyncio.wait_for(self.wake.wait(), timeout=300)
                 except asyncio.TimeoutError:
                     await self.comfy.free_models()
+                    self.loaded_engine_family = None
                 continue
 
             task_type, record = task
@@ -721,7 +769,7 @@ class QueueWorker:
                 if reference_model == "2.3" and not recovered_prompt:
                     # The 2.3 checkpoint stages about 43 GB of RAM; unload
                     # whatever the previous job left resident first.
-                    await self.comfy.free_models()
+                    await self._free_comfy_models()
                 ltx_workflow = ltx_reference_workflow(
                     reference_model, job["prompt"], job["duration"], int(job["seed"]),
                     f"h3_bridge_{job['id']}", sheets[0],
@@ -741,15 +789,55 @@ class QueueWorker:
                     first_frame_name = first_frame_name or job.get("input_name")
                 elif job["mode"] == "closing":
                     last_frame_name = last_frame_name or job.get("input_name")
-                ltx_workflow = ltx_video_workflow(
-                    job["mode"], job["prompt"], job["duration"], int(job["seed"]),
-                    f"h3_bridge_{job['id']}", job["width"], job["height"],
-                    first_frame_name=first_frame_name, last_frame_name=last_frame_name,
-                    include_audio=not bool(job.get("no_audio")),
-                    sharp_decode=bool(job.get("ltx_sharp_decode")),
-                    calm_sampler=bool(job.get("ltx_calm_sampler")),
-                )
+                if job.get("ltx_recipe") == "official":
+                    ltx_workflow = official_ltx_template_workflow(
+                        job["mode"], job["prompt"], job["duration"], int(job["seed"]), f"h3_bridge_{job['id']}",
+                        job["width"], job["height"], first_frame_name, last_frame_name)
+                else:
+                    ltx_workflow = ltx_video_workflow(
+                        job["mode"], job["prompt"], job["duration"], int(job["seed"]),
+                        f"h3_bridge_{job['id']}", job["width"], job["height"],
+                        first_frame_name=first_frame_name, last_frame_name=last_frame_name,
+                        include_audio=not bool(job.get("no_audio")),
+                        sharp_decode=bool(job.get("ltx_sharp_decode")),
+                        calm_sampler=bool(job.get("ltx_calm_sampler")),
+                    )
                 required = {node["class_type"] for node in ltx_workflow.values()}
+        elif job["engine"] in ("singularity", "pika"):
+            pika = job["engine"] == "pika"
+            required |= {
+                "LoraLoaderModelOnly", "VAEDecodeTiled", "VAEDecodeAudio", "SamplerCustomAdvanced", "BasicGuider",
+                "RandomNoise", "KSamplerSelect", "ManualSigmas",
+            }
+            if not pika and job.get("workflow_variant") != "skin_app":
+                required |= {"MiniMaxH3DualClockSamplerT8", "MiniMaxH3TurboLoRA"}
+            if pika or job["mode"] != "reference":
+                required.add("MiniMaxH3ImageToVideo" if job["mode"] != "reference" else "MiniMaxH3ReferenceToVideo")
+            if not pika and job.get("workflow_variant") == "skin_app":
+                required |= {"MiniMaxH3ImageToVideo", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift",
+                             "BasicScheduler", "VAEDecode"}
+            if job["mode"] == "reference":
+                required.add("MiniMaxH3ReferenceToVideo")
+                if job.get("reference_audio_name"):
+                    required.add("LoadAudio")
+                if json.loads(job.get("reference_videos_json") or "[]"):
+                    required |= {"LoadVideo", "GetVideoComponents"}
+            elif job["mode"] == "lip_sync":
+                required |= {"LoadAudio", "MiniMaxH3NativeAudioLock"}
+                if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
+                    raise RuntimeError("Native AudioLock node is not installed")
+                if not job.get("reference_audio_name"):
+                    raise RuntimeError("Lip-sync job has no uploaded audio")
+            skin_options = PIKA_OPTIONS if pika else json.loads(job.get("skin_options_json") or "null") or {}
+            if skin_options.get("tail_steps"):
+                required.add("MiniMaxH3AVTailDetailScheduleT8Advanced")
+            skin_files = list(PIKA_FILES if pika else SKIN_FILES)
+            if skin_options.get("model") == "full":
+                skin_files.append((SKIN_MODELS, "diffusion_models", SINGULARITY_FULL_MODEL))
+            missing_files = [str(base / folder / name) for base, folder, name in skin_files
+                             if not (base / folder / name).exists()]
+            if missing_files:
+                raise RuntimeError(f"The {'Pika' if pika else 'Singularity skin'} engine is not fully installed: " + ", ".join(missing_files))
         elif job["mode"] == "lip_sync":
             required |= {"KSamplerSelect", "LoadAudio", "MiniMaxH3NativeAudioLock"}
             if job["engine"] == "turbo":
@@ -841,6 +929,8 @@ class QueueWorker:
             required.add("KSamplerSelect")
         attention_mode = job.get("attention_mode") or "standard"
         required |= attention_node_classes(attention_mode)
+        if steady_memory_needed(job["engine"], attention_mode):
+            required.add(STEADY_MEMORY_NODE)
         missing = sorted(required - set(info))
         if missing:
             raise RuntimeError("ComfyUI is missing node classes: " + ", ".join(missing))
@@ -850,7 +940,8 @@ class QueueWorker:
         image_name = job.get("input_name")
         workflow_builder = "unknown"
         if ltx_workflow is not None:
-            workflow_builder = "ltx_reference_workflow" if job["mode"] == "reference" else "ltx_video_workflow"
+            workflow_builder = ("ltx_reference_workflow" if job["mode"] == "reference" else
+                                "official_ltx_template_workflow" if job.get("ltx_recipe") == "official" else "ltx_video_workflow")
             workflow = ltx_workflow
         elif job["engine"] == "ltx":
             workflow_builder = "ltx_lipsync_workflow"
@@ -860,6 +951,37 @@ class QueueWorker:
                 first_frame_name=job["first_frame_name"],
                 width=job["width"], height=job["height"],
             )
+        elif job["engine"] in ("singularity", "pika"):
+            pika = job["engine"] == "pika"
+            workflow_builder = "pika_workflow" if pika else "singularity_workflow"
+            skin_options = PIKA_OPTIONS if pika else json.loads(job.get("skin_options_json") or "null")
+            reference_images = json.loads(job.get("reference_images_json") or "[]")
+            if not reference_images and image_name and job["mode"] == "reference":
+                reference_images = [image_name]
+            first_frame_name = job.get("first_frame_name")
+            last_frame_name = job.get("last_frame_name")
+            if job["mode"] == "opening":
+                first_frame_name = first_frame_name or image_name
+            elif job["mode"] == "closing":
+                last_frame_name = last_frame_name or image_name
+            if not pika and job.get("workflow_variant") == "skin_app":
+                workflow_builder = "singularity_app_workflow"
+                workflow = singularity_app_workflow(
+                    job["prompt"], job["duration"], seed, prefix, job["mode"], job["width"], job["height"],
+                    first_frame_name=first_frame_name, last_frame_name=last_frame_name,
+                    audio_name=job.get("reference_audio_name"), include_audio=not bool(job.get("no_audio")),
+                    steps=job["steps"], options=skin_options,
+                )
+            else:
+                workflow = singularity_workflow(
+                    job["prompt"], job["duration"], seed, prefix, "skin_max" if pika else job.get("workflow_variant") or "skin_god",
+                    job["width"], job["height"], reference_images, mode=job["mode"],
+                    first_frame_name=first_frame_name, last_frame_name=last_frame_name,
+                    video_names=json.loads(job.get("reference_videos_json") or "[]"),
+                    audio_name=job.get("reference_audio_name"),
+                    include_audio=not bool(job.get("no_audio")),
+                    steps=job["steps"], options=skin_options,
+                )
         elif job["mode"] == "lip_sync":
             if job["engine"] == "fused_sla":
                 workflow_builder = "fused_sla_audio_lock_workflow"
@@ -951,13 +1073,33 @@ class QueueWorker:
             workflow_builder = workflow_builder_name
 
         workflow = apply_attention_mode(workflow, attention_mode)
+        if steady_memory_needed(job["engine"], attention_mode):
+            workflow = apply_steady_memory(workflow)
         runtime["workflow"] = {
             "builder": workflow_builder,
             "attention_mode": attention_mode,
             "node_count": len(workflow),
             "node_classes": sorted({str(node.get("class_type")) for node in workflow.values()}),
+            "nodes": workflow_node_values(workflow),
         }
         update_job(job["id"], runtime=runtime)
+
+        timeline = JobTimeline(workflow)
+        comfy_log = LOGS / "comfy-8190.log"
+        log_start = log_offset(comfy_log)
+        listening_pid = getattr(self.comfy, "_listening_pid", None)
+        comfy_pid = await asyncio.to_thread(listening_pid) if listening_pid else None
+        diagnostics = {
+            "graph": workflow_graph(workflow),
+            "host_at_start": await asyncio.to_thread(host_snapshot),
+            "comfy_pid": comfy_pid,
+        }
+
+        def diagnostics_payload() -> dict:
+            return {**diagnostics, "timeline": timeline.as_dict(),
+                    "comfy_log": comfy_log_lines(comfy_log, log_start)}
+
+        update_job(job["id"], metrics={"diagnostics": diagnostics_payload()})
 
         recovered_prompt = recovered_prompt or {}
         client_id = recovered_prompt.get("client_id") or str(uuid.uuid4())
@@ -984,6 +1126,7 @@ class QueueWorker:
 
             event_type = message.get("type")
             elapsed = max(0.0, time.monotonic() - started)
+            timeline.record(event_type, data, elapsed)
             historical_eta = max(0.0, estimated_total - elapsed) if estimated_total else None
 
             if event_type == "execution_start":
@@ -1041,6 +1184,7 @@ class QueueWorker:
                 pass
 
             if not prompt_id:
+                await self._unload_other_engine_family(job)
                 prompt_id = await self.comfy.submit(workflow, client_id)
             update_job(
                 job["id"], status="running", phase="starting", prompt_id=prompt_id,
@@ -1051,6 +1195,7 @@ class QueueWorker:
             update_job(job["id"], runtime=runtime)
             peak = {}
             samples = []
+            polls = 0
             consecutive_history_failures = 0
             consecutive_comfy_down_failures = 0
             total_history_failures = 0
@@ -1108,7 +1253,7 @@ class QueueWorker:
                         update_job(
                             job["id"],
                             status="running",
-                            phase="processing" if sampling_started is not None else "starting",
+                            **history_retry_phase(sampling_started),
                             runtime=runtime,
                             error=None,
                         )
@@ -1128,11 +1273,15 @@ class QueueWorker:
                     consecutive_history_failures = 0
                     consecutive_comfy_down_failures = 0
 
-                sample = gpu_sample()
+                sample = await asyncio.to_thread(gpu_sample, comfy_pid)
                 if sample:
                     samples.append({"at_seconds": round(time.monotonic() - started, 1), **sample})
-                    if sample.get("vram_used_mib", 0) > peak.get("vram_used_mib", 0):
+                    if (sample.get("vram_used_mib") or 0) > (peak.get("vram_used_mib") or 0):
                         peak = sample
+                polls += 1
+                if polls % DIAGNOSTICS_PERSIST_POLLS == 0:
+                    update_job(job["id"], metrics={"diagnostics": diagnostics_payload(),
+                                                   "samples": keep_samples(samples)})
                 if history:
                     status = history.get("status", {})
                     if status.get("status_str") == "error" or not status.get("completed", False):
@@ -1204,7 +1353,8 @@ class QueueWorker:
             elapsed = round(time.monotonic() - started, 1)
             metrics = {
                 "generation_seconds": elapsed, "peak_gpu": peak,
-                "samples": samples[-120:], "ffprobe": probe,
+                "samples": keep_samples(samples), "ffprobe": probe,
+                "diagnostics": diagnostics_payload(),
             }
             if reference_check is not None:
                 metrics["reference_check"] = reference_check

@@ -117,7 +117,11 @@ APP_HOST = _local_host(os.environ.get("H3_APP_HOST", app_config.get("host", "127
 APP_PORT = _port(os.environ.get("H3_APP_PORT", app_config.get("port")), 8787, "app.port")
 COMFY_HOST = _local_host(os.environ.get("H3_COMFY_HOST", comfy_config.get("host", "127.0.0.1")), "comfy.host")
 COMFY_PORT = _port(os.environ.get("H3_COMFY_PORT", comfy_config.get("port")), 8190, "comfy.port")
+# GB kept free for Windows and the desktop; see docs/HARDWARE_AND_VRAM.md before changing it.
 COMFY_URL = f"http://{COMFY_HOST}:{COMFY_PORT}"
+COMFY_MEMORY_MODE = comfy_config.get("memory_mode", "dynamic")
+if COMFY_MEMORY_MODE not in ("dynamic", "legacy"):
+    raise RuntimeError("comfy.memory_mode must be dynamic or legacy")
 
 STATE = ROOT / "state"
 LOGS = STATE / "logs"
@@ -170,6 +174,37 @@ CLIPPROJ_PROJECTION = "h3_qwen3vl_4b_tap24.safetensors"
 VIDEO_VAE = "minimax_h3_video_vae_fp16.safetensors"
 FUSED_VIDEO_VAE = "minimax_h3_video_vae_int8_convrot.safetensors"
 AUDIO_VAE = "minimax_h3_audio_vae_fp32.safetensors"
+# Singularity "realistic skin" engine (Prompt Mastery pack) and Pika H3 Flex.
+# Their model and LoRAs may live in a separate models folder that ComfyUI reads
+# through extra_model_paths.yaml; "skin_models" in config.local.json names it.
+SKIN_MODELS = _as_path(comfy_config.get("skin_models"), MODELS)
+SINGULARITY_MODEL = "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors"
+SINGULARITY_FULL_MODEL = "Minimax-h3_Singularity_ref2va_v1.3_int8.safetensors"
+SKIN_PEOPLE_LORA = "h3-realism-people-t2v-i2v-r2v.safetensors"
+SKIN_REF2V_8STEP_LORA = "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+# Pika H3 Flex (Pika-Labs/Pika-H3-Flex, comfy/loras): one LoRA per H3 base, 6-step sampling.
+PIKA_REF2VA_LORA = "pika_h3_flex_ref2va_comfy_bf16.safetensors"
+PIKA_FL2VA_LORA = "pika_h3_flex_fl2va_comfy_bf16.safetensors"
+# Pika's release schedule: knots 1000/750/500/250/100/40/0 at video shift 12, fresh noise (lcm).
+PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"
+PIKA_STEPS = 6
+SKIN_FILES = (
+    (SKIN_MODELS, "diffusion_models", SINGULARITY_MODEL),
+    (SKIN_MODELS, "loras", SKIN_PEOPLE_LORA),
+    (SKIN_MODELS, "loras", SKIN_REF2V_8STEP_LORA),
+    (MODELS, "loras", TURBO_LORAS["v4"]),
+    (MODELS, "vae", FUSED_VIDEO_VAE),
+)
+PIKA_FILES = (
+    (SKIN_MODELS, "loras", PIKA_REF2VA_LORA),
+    (SKIN_MODELS, "loras", PIKA_FL2VA_LORA),
+    (MODELS, "vae", FUSED_VIDEO_VAE),
+)
+# ComfyUI's official LTX-2.5 templates, exported to API form (opening frame and first + last frame).
+OFFICIAL_LTX_TEMPLATES = {
+    "opening": ROOT / "workflows" / "official_video_ltx2_5_i2v_api.json",
+    "frames": ROOT / "workflows" / "official_video_ltx2_5_flf2v_api.json",
+}
 FUSED_WORKFLOW_DIR = STATE / "h3-new-flow" / "official"
 H3_STILL_WORKFLOW = ROOT / "workflows" / "minimax_h3_t2i_experimental_first_frame_api.json"
 FUSED_MOTION_ADAPTER = "minimax_h3\\minimax_h3_temporal_expansion_step375_r16.safetensors"

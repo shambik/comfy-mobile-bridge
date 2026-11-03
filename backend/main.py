@@ -24,12 +24,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
+from .config import (PIKA_FILES, PIKA_REF2VA_LORA, PIKA_STEPS, ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, AGY_DEFAULT_RUNTIME,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR,
                      FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR,
-                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS,
+                     FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, INPUT, LOGS, MODELS, SKIN_FILES,
+                     SINGULARITY_FULL_MODEL, SKIN_MODELS,
                      LTX_MODEL_FILES, LTX_REFERENCE_FILES, LTX_WORKFLOW,
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
@@ -37,7 +38,9 @@ from .config import (ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
-from .generation import LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, normalize_generation_settings
+from .generation import (LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, SKIN_DURATION_RANGE,
+                         normalize_generation_settings, normalize_skin_options)
+from .workflows import SKIN_PEOPLE_LORA, skin_loras, skin_prompt
 from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
 from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
                          get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
@@ -574,6 +577,14 @@ def fused_sla_ready() -> bool:
     ))
 
 
+def singularity_ready() -> bool:
+    return all((base / folder / name).exists() for base, folder, name in SKIN_FILES)
+
+
+def pika_ready() -> bool:
+    return all((base / folder / name).exists() for base, folder, name in PIKA_FILES)
+
+
 def ltx_ready() -> bool:
     return LTX_WORKFLOW.exists() and all(
         (MODELS / folder / name).exists() for folder, name in LTX_MODEL_FILES
@@ -614,6 +625,8 @@ def public_health():
         "fused_derope_ready": fused_workflow_ready("derope"),
         "fused_dyrope_ready": fused_workflow_ready("dyrope"),
         "ltx_ready": ltx_ready(),
+        "singularity_ready": singularity_ready(),
+        "pika_ready": pika_ready(),
         "ltx_reference_ready": ltx_reference_ready("2.5") or ltx_reference_ready("2.3"),
         "ltx25_reference_ready": ltx_reference_ready("2.5"),
         "ltx23_reference_ready": ltx_reference_ready("2.3"),
@@ -2722,7 +2735,9 @@ async def create_jobs(
     ltx_quality: str | None = Form(None),
     ltx_reference_model: str | None = Form(None),
     ltx_sharp_decode: bool = Form(False),
+    ltx_recipe: str | None = Form(None),
     ltx_calm_sampler: bool = Form(False),
+    skin_options: str | None = Form(None),
     seed: str = Form(""),
     batch: bool = Form(False),
     connected: bool = Form(False), image: UploadFile | None = File(None),
@@ -2764,6 +2779,37 @@ async def create_jobs(
         raise HTTPException(409, "H3 Fused SLA is not fully installed yet")
     if generation.engine == "fused_sla" and not fused_workflow_ready(generation.workflow_variant):
         raise HTTPException(409, f"The Fused {generation.workflow_variant} workflow is not fully installed yet")
+    skin_options_value = None
+    if ltx_recipe not in (None, "", "app", "official"):
+        raise HTTPException(400, "ltx_recipe must be app or official")
+    if ltx_recipe == "official" and (generation.engine != "ltx" or mode not in ("opening", "frames")):
+        raise HTTPException(400, "The official LTX templates cover opening frame and first + last frame only")
+    if skin_options and generation.engine != "singularity":
+        raise HTTPException(400, "Singularity options need the singularity engine")
+    if generation.engine == "pika":
+        if not pika_ready():
+            raise HTTPException(409, "The Pika H3 Flex LoRAs are not installed yet")
+        if not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
+            raise HTTPException(400, "Pika supports 2 to 7 seconds")
+        if connected:
+            raise HTTPException(400, "Pika is available for standalone jobs only")
+    if generation.engine == "singularity":
+        try:
+            skin_options_value = normalize_skin_options(skin_options)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if skin_options_value["model"] == "full" and not (SKIN_MODELS / "diffusion_models" / SINGULARITY_FULL_MODEL).exists():
+            raise HTTPException(409, "The full Singularity model is not downloaded yet")
+        if not singularity_ready():
+            raise HTTPException(409, "The Singularity skin engine is not fully installed yet")
+        if not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
+            raise HTTPException(400, "The Singularity skin engine supports 2 to 7 seconds")
+        if skin_options_value["flow"] == "pika" and (generation.steps != PIKA_STEPS or generation.workflow_variant == "skin_app"):
+            raise HTTPException(400, f"The Pika flow runs {PIKA_STEPS} steps in the T8 tiers")
+        if skin_options_value["speed_lora"] == "pika" and not (SKIN_MODELS / "loras" / PIKA_REF2VA_LORA).exists():
+            raise HTTPException(409, "The Pika H3 Flex LoRAs are not downloaded yet")
+        if connected:
+            raise HTTPException(400, "The Singularity skin engine is available for standalone jobs only")
     if connected and (not batch or mode != "text"):
         raise HTTPException(400, "Connected generation requires multiple prompts in text mode")
     if connected and generation.engine == "fused_sla":
@@ -2815,8 +2861,8 @@ async def create_jobs(
         raise HTTPException(400, "Reference mode supports up to 3 videos")
     if mode not in ("reference",) and reference_audio:
         raise HTTPException(400, "Reference audio is available in reference mode only")
-    if mode == "lip_sync" and generation.engine not in ("standard", "turbo", "fused_sla", "ltx"):
-        raise HTTPException(400, "Lip-sync supports the Standard, Turbo, Fused SLA or LTX 2.5 engine")
+    if mode == "lip_sync" and generation.engine not in ("standard", "turbo", "fused_sla", "ltx", "singularity", "pika"):
+        raise HTTPException(400, "Lip-sync supports the Standard, Turbo, Fused SLA, LTX 2.5, Singularity or Pika engine")
     if generation.engine == "ltx":
         if mode == "lip_sync" and not first_frame:
             raise HTTPException(400, "LTX 2.5 lip-sync needs an opening image; a face close-up works best")
@@ -2850,6 +2896,11 @@ async def create_jobs(
     if mode == "reference" and generation.engine == "turbo" and not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
         raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
     prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
+    if generation.engine == "singularity":
+        # Store the prompt as the model gets it, with the People LoRA trigger when that LoRA is on.
+        people = (skin_options_value["people_strength"] > 0 if generation.workflow_variant == "skin_app"
+                  else any(lora == SKIN_PEOPLE_LORA for lora, _ in skin_loras(generation.workflow_variant, skin_options_value)))
+        prompts = [skin_prompt(text, people) for text in prompts]
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
     stored_audio_start = audio_original_start if audio_pretrimmed and audio_original_start is not None else audio_start
@@ -2889,6 +2940,8 @@ async def create_jobs(
                 reference_audio_path, reference_audio_name = source_audio_path, source_audio_name
                 source_duration = probe_audio_duration(Path(source_audio_path))
                 pretrimmed_window = audio_pretrimmed and abs(source_duration - selected_audio_duration) <= 0.08
+                if not pretrimmed_window and source_duration - audio_start < 0.5:
+                    raise HTTPException(400, f"Audio start {audio_start:.2f}s leaves less than 0.5s of the {source_duration:.2f}s audio: the clip would be silent")
                 if not pretrimmed_window and (audio_start > 0.01 or source_duration > selected_audio_duration + 0.08 or source_duration < audio_start + selected_audio_duration - 0.08):
                     trimmed_path, trimmed_name = trim_audio(Path(source_audio_path), audio_start, selected_audio_duration)
                     saved_paths.append(trimmed_path)
@@ -2955,6 +3008,10 @@ async def create_jobs(
                    source_audio_path, source_audio_name,
                    first_frame_path, first_frame_name,
                    last_frame_path, last_frame_name, now, now))
+                if skin_options_value is not None:
+                    db.execute("UPDATE jobs SET skin_options_json=? WHERE id=?", (json.dumps(skin_options_value), job_id))
+                if ltx_recipe == "official":
+                    db.execute("UPDATE jobs SET ltx_recipe=? WHERE id=?", ("official", job_id))
             created.append(job_id)
     try:
         if selected_project:

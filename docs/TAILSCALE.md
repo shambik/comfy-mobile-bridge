@@ -57,6 +57,12 @@ If Serve has not been configured yet, rerun bootstrap after signing in:
 .\scripts\bootstrap.ps1 -Profile Full -AcceptLicenses
 ```
 
+`start-project.bat` (double-click launcher) also prints the phone URL. It
+gets the hostname from `scripts/tailscale-host.ps1`, which reads
+`tailscale.hostname` from the ignored `config.local.json`, else asks the
+Tailscale app, else asks you once, and saves the answer back to
+`config.local.json`. The hostname is never stored in the repository.
+
 ## Connecting from a phone
 
 1. Install Tailscale on the phone.

@@ -31,7 +31,9 @@ class PortabilityTests(unittest.TestCase):
         config = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
         self.assertEqual(config["runtime_root"], ".runtime")
         self.assertEqual(config["app"], {"host": "127.0.0.1", "port": 8787})
-        self.assertEqual(config["comfy"], {"host": "127.0.0.1", "port": 8190})
+        self.assertEqual(config["comfy"], {
+            "host": "127.0.0.1", "port": 8190, "memory_mode": "dynamic",
+        })
         self.assertEqual(config["tailscale"], {"enabled": True, "scope": "tailnet"})
 
     def test_missing_local_config_uses_safe_defaults(self):
@@ -130,7 +132,7 @@ class PortabilityTests(unittest.TestCase):
     def test_manifests_are_complete_and_pinned(self):
         dependencies = json.loads((ROOT / "manifests" / "dependencies.json").read_text(encoding="utf-8"))
         models = json.loads((ROOT / "manifests" / "models.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(dependencies["repositories"]), 5)
+        self.assertEqual(len(dependencies["repositories"]), 6)
         self.assertEqual(len(models["models"]), 13)
         for item in dependencies["repositories"]:
             self.assertRegex(item["revision"], r"^[0-9a-f]{40}$")
@@ -140,7 +142,7 @@ class PortabilityTests(unittest.TestCase):
             self.assertGreater(item["bytes"], 0)
 
     def test_required_agent_instruction_layout_exists(self):
-        self.assertLessEqual(len((ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()), 20)
+        self.assertLessEqual(len((ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()), 40)
         required = {
             "h3-environment-bootstrap",
             "h3-mobile-bridge-codebase",

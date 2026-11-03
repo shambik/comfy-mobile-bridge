@@ -8,12 +8,14 @@ private HTTPS access only to devices allowed in the current user's tailnet.
 
 | You want to… | Read |
 | --- | --- |
+| Pick the right workflow and settings for a video | [`docs/WORKFLOW_GUIDE.md`](docs/WORKFLOW_GUIDE.md) |
 | Install or repair it | Quick start below, then `.agents/skills/h3-environment-bootstrap/SKILL.md` |
 | Understand the hardware limits, or run it on a bigger GPU | [`docs/HARDWARE_AND_VRAM.md`](docs/HARDWARE_AND_VRAM.md) |
 | Use LTX (lip-sync, reference sheets, the optional fixes) | [`docs/ltx-2.5-ia2v-workflow.md`](docs/ltx-2.5-ia2v-workflow.md) |
 | Reach it from a phone | [`docs/TAILSCALE.md`](docs/TAILSCALE.md) |
 | Change the code (people and agents) | [`AGENTS.md`](AGENTS.md), then `.agents/skills/h3-mobile-bridge-codebase/SKILL.md` |
 | Commit or release | `.agents/skills/git-standards/SKILL.md`, `.agents/skills/release-process/SKILL.md` |
+| See every doc and which ones are current | [`docs/README.md`](docs/README.md) |
 
 ## Built for a 10 GB GPU
 
@@ -142,6 +144,8 @@ audio track. Engines:
 | Standard / Spectrum | MiniMax H3 with full sampling (Spectrum adds its own acceleration node) |
 | H3 Fused SLA | MiniMax's official fused INT8 graphs with sparse attention (direct, I2V/FL2V, Ref2VA, de-rope variants) |
 | LTX 2.5 | Lightricks LTX 2.5, 8 distilled steps, video with generated audio; reference mode offers LTX 2.5 or 2.3 recipes |
+| Singularity | Realistic-skin H3 model, 8 steps, tiers with People and speed LoRAs; see the workflow guide |
+| Pika | H3 + Pika H3 Flex LoRA, fixed 6 steps at 1.5 MP, best for action; see the workflow guide |
 
 Per-job options include Sage and sparse (SLA) attention speed-ups where the
 engine supports them, the ClipProj 4B text encoder as a memory saver, and for

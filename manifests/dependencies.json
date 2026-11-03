@@ -40,6 +40,12 @@
       "url": "https://github.com/Comfy-Org/workflow_templates.git",
       "revision": "2b7f823136606344f0bccce249898d771b809aa1",
       "target": ".runtime/workflow_templates"
+    },
+    {
+      "name": "MiniMax H3 audio T8 nodes",
+      "url": "https://github.com/T8mars/comfyui-minimax-h3-audio-T8.git",
+      "revision": "e576eba8433e95e737155ac1c430c19e6d3fdfcb",
+      "target": ".runtime/comfyui/custom_nodes/comfyui-minimax-h3-audio-T8"
     }
   ],
   "tools": {

@@ -113,6 +113,24 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("lip_sync", "standard", "native", 2.5, 6.0, "face.png", "trimmed.wav", 0))
 
+    def test_lip_sync_refuses_an_audio_start_past_the_end(self):
+        data = {
+            "prompt": "",
+            "mode": "lip_sync", "duration": "5", "engine": "standard",
+            "encoder": "native", "audio_start": "48.4", "audio_duration": "5",
+        }
+        files = {"audio": ("segment.wav", b"audio-placeholder", "audio/wav")}
+        with patch("backend.main.save_audio", new=AsyncMock(return_value=("C:/safe/segment.wav", "segment.wav"))), \
+             patch("backend.main.probe_audio_duration", return_value=5.0), \
+             patch("backend.main.trim_audio") as trim_audio_mock:
+            response = self.client.post(
+                "/api/jobs", data=data, files=files,
+                headers={"X-CSRF-Token": self.token},
+            )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("would be silent", response.text)
+        trim_audio_mock.assert_not_called()
+
     def test_lip_sync_accepts_optional_closing_frame_with_uploaded_audio(self):
         data = {
             "prompt": "Music-driven motion",

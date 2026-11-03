@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, mock_open, patch
 
 import httpx
 
@@ -206,6 +206,39 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
 
         client.shutdown.assert_not_awaited()
 
+    async def test_comfy_start_selects_nonconflicting_memory_flags(self):
+        with tempfile.TemporaryDirectory(prefix="h3-memory-mode-") as temp:
+            code = Path(temp)
+            (code / "main.py").write_text("", encoding="utf-8")
+            python = code / "python.exe"
+            python.write_bytes(b"")
+            for mode in ("dynamic", "legacy"):
+                with self.subTest(mode=mode):
+                    client = ComfyClient()
+                    client.ready = AsyncMock(side_effect=[False, True])
+                    client._present_process_ids = lambda: []
+                    process = SimpleNamespace(poll=lambda: None)
+                    with patch("backend.comfy.COMFY_CODE", code), \
+                         patch("backend.comfy.COMFY_PYTHON", python), \
+                         patch("backend.comfy.COMFY_MEMORY_MODE", mode), \
+                         patch("backend.comfy.open", mock_open()), \
+                         patch("backend.comfy.subprocess.Popen", return_value=process) as popen:
+                        await client.ensure_started()
+                    command = popen.call_args.args[0]
+                    self.assertEqual(command.count("--reserve-vram"), 1)
+                    if mode == "legacy":
+                        self.assertIn("--disable-dynamic-vram", command)
+                        self.assertIn("--disable-async-offload", command)
+                        self.assertIn("--disable-pinned-memory", command)
+                        self.assertNotIn("--enable-dynamic-vram", command)
+                        self.assertNotIn("--async-offload", command)
+                    else:
+                        self.assertIn("--enable-dynamic-vram", command)
+                        self.assertEqual(command[command.index("--async-offload") + 1], "2")
+                        self.assertNotIn("--disable-dynamic-vram", command)
+                        self.assertNotIn("--disable-async-offload", command)
+                        self.assertNotIn("--disable-pinned-memory", command)
+
     async def test_busy_comfy_requeues_job_instead_of_failing_it(self):
         worker = QueueWorker()
         worker.run_job = AsyncMock(side_effect=ComfyBusyError("existing process is busy"))
@@ -284,6 +317,48 @@ class WorkerSequenceTests(unittest.IsolatedAsyncioTestCase):
     def test_empty_exception_messages_still_have_a_type(self):
         worker = QueueWorker()
         self.assertEqual(worker._error_text(httpx.ReadTimeout("")), "ReadTimeout")
+
+    async def test_switching_engine_family_unloads_models_first(self):
+        worker = QueueWorker()
+        worker.comfy.free_models = AsyncMock()
+
+        with patch("backend.worker.MODEL_UNLOAD_SETTLE_SECONDS", 0):
+            await worker._unload_other_engine_family({"engine": "ltx"})
+            await worker._unload_other_engine_family({"engine": "ltx"})
+            worker.comfy.free_models.assert_not_awaited()
+
+            await worker._unload_other_engine_family({"engine": "turbo"})
+            await worker._unload_other_engine_family({"engine": "standard"})
+            self.assertEqual(worker.comfy.free_models.await_count, 1)
+
+            await worker._unload_other_engine_family({"engine": "fused_sla"})
+            await worker._unload_other_engine_family({"engine": "ltx"})
+            self.assertEqual(worker.comfy.free_models.await_count, 3)
+        self.assertEqual(worker.loaded_engine_family, "ltx")
+
+    async def test_unknown_loaded_family_does_not_unload(self):
+        worker = QueueWorker()
+        worker.comfy.free_models = AsyncMock()
+
+        await worker._unload_other_engine_family({"engine": "turbo"})
+
+        worker.comfy.free_models.assert_not_awaited()
+        self.assertEqual(worker.loaded_engine_family, "h3")
+
+    async def test_free_waits_for_comfy_before_the_next_prompt(self):
+        worker = QueueWorker()
+        worker.loaded_engine_family = "h3"
+        events = []
+        worker.comfy.free_models = AsyncMock(side_effect=lambda: events.append("free"))
+
+        async def fake_sleep(seconds):
+            events.append(("sleep", seconds))
+
+        with patch("backend.worker.asyncio.sleep", side_effect=fake_sleep):
+            await worker._unload_other_engine_family({"engine": "ltx"})
+
+        self.assertEqual(events, ["free", ("sleep", 2.0)])
+        self.assertEqual(worker.loaded_engine_family, "ltx")
 
 
 if __name__ == "__main__":

@@ -202,6 +202,11 @@ class LtxVideoWorkflowTests(unittest.TestCase):
         large = self.build("text", width=1888, height=1056, sharp_decode=True)
         self.assertEqual((large["40"]["inputs"]["horizontal_tiles"], large["40"]["inputs"]["vertical_tiles"]), (6, 4))
 
+    def test_sharp_decode_blends_tiles_wide_enough_to_hide_seams(self):
+        for size in ((1600, 896), (1888, 1056)):
+            nodes = self.build("opening", first_frame_name="first.png", width=size[0], height=size[1], sharp_decode=True)
+            self.assertEqual(nodes["40"]["inputs"]["overlap"], 4)
+
     def test_sharp_decode_reads_the_cropped_latent_when_a_last_frame_is_pinned(self):
         nodes = self.build("closing", last_frame_name="last.png", sharp_decode=True)
         self.assertEqual(nodes["40"]["inputs"]["latents"], ["37", 2])

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Sequential I2V Continuity"
+  short_description: "Generate and assemble smooth sequential I2V shots"
