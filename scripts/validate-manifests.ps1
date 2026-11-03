@@ -11,7 +11,7 @@ foreach ($item in $dependencies.repositories) {
     if ([string]$item.url -notmatch '^https://') { throw "Repository URL must use HTTPS for $($item.name)" }
     if ([string]$item.target -match '(^|/|\\)\.\.(?=/|\\|$)') { throw "Unsafe repository target: $($item.target)" }
 }
-if ($dependencies.repositories.Count -ne 5) { throw 'Expected five pinned repositories.' }
+if ($dependencies.repositories.Count -ne 6) { throw 'Expected six pinned repositories.' }
 if ($models.models.Count -ne 13) { throw 'Expected thirteen pinned model files.' }
 foreach ($model in $models.models) {
     if ([int64]$model.bytes -le 0) { throw "Invalid byte count for $($model.name)" }

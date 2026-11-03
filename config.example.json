@@ -9,7 +9,8 @@
   },
   "comfy": {
     "host": "127.0.0.1",
-    "port": 8190
+    "port": 8190,
+    "memory_mode": "dynamic"
   },
   "agents": {
     "codex_command": "codex",

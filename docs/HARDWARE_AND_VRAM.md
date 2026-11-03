@@ -31,6 +31,7 @@ card" and "How to verify a change" exactly.
 | Setting | Value on the 3080 | File | Why |
 | --- | --- | --- | --- |
 | ComfyUI memory flags | `--reserve-vram 0.9 --enable-dynamic-vram --async-offload 2` | `backend/comfy.py` (launch arguments) | Keeps 0.9 GB free for Windows and the desktop; lets ComfyUI stream weights between RAM and VRAM. These are the flags that behaved well in direct runs on this card (`docs/H3_RUNTIME_NOTES.md`) |
+| Steady Memory node on Pika Sage jobs | async offload off and GPU waits in attention, for that job's sampling only | `backend/workflows.py` (`apply_steady_memory`), `custom_nodes/ComfyUI-H3-SteadyMemory` | Keeps Pika Sage near 9.2 GB instead of 9.7; above about 9.7 GB the card spills and runs 2-4x slower (see "H3 stall, other GPU apps") |
 | Frame size cap | 2,000,000 pixels | `backend/generation.py` (`MAX_PIXELS`), the `jobs` table CHECK in `backend/db.py`, and the UI | Larger frames ran out of memory or became very slow |
 | H3 video models | INT8 "convrot" FL2VA / Ref2VA / Fused SLA, INT8 video VAE | `backend/config.py` | The BF16 versions do not fit in 10 GB |
 | H3 text encoder | Qwen3-VL 32B in NVFP4 (4-bit); optional ClipProj 4B FP8 | `backend/config.py`; ClipProj is a per-job choice | The 32B encoder is the largest model; ClipProj trades accuracy for memory |
@@ -45,7 +46,20 @@ card" and "How to verify a change" exactly.
 | LTX reference size | Fixed 768×448 grid, upscaled ×2 to 1536×896, landscape, up to 5 s | `backend/generation.py` (`LTX_REFERENCE_*`) | **Not a VRAM limit**: the Ingredients LoRA was trained only at 768×448; other sizes failed in tests |
 | LTX 2.3 reference | Unload all models before the job | `backend/worker.py` | The 2.3 checkpoint stages about 43 GB of RAM |
 | Idle unload | Unload models after 5 minutes without jobs | `backend/worker.py` (`free_models` on idle) | Gives the memory back to the rest of the PC |
+| Engine-switch unload | Unload all models when the next job's engine family (LTX, H3, Fused SLA) differs from the last one, then wait 2 s before submitting | `backend/worker.py` (`_unload_other_engine_family`) | ComfyUI keeps every loaded model in RAM: after LTX and H3 jobs it held 88.9 GB committed on a 64 GB PC, and one H3 first step took 6:37 instead of about 2:15 (2026-10-27). The wait is needed because ComfyUI applies `/free` between prompts. Costs one model reload per switch |
 | Load warning in the UI | Relative to 736×416, 5 s, 4 steps on Turbo | `src/main.tsx` (`relativeLoad`) | Calibrated on the 3080; asks for confirmation on heavy jobs |
+
+`comfy.memory_mode` in local configuration defaults to `dynamic`, preserving
+the launch flags above. The optional `legacy` recovery mode selects
+`--disable-dynamic-vram --disable-async-offload --disable-pinned-memory` while
+retaining the 0.9 GB reserve. This bypasses dynamic prefetch and CUDA host
+registration when stack diagnostics show those calls blocking. It needs a
+ComfyUI restart and may be slower. Disabling those paths does not reduce video
+activation memory: an eight-second H3 Fused SLA 1.5 MP shot still spilled about
+4 GB into shared GPU memory and advanced too slowly in the October 23 lab.
+The five-second production recovery is tracked in
+`docs/ltx25_test/TUMBLE_PUFFS_MINIMAX.md`; do not treat the legacy option as proof
+that long, high-resolution clips fit this GPU.
 
 Measured on the 3080 (5 s clips unless noted): H3 Turbo v4 at 0.7 MP, 6 steps
 used about 7.35 GB. LTX 2.5 at 1600×896 peaked at 9.4–9.6 GB; LTX at 10 s peaked
@@ -106,3 +120,60 @@ For a smaller card (8 GB): expect to lower sizes, prefer ClipProj, keep
 5. Run the test suite and `npm run build`. A unit test never proves a GPU
    result.
 6. Record the new numbers in this file with the card name.
+
+## Job diagnostics
+
+Every generation job stores its evidence in `metrics_json` (`state/jobs.sqlite3`).
+It is saved when the job is submitted, every 30 seconds while it runs, and at the
+end, so stuck and failed jobs keep it too. The public job API never returns
+`diagnostics` or `samples`.
+
+| Field | Contents |
+| --- | --- |
+| `runtime_json.comfy.memory_mode` | `dynamic`, `legacy` or `default`, read from ComfyUI's launch arguments |
+| `diagnostics.graph` | The exact graph sent to ComfyUI: every node with its input values; links are `[node id, output index]` |
+| `diagnostics.host_at_start` | GPU name, driver, PCIe link and power limit; RAM, commit charge and page file; Windows power plan; the ten processes holding the most RAM |
+| `diagnostics.timeline.nodes` | Each node as it starts executing, in seconds since the job started; `cached_nodes` lists nodes ComfyUI reused |
+| `diagnostics.timeline.step_seconds` | Duration of each progress step per node; the sampler (node `14` in H3 graphs) shows slow first steps directly |
+| `diagnostics.comfy_log` | ComfyUI log lines for this job about model loading, offload or staging, memory warnings and errors |
+| `samples` | One sample every 5 seconds: VRAM, GPU load, power, SM clock, memory-bus load, PCIe generation, free RAM, commit charge, CPU load, and the ComfyUI process's working set, private memory, CPU time and page faults. The first 10 minutes and the last 50 are kept |
+
+A slow first step with low GPU power, low free RAM and fast-rising
+`comfy_page_faults` means offloaded weights are being read back from the page
+file. Compare `memory_mode` before blaming the model: on the 3080, `legacy`
+took about 35% longer than `dynamic` for the same 1.5 MP H3 Turbo shots.
+
+## Singularity, Pika and the T8 node pack
+
+Singularity's T8 tiers need `comfyui-minimax-h3-audio-T8` pinned to `e576eba` (newer versions need nodes ComfyUI 0.33 lacks).
+ComfyUI logs "IMPORT FAILED" for it (`io.Hidden.execution_list`), yet its 549 node classes load, including the Dual-Clock
+sampler. Proof it does not change existing flows (2026-11-01, `h3-skinlab/tests/ab_t8.py`): four production jobs re-rendered
+with the same inputs and seeds came out with identical full-size video and audio hashes, with equal times once warm and no
+core sampler or scheduler definition changed. Peak VRAM varies by 300-400 MB with what else is open on the PC, with or
+without T8. Pika and the Singularity App flow tier use no T8 node. Both engines tile the decode at 512/64/64/16.
+Singularity and Pika count as their own model families, so ComfyUI unloads when switching to or from them.
+
+**H3 stall, other GPU apps, and the Steady Memory node.** An H3 job on this card can stay at 100% GPU util but 130-260 W
+(healthy is about 320-335 W) and 0-4% memory util, with 6-18 GB/s over PCIe, while the output stays identical. Steps take
+2-4x longer. It tracks VRAM level: clean runs stayed under about 9.6 GB, stalls started from about 9.7-9.75 GB (the
+Windows budget for the card is about 8.7 GB, so above it the driver pages buffers to shared memory). The same weight copy
+then took 0.25 s or 7-8 s depending only on its address.
+
+The main trigger is other programs on the GPU. On 2026-11-03 the unchanged production app stalled on a Turbo first + last
+job that took 807 s on 2026-10-28 (about 422 s per step, 9.70 GB); with Epic Games Launcher, Chrome, Telegram and other
+unneeded programs closed, the same job and seed ran 810 s at 336 W, peaking at 9.50 GB, with bit-identical output. Before a
+long batch, close games, launchers and browsers; check `nvidia-smi` shows well under 1 GB used with ComfyUI stopped.
+
+Pika with Sage peaks right at the edge even on a clean PC (9.64-9.72 GB without help), so it gets `ComfyUI-H3-SteadyMemory`
+(local node, `scripts/install-steady-memory.ps1`): for that job's sampling it turns off async weight offload and waits for
+the GPU around H3's attention kernel, after each modulation step, and after each attention and MLP block. Without waits,
+PyTorch cannot reuse a temporary buffer until the GPU is done with it, so its pool grows. The worker adds it after the
+Sage node on Pika Sage jobs only (`steady_memory_needed` in `backend/workflows.py`). Measured 2026-11-03 on a clean PC,
+same seeds: with the node Pika Sage first + last 516 s and opening 468 s at 9.17-9.29 GB; without it 525 s and 491-501 s
+at 9.64-9.72 GB. Singularity God peaks at only 9.19 GB and is faster without the node (572 s against 633 s), with the same
+decoded video and audio either way, so Singularity does not get it. LTX and Turbo do not get it either.
+
+Tried without effect on the stall: unloading before sampling, the fp16 VAE, `--reserve-vram 1.5` and `3`,
+`--disable-nvml-pressure`, `empty_cache` on slowdown, a preallocated pool, a 0.2 GB VBAR cap, async offload off alone, and
+waits only after each block. Sparse attention stays refused for Pika opening and first + last: it was not retested.
+

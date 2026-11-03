@@ -41,8 +41,9 @@ output.
 | Balanced | 896×1600 | 1600×896 | 1216×1216 | 1376×1024 | 1024×1376 |
 | High | 1056×1888 | 1888×1056 | 1408×1408 | 1632×1216 | 1216×1632 |
 
-Rules enforced by the bridge: lip-sync mode only, an opening image is
-required, no closing image, 1–10 seconds, fixed 8 steps. High stays inside
+Rules the bridge enforces for LTX lip-sync: an opening image is required, no
+closing image, 1–10 seconds, fixed 8 steps; the decode and sampler options
+below do not apply. High stays inside
 the app's 2.0 MP limit (the speed-lab run used 1088×1920).
 
 Why one pass: in the speed-lab tests the two-stage graph (half-size pass,
@@ -54,6 +55,20 @@ the prompt describes that same framing with a static camera.
 The original two-stage graph above is kept for reference; the app does not
 run it.
 
+## LTX text and image-to-video in the app
+
+Text, opening frame, closing frame and first + last frame use the same
+one-pass recipe as lip-sync (8 distilled steps at full size, Balanced or High),
+with LTX generating the sound. The opening image is placed in the first frame;
+a closing image is pinned to the last frame and its guide frame is cropped
+before decoding. 1–10 seconds.
+
+Measured in the app at Balanced size, 5 s: text 3:25, opening frame 2:49,
+closing frame 3:50, first + last frame 3:45. Describe the motion, the camera
+and the sound in the prompt, and keep actions gentle: fast spins made details
+pop between frames in the lab. Per-mode advice and the comparison with H3 are
+in `docs/WORKFLOW_GUIDE.md`.
+
 ## LTX reference mode in the app
 
 Reference mode with the LTX engine takes exactly one reference sheet (one
@@ -61,7 +76,9 @@ image laying out the characters, props and location) and offers two recipes,
 each built exactly as it passed the speed-lab tests. Nothing else is
 configurable: both are landscape only, render 1536×896, and accept 1–5
 seconds. Longer clips, other sizes and vertical sheets failed or jumped to a
-new shot mid-clip in the lab.
+new shot mid-clip in the lab. For a vertical scene, make a vertical still from
+the sheet with any image tool and use opening-frame mode instead; that gave the
+cleanest vertical clips in the lab.
 
 Both recipes run Lightricks' Ingredients IC-LoRA on the 768×448 grid it was
 trained on (the sheet is letterboxed, never cropped), then upscale the latent
@@ -107,5 +124,8 @@ default (lip-sync and reference mode do not use them):
 - **Calm sampler** uses `euler` instead of `euler_ancestral`, which adds fresh
   noise every step; in the lab it cut detail flicker by about 14%.
 
-Both were proven on opening-frame clips (lab V4 vs V6–V8); the other modes
-use the same graph but were not tested separately.
+Both were proven on opening-frame clips (lab V4 vs V6–V8). App runs with the
+same seed, options on versus off, confirmed sharp decode removes the soft
+frames at the 4-second mark (opening frame) and showed a smaller flicker gain
+from the calm sampler than the lab (1–4% on opening frame and text). Closing
+and first + last frame each had one clean app run with both options on.

@@ -1,7 +1,8 @@
 import json
+from pathlib import Path
 from copy import deepcopy
 
-from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
+from .config import (OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_SIGMAS, AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      FL2VA_MODEL, FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, LTX23_CHECKPOINT,
                      LTX23_DISTILLED_LORA, LTX23_INGREDIENTS_LORA,
@@ -9,8 +10,9 @@ from .config import (AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      LTX25_INGREDIENTS_LORA, LTX25_LATENT_UPSCALER, LTX_AUDIO_VAE,
                      LTX_TEXT_ENCODER, LTX_TRANSFORMER,
                      LTX_VIDEO_VAE, LTX_WORKFLOW,
-                     REF2VA_MODEL, REF2VA_TURBO_LORA, TEXT_ENCODER, TURBO_LORAS,
-                     VIDEO_VAE)
+                     REF2VA_MODEL, REF2VA_TURBO_LORA, SINGULARITY_FULL_MODEL, SINGULARITY_MODEL,
+                     SKIN_PEOPLE_LORA, SKIN_REF2V_8STEP_LORA, TEXT_ENCODER,
+                     TURBO_LORAS, VIDEO_VAE)
 
 FPS = 24
 H3_DURATION_EXPRESSION = "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17"
@@ -688,7 +690,218 @@ def reference_workflow(
     return deepcopy(nodes)
 
 
+# Singularity skin tiers: the LoRA stack for each (one speed LoRA at a time).
+# The People LoRA only works when the prompt starts with its trigger word.
+SKIN_TRIGGER = "r34l1sm"
+SKIN_TIER_LORAS = {
+    "skin_god": (SKIN_PEOPLE_LORA, TURBO_LORAS["v4"]),
+    "skin_balanced": (SKIN_PEOPLE_LORA, SKIN_REF2V_8STEP_LORA),
+    "skin_max": (SKIN_REF2V_8STEP_LORA,),
+    "skin_app": (SKIN_PEOPLE_LORA,),
+}
+
+
+SKIN_SPEED_LORAS = {
+    "pika": PIKA_REF2VA_LORA,
+    "ema600": TURBO_LORAS["v4"],
+    "ref8": SKIN_REF2V_8STEP_LORA,
+    "ref_v01": REF2VA_TURBO_LORA,
+}
+SKIN_DEFAULT_OPTIONS = {
+    "model": "pruned", "speed_lora": "tier", "speed_strength": 1.0, "people_strength": 1.0,
+    "shift_video": 12.0, "shift_audio": 3.0, "scheduler": "beta", "tail_steps": 0,
+    "flow": "t8", "ref_size": "max",
+}
+
+
+def skin_loras(tier: str, options: dict, mode: str = "reference") -> list[tuple[str, float]]:
+    """The (LoRA, strength) stack for a tier after the per-job overrides."""
+    tier_loras = SKIN_TIER_LORAS[tier]
+    people = SKIN_PEOPLE_LORA in tier_loras and options["people_strength"] > 0
+    if options["speed_lora"] == "tier":
+        speed = [lora for lora in tier_loras if lora != SKIN_PEOPLE_LORA]
+    elif options["speed_lora"] == "none":
+        speed = []
+    else:
+        speed = [PIKA_FL2VA_LORA if options["speed_lora"] == "pika" and mode != "reference"
+                 else SKIN_SPEED_LORAS[options["speed_lora"]]]
+    return ([(SKIN_PEOPLE_LORA, options["people_strength"])] if people else []) + \
+        [(lora, options["speed_strength"]) for lora in speed]
+
+
+def skin_prompt(prompt: str, people: bool) -> str:
+    """Put the People LoRA trigger on its own first line, or remove it when the People LoRA is off."""
+    lines = prompt.strip().splitlines()
+    while lines and lines[0].strip().lower() == SKIN_TRIGGER:
+        lines.pop(0)
+    body = "\n".join(lines).strip()
+    return f"{SKIN_TRIGGER}\n\n{body}" if people else body
+
+
+def _skin_model(options: dict, mode: str = "reference") -> str:
+    if options["model"] == "base":
+        return REF2VA_MODEL if mode == "reference" else FL2VA_MODEL
+    return SINGULARITY_FULL_MODEL if options["model"] == "full" else SINGULARITY_MODEL
+
+
+def singularity_workflow(
+    prompt: str,
+    duration: float,
+    seed: int,
+    prefix: str,
+    tier: str,
+    width: int,
+    height: int,
+    image_names: list[str],
+    mode: str = "reference",
+    first_frame_name: str | None = None,
+    last_frame_name: str | None = None,
+    video_names: list[str] | None = None,
+    audio_name: str | None = None,
+    include_audio: bool = True,
+    steps: int = 8,
+    options: dict | None = None,
+):
+    """One pass of the Prompt Mastery "Most Realistic Skin" setup (8 steps by default), in any H3 mode.
+
+    Singularity -> tier LoRAs -> T8 Dual-Clock sampler (shift 12 video / 3 audio,
+    dual_clock_euler, beta). Reference mode conditions through Reference-to-Video
+    (refs at 'max' size), the pack's own graph. Text and frame modes use
+    Image-to-Video, and lip-sync locks the uploaded audio with Native AudioLock,
+    as the app's Turbo flows do. The video decode is tiled with the 10 GB settings.
+    """
+    lip_sync = mode == "lip_sync"
+    condition = "136" if mode == "reference" else "104"
+    nodes = _common_decode(condition, "130", {"id": "130", "scheduler": "130"}, seed, prefix,
+                           reference=True, include_audio=include_audio and not lip_sync)
+    options = {**SKIN_DEFAULT_OPTIONS, **(options or {})}
+    nodes["11"]["inputs"]["vae_name"] = FUSED_VIDEO_VAE
+    nodes["10"] = {"class_type": "VAEDecodeTiled", "inputs": {
+        "samples": ["14", 0], "vae": ["11", 0],
+        "tile_size": 512, "overlap": 64, "temporal_size": 64, "temporal_overlap": 16,
+    }}
+    loras = skin_loras(tier, options, mode)
+    people = any(lora == SKIN_PEOPLE_LORA for lora, _ in loras)
+    nodes["14"]["inputs"].update(sampler=["130", 1], sigmas=["130", 2])
+    if options["tail_steps"]:
+        nodes["131"] = {"class_type": "MiniMaxH3AVTailDetailScheduleT8Advanced", "inputs": {
+            "sigmas": ["130", 2], "extra_tail_steps": options["tail_steps"], "spacing": "video_sigma_linear",
+            "shift_video": options["shift_video"], "shift_audio": options["shift_audio"], "profile": "custom_strict"}}
+        nodes["14"]["inputs"]["sigmas"] = ["131", 0]
+    nodes["127"] = {"class_type": "UNETLoader", "inputs": {"unet_name": _skin_model(options, mode), "weight_dtype": "default"}}
+    model = ["127", 0]
+    for index, (lora, strength) in enumerate(loras):
+        node_id = str(160 + index)
+        if lora == TURBO_LORAS["v4"]:
+            # EMA-600 has unprefixed keys and adaln updates that the pruned base
+            # folds into its curves; ComfyUI 0.33's LoRA loader skips all 518 keys.
+            # The app's Turbo LoRA node applies it (same settings as the app).
+            nodes[node_id] = {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
+                "model": model, "lora_name": lora, "strength": strength, "low_vram": True}}
+        else:
+            nodes[node_id] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": model, "lora_name": lora, "strength_model": strength}}
+        model = [node_id, 0]
+    latent = [condition, 1]
+    if lip_sync:
+        nodes["23"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+        nodes["170"] = {"class_type": "MiniMaxH3NativeAudioLock", "inputs": {
+            "model": model, "av_latent": [condition, 1], "audio_vae": ["24", 0], "audio": ["23", 0]}}
+        model, latent = ["170", 0], ["170", 1]
+        nodes["91"]["inputs"]["audio"] = ["170", 2]
+    nodes["14"]["inputs"]["latent_image"] = latent
+    nodes["130"] = {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {
+        "model": model, "av_latent": latent, "steps": steps, "shift_video": options["shift_video"],
+        "shift_audio": options["shift_audio"], "sampler_name": "dual_clock_euler", "scheduler": options["scheduler"],
+    }}
+    if options["flow"] == "pika":
+        # Pika H3 Flex release contract (as in Comfy-Org's Pika templates): fixed knots, lcm sampler.
+        nodes["130"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "lcm"}}
+        nodes["132"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": PIKA_SIGMAS}}
+        nodes["14"]["inputs"].update(sampler=["130", 0], sigmas=["132", 0])
+        nodes["16"]["inputs"]["model"] = model
+    if mode != "reference":
+        nodes["104"] = {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["13", 0], "vae": ["11", 0], "prompt": skin_prompt(prompt, people),
+            "width": width, "height": height, "length": h3_frame_count(duration)}}
+        if first_frame_name:
+            nodes["200"] = {"class_type": "LoadImage", "inputs": {"image": first_frame_name}}
+            nodes["104"]["inputs"]["first_frame"] = ["200", 0]
+        if last_frame_name:
+            nodes["201"] = {"class_type": "LoadImage", "inputs": {"image": last_frame_name}}
+            nodes["104"]["inputs"]["last_frame"] = ["201", 0]
+        return deepcopy(nodes)
+    nodes["136"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+        "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": skin_prompt(prompt, people),
+        "width": width, "height": height, "length": h3_frame_count(duration), "ref_image_size": options["ref_size"],
+        "ref_images": {}}}
+    for index, name in enumerate(image_names[:9]):
+        node_id = str(137 + index)
+        nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        nodes["136"]["inputs"]["ref_images"][f"ref_image_{index}"] = [node_id, 0]
+    for index, name in enumerate((video_names or [])[:3]):
+        load_id = str(150 + index * 2)
+        component_id = str(151 + index * 2)
+        nodes[load_id] = {"class_type": "LoadVideo", "inputs": {"file": name}}
+        nodes[component_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [load_id, 0]}}
+        nodes["136"]["inputs"].setdefault("ref_videos", {})[f"ref_video_{index}"] = [component_id, 0]
+        if include_audio:
+            nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
+    if audio_name:
+        nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["180", 0]}
+    return deepcopy(nodes)
+
+
+def singularity_app_workflow(
+    prompt: str,
+    duration: float,
+    seed: int,
+    prefix: str,
+    mode: str,
+    width: int,
+    height: int,
+    first_frame_name: str | None = None,
+    last_frame_name: str | None = None,
+    audio_name: str | None = None,
+    include_audio: bool = True,
+    steps: int = 8,
+    options: dict | None = None,
+):
+    """The app's own Turbo v4 graph (8 steps by default) with Singularity as the model and the People LoRA added.
+
+    Lip-sync is native_audio_lock_workflow and the other modes are turbo_workflow, so
+    everything but the model and the extra LoRA matches the app's tested 1.5 MP jobs.
+    The People LoRA goes in through the standard loader, the same add_patches merge the
+    Turbo LoRA node uses with low_vram on.
+    """
+    options = {**SKIN_DEFAULT_OPTIONS, **(options or {})}
+    people = options["people_strength"] > 0
+    if mode == "lip_sync":
+        nodes = native_audio_lock_workflow(
+            skin_prompt(prompt, people), duration, seed, prefix, audio_name=audio_name,
+            first_frame_name=first_frame_name, last_frame_name=last_frame_name, steps=steps,
+            width=width, height=height, turbo=True, turbo_profile="v4")
+    else:
+        nodes = turbo_workflow(
+            skin_prompt(prompt, people), duration, seed, prefix, first_frame_name=first_frame_name,
+            last_frame_name=last_frame_name, steps=steps, width=width, height=height,
+            turbo_profile="v4", include_audio=include_audio)
+    # Exact size, as in the lab tests, instead of the megapixel selector.
+    nodes["104"]["inputs"].update(width=width, height=height)
+    nodes["6"]["inputs"]["unet_name"] = _skin_model(options)
+    for node in nodes.values():
+        if node["class_type"] == "MiniMaxH3SigmaShift":
+            node["inputs"].update(shift_video=options["shift_video"], shift_audio=options["shift_audio"])
+    if people:
+        nodes["165"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": ["6", 0], "lora_name": SKIN_PEOPLE_LORA, "strength_model": options["people_strength"]}}
+        nodes["18"]["inputs"]["model"] = ["165", 0]
+    return nodes
+
+
 SAGE_ATTENTION_NODE = "PathchSageAttentionKJ"
+STEADY_MEMORY_NODE = "H3SteadyMemory"
 SLA_ATTENTION_NODE = "H3SLAAttention"
 # Same settings as the Fused SLA chain, measured on the Turbo flows in the
 # speed lab (sparsity 0.90, 64x64 blocks, dense below 8192 tokens).
@@ -706,6 +919,12 @@ def attention_node_classes(attention_mode: str) -> set[str]:
     if attention_mode in {"sla", "sage_sla"}:
         classes.add(SLA_ATTENTION_NODE)
     return classes
+
+
+def steady_memory_needed(engine: str, attention_mode: str) -> bool:
+    """Pika with Sage peaks near the card's spill point; Singularity stays well below it and runs faster without
+    the waits. See docs/HARDWARE_AND_VRAM.md."""
+    return engine == "pika" and attention_mode == "sage"
 
 
 def _insert_model_patch(nodes: dict, source: str, class_type: str, inputs: dict) -> str:
@@ -749,10 +968,25 @@ def apply_attention_mode(workflow: dict, attention_mode: str) -> dict:
     )
     if anchor is None:
         raise ValueError("Workflow has no model loader to patch")
+    # Pika's and the Singularity tiers' LoRAs load through LoraLoaderModelOnly; the patches go after those too.
+    while True:
+        lora = next((key for key, node in nodes.items() if node["class_type"] in ("LoraLoaderModelOnly", "MiniMaxH3TurboLoRA")
+                     and node["inputs"].get("model") == [anchor, 0]), None)
+        if lora is None:
+            break
+        anchor = lora
     if attention_mode in {"sage", "sage_sla"}:
         anchor = _insert_model_patch(nodes, anchor, SAGE_ATTENTION_NODE, sage_inputs)
     if attention_mode in {"sla", "sage_sla"}:
         _insert_model_patch(nodes, anchor, SLA_ATTENTION_NODE, dict(SLA_ATTENTION_INPUTS))
+    return nodes
+
+
+def apply_steady_memory(workflow: dict) -> dict:
+    """Return a copy of a Sage workflow with the memory patch right after the Sage node."""
+    nodes = deepcopy(workflow)
+    sage = next(key for key, node in nodes.items() if node["class_type"] == SAGE_ATTENTION_NODE)
+    _insert_model_patch(nodes, sage, STEADY_MEMORY_NODE, {})
     return nodes
 
 
@@ -909,17 +1143,25 @@ def ltx_video_workflow(
     return nodes
 
 
+LTX_DECODE_OVERLAP = 4
+
+
 def _ltx_seam_free_decode(samples: list, vae: list, frames: int, pixels: int) -> dict:
     """LTX's spatial-only tiled decode: the whole clip in one temporal pass.
 
     Lab peaks on the RTX 3080: 4x2 tiles at 1600x896 / 121 frames used 7.9 GB,
     6x4 tiles at 1536x896 / 241 frames used 6.6 GB. Longer or larger clips
     get the smaller 6x4 tiles.
+
+    Tiles blend over ``overlap`` latent cells (32 px each). With 1 cell the
+    tiles' slight brightness differences showed as faint rectangles on smooth
+    surfaces, with steps at the blend edges (S04 A/B at 1888x1056); 4 cells
+    fade them out.
     """
     small = frames <= 121 and pixels <= 1600 * 896
     return {"class_type": "LTXVTiledVAEDecode", "inputs": {
         "vae": vae, "latents": samples, "horizontal_tiles": 4 if small else 6,
-        "vertical_tiles": 2 if small else 4, "overlap": 1, "last_frame_fix": False}}
+        "vertical_tiles": 2 if small else 4, "overlap": LTX_DECODE_OVERLAP, "last_frame_fix": False}}
 
 
 # The Ingredients IC-LoRA grid (the only size Lightricks trained) and the x2
@@ -1045,3 +1287,120 @@ def ltx_reference_workflow(
     nodes["42"] = {"class_type": "CreateVideo", "inputs": video_inputs}
     nodes["43"] = {"class_type": "SaveVideo", "inputs": {"video": ["42", 0], "filename_prefix": prefix, "format": "auto", "codec": "auto"}}
     return nodes
+
+
+# ComfyUI's official LTX-2.5 templates (Comfy-Org/workflow_templates, video_ltx2_5_i2v / _flf2v),
+# exported to API form by ComfyUI's own frontend. Only the inputs change:
+# images, prompt, size, length, seed, prefix. The prompt-enhancer branch (off in the templates; its
+# Gemma-E2B encoder is not installed) is removed and the prompt goes straight to the text encoder.
+
+def official_ltx_template_workflow(mode: str, prompt: str, duration: float, seed: int, prefix: str, width: int,
+                                   height: int, first_frame_name: str, last_frame_name: str | None = None) -> dict:
+    nodes = json.loads(Path(OFFICIAL_LTX_TEMPLATES[mode]).read_text(encoding="utf-8"))
+
+    def by_class(cls):
+        return [key for key, node in nodes.items() if node["class_type"] == cls]
+
+    def used(key):
+        return any(isinstance(value, list) and value and value[0] == key
+                   for node in nodes.values() for value in node["inputs"].values())
+
+    for cls in ("TextGenerateLTX2Prompt", "PreviewAny", "ComfySwitchNode", "PrimitiveStringMultiline"):
+        for key in by_class(cls):
+            nodes.pop(key)
+    for key in by_class("CLIPLoader"):
+        if nodes[key]["inputs"]["clip_name"].startswith("gemma4_e2b"):
+            nodes.pop(key)
+    for key in by_class("PrimitiveBoolean"):
+        if not used(key):
+            nodes.pop(key)
+    positive = [key for key in by_class("CLIPTextEncode") if isinstance(nodes[key]["inputs"]["text"], list)]
+    assert len(positive) == 1, positive
+    nodes[positive[0]]["inputs"]["text"] = prompt
+    nodes[by_class("SaveVideo")[0]]["inputs"]["filename_prefix"] = prefix
+    for key in by_class("RandomNoise"):
+        if nodes[key]["inputs"]["noise_seed"] != 42:  # the i2v template's fixed refine seed (42) stays as shipped
+            nodes[key]["inputs"]["noise_seed"] = seed
+    seconds = [key for key in by_class("PrimitiveInt") if nodes[key]["inputs"]["value"] == 5]
+    assert len(seconds) == 1, seconds
+    nodes[seconds[0]]["inputs"]["value"] = int(round(duration))
+    loads = by_class("LoadImage")
+    if mode == "opening":
+        nodes[loads[0]]["inputs"]["image"] = first_frame_name
+        selector = by_class("ResolutionSelector")[0]
+        for key in by_class("PrimitiveInt"):
+            value = nodes[key]["inputs"]["value"]
+            if value == [selector, 0]:
+                nodes[key]["inputs"]["value"] = width
+            elif value == [selector, 1]:
+                nodes[key]["inputs"]["value"] = height
+        nodes.pop(selector)
+    else:
+        # The last frame is the image whose resize -> preprocess chain feeds the LTXVAddGuide at frame -1.
+        def guide_frame(load_key):
+            for resize_key, resize in nodes.items():
+                if resize["class_type"] == "ResizeImageMaskNode" and resize["inputs"].get("input") == [load_key, 0]:
+                    for pre_key, pre in nodes.items():
+                        if pre["class_type"] == "LTXVPreprocess" and pre["inputs"]["image"] == [resize_key, 0]:
+                            for guide in nodes.values():
+                                if guide["class_type"] == "LTXVAddGuide" and guide["inputs"]["image"] == [pre_key, 0]:
+                                    return guide["inputs"]["frame_idx"]
+            raise ValueError(f"LoadImage {load_key} feeds no guide")
+        for key in loads:
+            nodes[key]["inputs"]["image"] = last_frame_name if guide_frame(key) == -1 else first_frame_name
+        for key in by_class("PrimitiveInt"):
+            if nodes[key]["inputs"]["value"] == 1280:
+                nodes[key]["inputs"]["value"] = width
+            elif nodes[key]["inputs"]["value"] == 720:
+                nodes[key]["inputs"]["value"] = height
+    return deepcopy(nodes)
+
+
+_NODE_VALUE_INPUTS = ("value", "image", "audio", "file", "video", "unet_name", "vae_name", "clip_name", "lora_name",
+                      "ckpt_name", "model_name", "sampler_name", "text", "string")
+
+
+def _linked_value(workflow: dict, link: list, depth: int = 0):
+    """The constant a link ends at (a primitive, a file, a passthrough expression), or None if it is computed at run time."""
+    node = workflow.get(link[0])
+    if not isinstance(node, dict) or depth > 8:
+        return None
+    inputs = node.get("inputs") or {}
+    expression = inputs.get("expression")
+    if isinstance(expression, str) and f"values.{expression}" in inputs:
+        candidates = [inputs[f"values.{expression}"]]
+    elif isinstance(expression, str):
+        return None
+    else:
+        candidates = [inputs[key] for key in _NODE_VALUE_INPUTS if key in inputs][:1]
+    for item in candidates:
+        if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
+            return _linked_value(workflow, item, depth + 1)
+        return item
+    return None
+
+
+def workflow_node_values(workflow: dict, text_limit: int = 240) -> list[dict]:
+    """Each node's class and input values for the job log. A link to another node shows the value it carries
+    and where it comes from, or the source node's class when the value is only computed at run time."""
+    def shorten(item):
+        if isinstance(item, int) and not isinstance(item, bool) and abs(item) > 2 ** 53:
+            return str(item)  # 64-bit seeds lose digits as JSON numbers in the browser
+        if isinstance(item, str) and len(item) > text_limit:
+            return item[:text_limit] + f"... ({len(item)} chars)"
+        return item
+    def value(item):
+        if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
+            source = f"#{item[0]}" + (f".{item[1]}" if item[1] else "")
+            linked = _linked_value(workflow, item)
+            if linked is not None:
+                return f"{shorten(linked)} (from {source})"
+            return f"from {(workflow.get(item[0]) or {}).get('class_type', 'node')} {source}"
+        if isinstance(item, dict):
+            return {key: value(entry) for key, entry in item.items()}
+        return shorten(item)
+    def order(node_id):
+        return (0, int(node_id)) if str(node_id).isdigit() else (1, str(node_id))
+    return [{"id": str(node_id), "class_type": str(workflow[node_id].get("class_type")),
+             "inputs": {key: value(entry) for key, entry in (workflow[node_id].get("inputs") or {}).items()}}
+            for node_id in sorted(workflow, key=order)]

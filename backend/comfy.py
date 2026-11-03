@@ -1,5 +1,4 @@
 import asyncio
-import ctypes
 import json
 import os
 import re
@@ -14,8 +13,9 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 import websockets
 
-from .config import (COMFY_CODE, COMFY_HOST, COMFY_PORT, COMFY_PYTHON,
+from .config import (COMFY_CODE, COMFY_HOST, COMFY_MEMORY_MODE, COMFY_PORT, COMFY_PYTHON,
                      COMFY_URL, INPUT, LOGS, MODELS, OUTPUT, TEMP, USER)
+from .diagnostics import memory_mode_from_argv, system_sample
 
 
 class ComfyCancellationError(RuntimeError):
@@ -186,6 +186,7 @@ class ComfyClient:
                 "host": COMFY_HOST,
                 "port": COMFY_PORT,
                 "argv": command_argv,
+                "memory_mode": memory_mode_from_argv(command_argv),
                 "command_line": subprocess.list2cmdline(command_line) if command_line else None,
                 "packages": system.get("comfy_package_versions") or [],
                 "log_file": str(LOGS / "comfy-8190.log"),
@@ -281,6 +282,13 @@ class ComfyClient:
             )
 
         self.log_handle = open(LOGS / "comfy-8190.log", "a", encoding="utf-8", buffering=1)
+        # Legacy loading avoids host registration/prefetch stalls on Windows.
+        # Keep this fallback synchronous and avoid CUDA host pin registration.
+        memory_flags = (
+            ["--disable-dynamic-vram", "--disable-async-offload", "--disable-pinned-memory"]
+            if COMFY_MEMORY_MODE == "legacy"
+            else ["--enable-dynamic-vram", "--async-offload", "2"]
+        )
         command = [
             str(COMFY_PYTHON), "-u", str(COMFY_CODE / "main.py"),
             "--listen", COMFY_HOST, "--port", str(COMFY_PORT),
@@ -292,7 +300,7 @@ class ComfyClient:
             "--user-directory", str(USER),
             "--database-url", "sqlite:///" + str((USER / "comfyui.db").resolve()).replace("\\", "/"),
             "--disable-auto-launch", "--disable-api-nodes",
-            "--reserve-vram", "0.9", "--enable-dynamic-vram", "--async-offload", "2",
+            "--reserve-vram", "0.9", *memory_flags,
             "--preview-method", "none",
             "--log-stdout",
         ]
@@ -610,25 +618,9 @@ def media_probe(path: Path, require_audio: bool = True) -> dict:
     return payload
 
 
-def gpu_sample() -> dict:
+def gpu_sample(pid: int | None = None) -> dict:
+    """GPU, system memory and ComfyUI process sample; empty when nvidia-smi is unavailable."""
     try:
-        result = subprocess.run([
-            "nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ], capture_output=True, text=True, timeout=10)
-        used, total, util, temp = [int(x.strip()) for x in result.stdout.strip().split(",")]
-        sample = {"vram_used_mib": used, "vram_total_mib": total, "gpu_util_percent": util, "gpu_temp_c": temp}
-        if os.name == "nt":
-            class MemoryStatus(ctypes.Structure):
-                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
-                            ("total_phys", ctypes.c_ulonglong), ("avail_phys", ctypes.c_ulonglong),
-                            ("total_page", ctypes.c_ulonglong), ("avail_page", ctypes.c_ulonglong),
-                            ("total_virtual", ctypes.c_ulonglong), ("avail_virtual", ctypes.c_ulonglong),
-                            ("avail_extended", ctypes.c_ulonglong)]
-            status = MemoryStatus(); status.length = ctypes.sizeof(status)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                sample["ram_used_mib"] = round((status.total_phys - status.avail_phys) / 1024 / 1024)
-                sample["ram_total_mib"] = round(status.total_phys / 1024 / 1024)
-        return sample
+        return system_sample(pid)
     except Exception:
         return {}

@@ -8,7 +8,11 @@ import { FeedbackToast, useFeedback } from './feedback'
 import { BotImagesPage } from './bot-images'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
-type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx'
+type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx' | 'singularity' | 'pika'
+type LtxRecipe = 'app' | 'official'
+type SkinTier = 'skin_god' | 'skin_balanced' | 'skin_max' | 'skin_app'
+type SkinMegapixels = 1 | 1.5
+type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number }
 type LtxQuality = 'balanced' | 'high'
 type LtxReferenceModel = '2.5' | '2.3'
 type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
@@ -31,12 +35,12 @@ type RuntimeMetadata = {
   }
   devices?: { name?: string; type?: string; vram_total?: number; vram_free?: number }[]
   job?: Record<string, unknown>
-  workflow?: { builder?: string; node_count?: number; node_classes?: string[] }
+  workflow?: { builder?: string; node_count?: number; node_classes?: string[]; nodes?: { id: string; class_type: string; inputs: Record<string, unknown> }[]; nodes_note?: string }
 }
 type JobSourceAsset = { field: string; kind: string; name: string; url: string }
 type Job = {
   id: string; prompt: string; mode: Mode; duration: number; audio_start?: number; status: Status; progress: number;
-  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; ltx_reference_model?: LtxReferenceModel | null; ltx_sharp_decode?: boolean | number; ltx_calm_sampler?: boolean | number; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
+  engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; ltx_reference_model?: LtxReferenceModel | null; ltx_sharp_decode?: boolean | number; ltx_calm_sampler?: boolean | number; skin_options_json?: string | null; ltx_recipe?: string | null; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number }; runtime?: RuntimeMetadata | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
@@ -178,11 +182,16 @@ type Preferences = {
   attentionMode: AttentionMode
   ltxQuality: LtxQuality
   ltxReferenceModel: LtxReferenceModel
+  ltxRecipe: LtxRecipe
   ltxSharpDecode: boolean
   ltxCalmSampler: boolean
   turboSteps: number
   fusedSlaSteps: number
   fusedWorkflow: FusedWorkflow
+  skinTier: SkinTier
+  skinMegapixels: SkinMegapixels
+  skinSteps: number
+  skinOptions: SkinOptions
   standardSteps: number
   spectrumSteps: number
   resolution: Resolution
@@ -190,24 +199,31 @@ type Preferences = {
   megapixels: number
 }
 
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
+// Mirrors backend/generation.py SKIN_OPTION_DEFAULTS (the pack's own settings).
+const SKIN_OPTION_DEFAULTS: SkinOptions = { model: 'pruned', speed_lora: 'tier', speed_strength: 1, people_strength: 1, shift_video: 12, shift_audio: 3, scheduler: 'beta', tail_steps: 0 }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxRecipe: 'app', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', skinTier: 'skin_god', skinMegapixels: 1, skinSteps: 8, skinOptions: SKIN_OPTION_DEFAULTS, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
   try {
     const saved = JSON.parse(localStorage.getItem(preferenceKey) || '{}') as Partial<Preferences>
     return {
-      engine: saved.engine === 'standard' || saved.engine === 'spectrum' || saved.engine === 'fused_sla' || saved.engine === 'ltx' ? saved.engine : 'turbo',
+      engine: saved.engine === 'standard' || saved.engine === 'spectrum' || saved.engine === 'fused_sla' || saved.engine === 'ltx' || saved.engine === 'singularity' || saved.engine === 'pika' ? saved.engine : 'turbo',
       encoder: saved.encoder === 'clipproj' ? 'clipproj' : 'native',
       turboProfile: saved.turboProfile === 'v4' ? 'v4' : 'v1',
       attentionMode: isAttentionMode(saved.attentionMode) ? saved.attentionMode : 'standard',
       ltxQuality: saved.ltxQuality === 'high' ? 'high' : 'balanced',
       ltxReferenceModel: saved.ltxReferenceModel === '2.3' ? '2.3' : '2.5',
+      ltxRecipe: saved.ltxRecipe === 'official' ? 'official' : 'app',
       ltxSharpDecode: saved.ltxSharpDecode === true,
       ltxCalmSampler: saved.ltxCalmSampler === true,
       turboSteps: Number.isInteger(saved.turboSteps) && saved.turboSteps! >= 4 && saved.turboSteps! <= 12 ? saved.turboSteps! : 4,
       fusedSlaSteps: Number.isInteger(saved.fusedSlaSteps) && saved.fusedSlaSteps! >= 4 && saved.fusedSlaSteps! <= 8 ? saved.fusedSlaSteps! : 4,
       fusedWorkflow: saved.fusedWorkflow === 'i2v_fl2v' || saved.fusedWorkflow === 'ref2va' || saved.fusedWorkflow === 'ref2va_multiref' || saved.fusedWorkflow === 'derope' || saved.fusedWorkflow === 'dyrope' ? saved.fusedWorkflow : 'direct',
+      skinTier: isSkinTier(saved.skinTier) ? saved.skinTier : 'skin_god',
+      skinMegapixels: saved.skinMegapixels === 1.5 ? 1.5 : 1,
+      skinSteps: Number.isInteger(saved.skinSteps) && saved.skinSteps! >= 4 && saved.skinSteps! <= 16 ? saved.skinSteps! : 8,
+      skinOptions: { ...SKIN_OPTION_DEFAULTS, ...(saved.skinOptions || {}) },
       standardSteps: Number.isInteger(saved.standardSteps) && saved.standardSteps! >= 8 && saved.standardSteps! <= 30 ? saved.standardSteps! : 20,
       spectrumSteps: Number.isInteger(saved.spectrumSteps) && saved.spectrumSteps! >= 8 && saved.spectrumSteps! <= 30 ? saved.spectrumSteps! : 16,
       resolution: resolutions.some(item => item.id === saved.resolution) ? saved.resolution! : '736x416',
@@ -670,6 +686,8 @@ function App() {
   const [turboV4Ready, setTurboV4Ready] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
   const [fusedSlaReady, setFusedSlaReady] = useState(false)
+  const [singularityReady, setSingularityReady] = useState(false)
+  const [pikaReady, setPikaReady] = useState(false)
   const [ltxReady, setLtxReady] = useState(false)
   const [ltxReferenceReady, setLtxReferenceReady] = useState(false)
   const [ltx25ReferenceReady, setLtx25ReferenceReady] = useState(false)
@@ -725,6 +743,8 @@ function App() {
       setCsrf(data.csrf_token)
       setReferenceReady(data.reference_ready)
       setFusedSlaReady(Boolean(data.fused_sla_ready))
+      setSingularityReady(Boolean(data.singularity_ready))
+      setPikaReady(Boolean(data.pika_ready))
       setLtxReady(Boolean(data.ltx_ready))
       setLtxReferenceReady(Boolean(data.ltx_reference_ready))
       setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
@@ -751,6 +771,8 @@ function App() {
   const applyPublicHealth = (data: Record<string, any>) => {
     if ('reference_ready' in data) setReferenceReady(Boolean(data.reference_ready))
     if ('fused_sla_ready' in data) setFusedSlaReady(Boolean(data.fused_sla_ready))
+    if ('singularity_ready' in data) setSingularityReady(Boolean(data.singularity_ready))
+    if ('pika_ready' in data) setPikaReady(Boolean(data.pika_ready))
     if ('ltx_ready' in data) setLtxReady(Boolean(data.ltx_ready))
     if ('ltx_reference_ready' in data) setLtxReferenceReady(Boolean(data.ltx_reference_ready))
     if ('ltx25_reference_ready' in data) setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
@@ -1051,9 +1073,11 @@ function App() {
         ? 'turbo'
       : preferences.engine === 'ltx' && (mode === 'reference' ? !ltxReferenceReady : !ltxReady)
         ? 'turbo'
+      : (preferences.engine === 'singularity' && !singularityReady) || (preferences.engine === 'pika' && (!pikaReady || !PIKA_MODES.includes(mode)))
+        ? mode === 'reference' ? 'standard' : 'turbo'
       : preferences.engine
-  const allowedAttentionModes = ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
-  const effectiveAttention: AttentionMode = allowedAttentionModes.includes(preferences.attentionMode) ? preferences.attentionMode : 'standard'
+  const allowedAttentionModes = effectiveEngine === 'pika' && (mode === 'opening' || mode === 'frames') ? ['standard' as AttentionMode, 'sage' as AttentionMode] : ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
+  const effectiveAttention: AttentionMode = allowedAttentionModes.includes(preferences.attentionMode) ? preferences.attentionMode : allowedAttentionModes[0]
   const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
     ? 'direct'
     : mode === 'reference'
@@ -1063,9 +1087,14 @@ function App() {
     : mode === 'text'
         ? preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'ref2va_multiref' || preferences.fusedWorkflow === 'i2v_fl2v' ? 'direct' : preferences.fusedWorkflow
         : preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'ref2va_multiref' ? 'i2v_fl2v' : preferences.fusedWorkflow
-  const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' ? 'native' : preferences.encoder
+  const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' || effectiveEngine === 'singularity' || effectiveEngine === 'pika' ? 'native' : preferences.encoder
+  const skinAspect: '9:16' | '16:9' = preferences.aspect === '16:9' ? '16:9' : '9:16'
   const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
-  const generationSteps = effectiveEngine === 'ltx'
+  const generationSteps = effectiveEngine === 'pika'
+    ? 6
+    : effectiveEngine === 'singularity'
+    ? preferences.skinSteps
+    : effectiveEngine === 'ltx'
     ? 8
     : mode === 'reference' && effectiveEngine === 'turbo'
     ? 4
@@ -1076,7 +1105,11 @@ function App() {
         : effectiveEngine === 'spectrum'
           ? preferences.spectrumSteps
           : preferences.standardSteps
-  const stepRange = effectiveEngine === 'ltx'
+  const stepRange = effectiveEngine === 'pika'
+    ? { min: 6, max: 6, recommended: 6 }
+    : effectiveEngine === 'singularity'
+    ? { min: 4, max: 16, recommended: 8 }
+    : effectiveEngine === 'ltx'
     ? { min: 8, max: 8, recommended: 8 }
     : effectiveEngine === 'fused_sla'
     ? fusedWorkflowHasFixedSteps ? { min: 4, max: 4, recommended: 4 } : { min: 4, max: 8, recommended: 4 }
@@ -1091,6 +1124,10 @@ function App() {
   const ltxSize = ltxReference ? LTX_REFERENCE_SIZE : LTX_SIZES[preferences.ltxQuality][preferences.aspect]
   const calculatedResolution = effectiveEngine === 'ltx'
     ? { id: `${ltxSize[0]}x${ltxSize[1]}`, width: ltxSize[0], height: ltxSize[1] }
+    : effectiveEngine === 'pika'
+    ? { id: `${SKIN_SIZES[1.5][skinAspect][0]}x${SKIN_SIZES[1.5][skinAspect][1]}`, width: SKIN_SIZES[1.5][skinAspect][0], height: SKIN_SIZES[1.5][skinAspect][1] }
+    : effectiveEngine === 'singularity'
+    ? { id: `${SKIN_SIZES[preferences.skinMegapixels][skinAspect][0]}x${SKIN_SIZES[preferences.skinMegapixels][skinAspect][1]}`, width: SKIN_SIZES[preferences.skinMegapixels][skinAspect][0], height: SKIN_SIZES[preferences.skinMegapixels][skinAspect][1] }
     : dimensionsFor(preferences.aspect, preferences.megapixels)
   const requestedFrames = Math.max(5, Math.round(duration * 24))
   const h3Frames = requestedFrames + (5 - requestedFrames % 17) % 17
@@ -1348,11 +1385,13 @@ function App() {
         attentionMode: isAttentionMode(job.attention_mode) ? job.attention_mode : 'standard',
         ltxQuality: jobEngine === 'ltx' ? ltxQualityForSize(job.width, job.height) : current.ltxQuality,
         ltxReferenceModel: job.ltx_reference_model === '2.3' || job.ltx_reference_model === '2.5' ? job.ltx_reference_model : current.ltxReferenceModel,
+        ltxRecipe: jobEngine === 'ltx' ? (job.ltx_recipe === 'official' ? 'official' : 'app') : current.ltxRecipe,
         ltxSharpDecode: jobEngine === 'ltx' ? Boolean(job.ltx_sharp_decode) : current.ltxSharpDecode,
         ltxCalmSampler: jobEngine === 'ltx' ? Boolean(job.ltx_calm_sampler) : current.ltxCalmSampler,
         turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
         fusedSlaSteps: jobEngine === 'fused_sla' ? Math.max(4, Math.min(8, job.steps)) : current.fusedSlaSteps,
         fusedWorkflow: jobEngine === 'fused_sla' && isFusedWorkflow(job.workflow_variant) ? job.workflow_variant : current.fusedWorkflow,
+        skinTier: jobEngine === 'singularity' && isSkinTier(job.workflow_variant) ? job.workflow_variant : current.skinTier,
         standardSteps: jobEngine === 'standard' ? Math.max(8, Math.min(30, job.steps)) : current.standardSteps,
         spectrumSteps: jobEngine === 'spectrum' ? Math.max(8, Math.min(30, job.steps)) : current.spectrumSteps,
         resolution: matchingResolution?.id || current.resolution,
@@ -1519,6 +1558,8 @@ function App() {
     if (engine === 'ltx' && (mode === 'reference' ? !ltxReferenceReady : !ltxReady)) return
     if (mode === 'reference' && engine === 'turbo' && !referenceTurboReady) return
     if (engine === 'spectrum' && !spectrumReady) return
+    if (engine === 'singularity' && !singularityReady) return
+    if (engine === 'pika' && (!pikaReady || !PIKA_MODES.includes(mode))) return
     if (engine === 'fused_sla' && (!fusedSlaReady || (mode === 'lip_sync' && !audioLockReady) || (mode === 'reference' && !fusedRef2vaReady && !fusedRef2vaMultirefReady))) return
     if (engine === 'fused_sla') setConnected(false)
     setPreferences(current => engine !== 'fused_sla'
@@ -1542,6 +1583,9 @@ function App() {
     }))
   }
 
+  const setSkinOption = <K extends keyof SkinOptions>(key: K, value: SkinOptions[K]) =>
+    setPreferences(current => ({ ...current, skinOptions: { ...current.skinOptions, [key]: value } }))
+
   const selectEncoder = (encoder: Encoder) => {
     if (mode === 'lip_sync' && encoder !== 'native') return
     if (preferences.engine === 'fused_sla' && encoder !== 'native') return
@@ -1560,7 +1604,9 @@ function App() {
 
   const setGenerationSteps = (value: number) => {
     const next = Math.max(stepRange.min, Math.min(stepRange.max, Math.round(value)))
-    setPreferences(current => effectiveEngine === 'fused_sla'
+    setPreferences(current => effectiveEngine === 'singularity'
+      ? { ...current, skinSteps: next }
+      : effectiveEngine === 'fused_sla'
       ? { ...current, fusedSlaSteps: next }
       : effectiveEngine === 'turbo'
       ? { ...current, turboSteps: next }
@@ -1580,6 +1626,8 @@ function App() {
     if (mode === 'lip_sync' && !lipSyncAudio) return setMainError('generation', 'צריך לצרף אודיו לדיבוב')
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setMainError('generation', 'צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (mode === 'reference' && effectiveEngine === 'ltx' && (referenceImages.length !== 1 || referenceVideos.length || referenceAudio)) return setMainError('generation', 'LTX רפרנס מקבל תמונת רפרנס אחת בלבד (דף רפרנס), בלי סרטונים או אודיו')
+    if (effectiveEngine === 'pika' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Pika תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
+    if (effectiveEngine === 'singularity' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Singularity תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
     if (seedEnabled && !seedInput.trim()) return setMainError('generation', 'יש להזין מספר Seed או לבטל את הסימון')
     if (batch && paragraphCount > 20) return setMainError('generation', 'אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setMainError('generation', 'רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -1593,12 +1641,15 @@ function App() {
       const form = new FormData()
       const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
       form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
+      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : effectiveEngine === 'singularity' ? (mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier) : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
       if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
       form.set('attention_mode', effectiveAttention)
       if (effectiveEngine === 'ltx') form.set('ltx_quality', preferences.ltxQuality)
+      if (effectiveEngine === 'ltx' && preferences.ltxRecipe === 'official' && LTX_RECIPE_MODES.includes(mode)) form.set('ltx_recipe', 'official')
+      if (effectiveEngine === 'pika') { form.set('aspect_ratio', skinAspect); form.set('megapixels', '1.5') }
       if (ltxReference) { form.set('ltx_reference_model', effectiveLtxReferenceModel); form.set('aspect_ratio', '16:9') }
+      if (effectiveEngine === 'singularity') { form.set('aspect_ratio', skinAspect); form.set('megapixels', String(preferences.skinMegapixels)); form.set('skin_options', JSON.stringify(preferences.skinOptions)) }
       if (ltxVideoOptions) { form.set('ltx_sharp_decode', String(preferences.ltxSharpDecode)); form.set('ltx_calm_sampler', String(preferences.ltxCalmSampler)) }
       if (mode === 'frames') {
         form.set('first_frame', openingFrame!)
@@ -1909,7 +1960,39 @@ function App() {
               <button type="button" className={effectiveEngine === 'ltx' ? 'active' : ''} aria-pressed={effectiveEngine === 'ltx'} disabled={mode === 'reference' ? !ltxReferenceReady : !ltxReady} onClick={() => selectEngine('ltx')}>
                 <Clapperboard size={16} /><span><strong>{mode === 'reference' ? 'LTX' : 'LTX 2.5'}</strong><small>{mode === 'reference' ? '2.5 או 2.3 · רפרנס' : 'מהיר · 8 סטפים'}</small></span>
               </button>
+              {<button type="button" className={effectiveEngine === 'singularity' ? 'active' : ''} aria-pressed={effectiveEngine === 'singularity'} disabled={!singularityReady} onClick={() => selectEngine('singularity')}>
+                <Sparkles size={16} /><span><strong>Singularity</strong><small>עור ריאליסטי · 8 סטפים</small></span>
+              </button>}
+              {PIKA_MODES.includes(mode) && <button type="button" className={effectiveEngine === 'pika' ? 'active' : ''} aria-pressed={effectiveEngine === 'pika'} disabled={!pikaReady} onClick={() => selectEngine('pika')}>
+                <Sparkles size={16} /><span><strong>Pika</strong><small>אקשן · 6 סטפים</small></span>
+              </button>}
             </div>
+            {effectiveEngine === 'pika' && <p className="setting-note">Pika H3 Flex על מודל H3 הרגיל · 6 סטפים קבועים · 1.5MP ב־9:16 או 16:9 · {SKIN_DURATION[0]}–{SKIN_DURATION[1]} שניות · מומלץ לאקשן</p>}
+            {effectiveEngine === 'singularity' && <>
+              <div className="setting-title turbo-profile-title"><span>רמת עור</span><small>LoRA מהירות אחת בכל פעם</small></div>
+              <div className="turbo-profile-toggle">
+                {SKIN_TIERS.filter(tier => mode !== 'reference' || tier !== 'skin_app').map(tier => <button key={tier} type="button" className={preferences.skinTier === tier ? 'active' : ''} aria-pressed={preferences.skinTier === tier} onClick={() => setPreferences(current => ({ ...current, skinTier: tier }))}><strong dir="ltr">{skinTierLabel(tier)}</strong><small>{tier === 'skin_god' ? 'קלוז־אפ ופורטרט · העור הכי טוב · רקע רך' : tier === 'skin_balanced' ? 'מדיום ודיבור · עור טוב ותנועה אמינה' : tier === 'skin_max' ? 'וייד ואקשן · בלי People LoRA · הכי חכם' : 'הגרף של האפליקציה (Turbo v4) + Singularity + People'}</small></button>)}
+              </div>
+              <div className="setting-title turbo-profile-title"><span>גודל</span><small>9:16 או 16:9</small></div>
+              <div className="turbo-profile-toggle">
+                {([1, 1.5] as SkinMegapixels[]).map(value => <button key={value} type="button" className={preferences.skinMegapixels === value ? 'active' : ''} aria-pressed={preferences.skinMegapixels === value} onClick={() => setPreferences(current => ({ ...current, skinMegapixels: value }))}><strong dir="ltr">{value.toFixed(1)} MP · {SKIN_SIZES[value][skinAspect].join('×')}</strong><small>{value === 1 ? 'נבדק · ≈5.5–8 דק׳' : 'בבדיקה · עור חד יותר, איטי יותר'}</small></button>)}
+              </div>
+              <details className="skin-advanced">
+                <summary>הגדרות מתקדמות</summary>
+                <div className="skin-advanced-grid">
+                  <label><span>מודל</span><select value={preferences.skinOptions.model} onChange={event => setSkinOption('model', event.target.value as SkinOptions['model'])}><option value="pruned">Pruned 21GB</option><option value="full">Full 34GB</option></select></label>
+                  <label><span>Speed LoRA</span><select value={preferences.skinOptions.speed_lora} onChange={event => setSkinOption('speed_lora', event.target.value as SkinOptions['speed_lora'])}><option value="tier">לפי הרמה</option><option value="ema600">EMA-600 (Turbo v4)</option><option value="ref8">Ref2V 8-step</option><option value="ref_v01">Ref2VA v0.1 (האפליקציה)</option><option value="none">בלי</option></select></label>
+                  <label><span>People strength</span><input dir="ltr" type="number" min="0" max="2" step="0.05" value={preferences.skinOptions.people_strength} onChange={event => setSkinOption('people_strength', clampNumber(event.target.value, 0, 2, 1))} /></label>
+                  <label><span>Speed strength</span><input dir="ltr" type="number" min="0" max="2" step="0.05" value={preferences.skinOptions.speed_strength} onChange={event => setSkinOption('speed_strength', clampNumber(event.target.value, 0, 2, 1))} /></label>
+                  <label><span>Shift video</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_video} onChange={event => setSkinOption('shift_video', clampNumber(event.target.value, 1, 30, 12))} /></label>
+                  <label><span>Shift audio</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_audio} onChange={event => setSkinOption('shift_audio', clampNumber(event.target.value, 1, 30, 3))} /></label>
+                  <label><span>Scheduler</span><select value={preferences.skinOptions.scheduler} onChange={event => setSkinOption('scheduler', event.target.value as SkinOptions['scheduler'])}><option value="beta">beta</option><option value="beta57">beta57</option><option value="native_flow">native_flow</option></select></label>
+                  <label><span>Tail detail steps</span><input dir="ltr" type="number" min="0" max="4" step="1" value={preferences.skinOptions.tail_steps} onChange={event => setSkinOption('tail_steps', Math.round(clampNumber(event.target.value, 0, 4, 0)))} /></label>
+                </div>
+                <button type="button" className="skin-advanced-reset" onClick={() => setPreferences(current => ({ ...current, skinOptions: SKIN_OPTION_DEFAULTS, skinSteps: 8 }))}>ברירת מחדל של החבילה</button>
+              </details>
+              <p className="setting-note">Singularity Ref2VA · מעבר אחד של 8 סטפים · 1.0 או 1.5MP ב־9:16 או 16:9 · {SKIN_DURATION[0]}–{SKIN_DURATION[1]} שניות. המילה r34l1sm נוספת לבד ברמות עם People. בפרומפט: אור רך, פנים גדולות בפריים, בלי glow/flawless/wet skin ובלי הוראות שליליות.</p>
+            </>}
             {!ltxReady && mode !== 'reference' && <p className="setting-note">LTX 2.5 ייפתח כשקבצי המודל של LTX-2.5 נמצאים בתיקיית המודלים</p>}
             {mode === 'reference' && !ltxReferenceReady && <p className="setting-note">LTX רפרנס ייפתח כשקבצי ה־Ingredients IC-LoRA וה־upscaler של LTX 2.5 או 2.3 נמצאים בתיקיית המודלים</p>}
             {effectiveEngine === 'ltx' && <>
@@ -1924,6 +2007,13 @@ function App() {
                 <div className="turbo-profile-toggle">
                   <button type="button" className={preferences.ltxQuality === 'balanced' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'balanced'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'balanced' }))}><strong dir="ltr">Balanced · {LTX_SIZES.balanced[preferences.aspect].join('×')}</strong><small>הסנכרון הטוב ביותר · ≈3–5 דק׳ ל־5 שנ׳</small></button>
                   <button type="button" className={preferences.ltxQuality === 'high' ? 'active' : ''} aria-pressed={preferences.ltxQuality === 'high'} onClick={() => setPreferences(current => ({ ...current, ltxQuality: 'high' }))}><strong dir="ltr">High · {LTX_SIZES.high[preferences.aspect].join('×')}</strong><small>חד יותר, תנועת פה מעט קטנה יותר · ≈4–9 דק׳</small></button>
+                </div>
+              </>}
+              {LTX_RECIPE_MODES.includes(mode) && <>
+                <div className="setting-title turbo-profile-title"><span>מתכון LTX</span><small>של האפליקציה או התבנית הרשמית של ComfyUI</small></div>
+                <div className="turbo-profile-toggle">
+                  <button type="button" className={preferences.ltxRecipe === 'app' ? 'active' : ''} aria-pressed={preferences.ltxRecipe === 'app'} onClick={() => setPreferences(current => ({ ...current, ltxRecipe: 'app' }))}>אפליקציה</button>
+                  <button type="button" className={preferences.ltxRecipe === 'official' ? 'active' : ''} aria-pressed={preferences.ltxRecipe === 'official'} onClick={() => setPreferences(current => ({ ...current, ltxRecipe: 'official' }))}>רשמי</button>
                 </div>
               </>}
               {ltxVideoOptions && <>
@@ -2158,6 +2248,24 @@ function LastFrameControl({ sourceType, sourceId, csrf, videoUrl }: { sourceType
   </div>
 }
 
+// What went into a job, from its stored source files.
+function jobInputsLabel(assets: JobSourceAsset[] | undefined): string {
+  const count = (kind: string) => (assets || []).filter(asset => asset.kind === kind).length
+  const parts = [
+    count('reference image') ? `${count('reference image')} ref image${count('reference image') > 1 ? 's' : ''}` : '',
+    count('reference video') ? `${count('reference video')} ref video` : '',
+    count('reference audio') ? 'ref audio' : '',
+    count('image') || count('opening frame') ? 'opening frame' : '',
+    count('closing frame') ? 'closing frame' : '',
+    count('audio') ? 'lip-sync audio' : '',
+  ].filter(Boolean)
+  return parts.length ? parts.join(' + ') : 'text only'
+}
+
+function skinIsBase(job: { skin_options_json?: string | null }): boolean {
+  try { return JSON.parse(job.skin_options_json || '{}')?.model === 'base' } catch { return false }
+}
+
 function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
@@ -2208,7 +2316,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       {(assignment || job.video_filename) && <div className="asset-location" dir="ltr"><Folder size={13}/><span>{assignment ? `${assignment.project_name}${assignment.folder_name ? ` / ${assignment.folder_name}` : ''}` : 'ComfyUI output'}</span><b>{assignment?.filename || job.video_filename}</b></div>}
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}><p>{job.prompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
-      <div className="job-config"><span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span><span>{steps} סטפים</span><span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
+      <div className="job-config">{engine !== 'singularity' && engine !== 'pika' && <span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>}{engine === 'ltx' && job.ltx_recipe === 'official' && <span className="job-loras" dir="ltr">Official ComfyUI template ({job.mode === 'frames' ? 'video_ltx2_5_flf2v' : 'video_ltx2_5_i2v'})</span>}{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'pika' && pikaSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{engine === 'singularity' && skinSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{(engine === 'singularity' || engine === 'pika' || engine === 'ltx') && <span className="job-inputs" dir="ltr">{job.mode} · {jobInputsLabel(job.source_assets)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span>{engine !== 'singularity' && <span>{steps} סטפים</span>}<span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -2227,6 +2335,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.runtime && <>
           <div className="advanced-log-summary"><b>{job.runtime.comfy?.version || 'ComfyUI לא ידוע'}</b><span>{job.runtime.comfy?.pytorch || 'PyTorch לא ידוע'}</span><span>CUDA {job.runtime.comfy?.cuda || 'לא ידוע'}</span><span>{job.runtime.comfy?.commit?.commit?.slice(0, 12) || 'commit לא ידוע'}</span></div>
           <dl><dt>ComfyUI root</dt><dd>{job.runtime.comfy?.root || '—'}</dd><dt>ComfyUI Python</dt><dd>{job.runtime.comfy?.python || '—'}</dd><dt>Bridge Python</dt><dd>{job.runtime.bridge?.python || '—'}</dd><dt>Command line</dt><dd>{job.runtime.comfy?.command_line || '—'}</dd><dt>Workflow</dt><dd>{job.runtime.workflow?.builder || '—'} · {job.runtime.workflow?.node_count ?? '—'} nodes</dd><dt>Prompt ID</dt><dd>{job.runtime.comfy?.prompt_id || '—'}</dd></dl>
+          {job.runtime.workflow?.nodes && <details open><summary>Nodes and values ({job.runtime.workflow.nodes.length})</summary>{job.runtime.workflow.nodes_note && <p className="node-note">{job.runtime.workflow.nodes_note}</p>}<table className="node-values"><tbody>{job.runtime.workflow.nodes.map(node => <tr key={node.id}><td>#{node.id}</td><td><b>{node.class_type}</b></td><td>{Object.entries(node.inputs).map(([key, value]) => <div key={key}><span>{key}</span> {nodeValueText(value)}</div>)}</td></tr>)}</tbody></table></details>}
           <details><summary>Full runtime JSON</summary><pre>{JSON.stringify(job.runtime, null, 2)}</pre></details>
         </>}
       </div>}
@@ -2317,6 +2426,73 @@ const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
   standard: ['standard'],
   spectrum: ['standard'],
   ltx: ['standard'],
+  singularity: ['sage', 'standard'],
+  pika: ['standard', 'sage', 'sla', 'sage_sla'],
+}
+
+// Mirrors backend/generation.py SKIN_* and PIKA_MODES; LTX_RECIPE_MODES mirrors the official templates in backend/config.py.
+const PIKA_MODES: string[] = ['text', 'opening', 'frames', 'lip_sync', 'reference']
+const LTX_RECIPE_MODES: string[] = ['opening', 'frames']
+const SKIN_TIERS: SkinTier[] = ['skin_god', 'skin_balanced', 'skin_max', 'skin_app']
+const SKIN_SIZES: Record<SkinMegapixels, Record<'9:16' | '16:9', [number, number]>> = {
+  1: { '9:16': [768, 1344], '16:9': [1344, 768] },
+  1.5: { '9:16': [928, 1632], '16:9': [1632, 928] },
+}
+const SKIN_DURATION: [number, number] = [2, 7]
+
+function clampNumber(value: string, min: number, max: number, fallback: number) {
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback
+}
+
+function isSkinTier(value: unknown): value is SkinTier {
+  return value === 'skin_god' || value === 'skin_balanced' || value === 'skin_max' || value === 'skin_app'
+}
+
+// What a Singularity-engine job really ran, in plain words: model, speed (turbo) LoRA,
+// realism LoRA, sampler. Mirrors skin_loras() and _skin_model() in backend/workflows.py.
+function skinSetupParts(job: { workflow_variant?: string; mode?: string; skin_options_json?: string | null; steps?: number }): string[] {
+  let options: Partial<SkinOptions> & { scheduler?: string } = {}
+  try { options = JSON.parse(job.skin_options_json || '{}') || {} } catch { options = {} }
+  const tier = job.workflow_variant || 'skin_god'
+  const reference = job.mode === 'reference'
+  const model = options.model === 'base' ? `Model: H3 ${reference ? 'Ref2VA' : 'FL2VA'} (no Singularity)`
+    : `Model: Singularity ${options.model === 'full' ? '34GB' : '21GB'}`
+  const people = options.people_strength ?? 1
+  if (tier === 'skin_app') {
+    return [model, 'Speed LoRA: app Turbo v4', `Realism LoRA: ${people > 0 ? `People ${people}` : 'none'}`, `Sampler: app Turbo flow, ${job.steps ?? 8} steps`, 'Not Fused']
+  }
+  const tierSpeed: Record<string, string> = { skin_god: 'Turbo v4 (EMA-600)', skin_balanced: 'Ref2V 8-step', skin_max: 'Ref2V 8-step' }
+  const speedNames: Record<string, string> = { ema600: 'Turbo v4 (EMA-600)', ref8: 'Ref2V 8-step', ref_v01: 'app Ref2VA turbo v0.1', pika: `Pika ${reference ? 'Ref2VA' : 'FL2VA'}` }
+  const speedKey = options.speed_lora || 'tier'
+  const speed = speedKey === 'none' ? '' : speedKey === 'tier' ? tierSpeed[tier] : speedNames[speedKey]
+  const realism = tier !== 'skin_max' && people > 0 ? `People ${people}` : 'none'
+  const shift = (options.shift_video ?? 12) !== 12 || (options.shift_audio ?? 3) !== 3 ? `, shift ${options.shift_video ?? 12}/${options.shift_audio ?? 3}` : ''
+  const tail = options.tail_steps ? `, +${options.tail_steps} tail steps` : ''
+  const sampler = options.flow === 'pika' ? `Sampler: Pika, ${job.steps ?? 6} steps`
+    : `Sampler: T8 Dual-Clock ${options.scheduler || 'beta'}, ${job.steps ?? 8} steps${shift}${tail}`
+  return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, 'Not Fused']
+}
+
+function pikaSetupParts(job: { mode?: string; steps?: number }): string[] {
+  const base = job.mode === 'reference' ? 'Ref2VA' : 'FL2VA'
+  return [`Model: H3 ${base}`, `Speed LoRA: Pika ${base} 1`, `Sampler: Pika, ${job.steps ?? 6} steps`]
+}
+
+function skinStackLabel(job: { workflow_variant?: string; mode?: string; skin_options_json?: string | null; steps?: number }): string {
+  return skinSetupParts(job).join(' · ')
+}
+
+function nodeValueText(value: unknown): string {
+  if (value && typeof value === 'object') return Object.entries(value as Record<string, unknown>).map(([key, entry]) => `${key}=${nodeValueText(entry)}`).join(', ')
+  return String(value)
+}
+
+function skinTierLabel(tier: SkinTier | string) {
+  if (tier === 'skin_balanced') return 'Balanced'
+  if (tier === 'skin_max') return 'Max Intelligence'
+  if (tier === 'skin_app') return 'App flow'
+  return 'God Tier'
 }
 
 // Mirrors backend/generation.py LTX_REFERENCE_SIZE / LTX_REFERENCE_MAX_DURATION /
@@ -2350,6 +2526,8 @@ function engineLabel(engine: Engine | string) {
   if (engine === 'turbo') return 'Turbo'
   if (engine === 'spectrum') return 'Spectrum'
   if (engine === 'fused_sla') return 'H3 Fused SLA'
+  if (engine === 'singularity') return 'Singularity'
+  if (engine === 'pika') return 'Pika'
   return 'רגיל'
 }
 
