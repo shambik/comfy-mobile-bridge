@@ -1,8 +1,9 @@
 import { spawnSync, execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'fs';
 import { join } from 'path';
+import { homedir } from 'os';
 
-const MORPHEUS_DIR = 'C:/Users/David Shambik/Downloads/chatcut-standalone-complete/chatcut-standalone-complete';
+const MORPHEUS_DIR = join(homedir(), 'Downloads', 'chatcut-standalone-complete', 'chatcut-standalone-complete');
 const IMG_SCRIPT = join(MORPHEUS_DIR, 'scripts', 'image-generate.mjs');
 const TTS_SCRIPT = join(MORPHEUS_DIR, 'scripts', 'gemini-tts.mjs');
 

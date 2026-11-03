@@ -1,8 +1,9 @@
 import { spawnSync } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
+import { homedir } from 'os';
 
-const MORPHEUS_DIR = 'C:/Users/David Shambik/Downloads/chatcut-standalone-complete/chatcut-standalone-complete';
+const MORPHEUS_DIR = join(homedir(), 'Downloads', 'chatcut-standalone-complete', 'chatcut-standalone-complete');
 const IMG_SCRIPT = join(MORPHEUS_DIR, 'scripts', 'image-generate.mjs');
 const STATE_DIR = 'D:/repository/state/rift_runners_ep01';
 const DIST_DIR = 'D:/repository/dist/rift-runners';

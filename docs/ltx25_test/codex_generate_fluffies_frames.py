@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 EP_DIR = ROOT / 'state' / 'fluffies_ep04_scooter_race'
 FRAMES_DIR = EP_DIR / 'frames'
 FRAMES_DIR.mkdir(parents=True, exist_ok=True)
-CODEX_CMD = r"C:\Users\David Shambik\AppData\Roaming\npm\codex.cmd"
+CODEX_CMD = str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd")
 CODEX_HOME = Path.home() / ".codex"
 GEN_DIR = CODEX_HOME / "generated_images"
 
