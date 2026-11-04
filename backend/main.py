@@ -997,6 +997,9 @@ async def lock_system(request: Request):
     return {"locked": True, "detail": detail}
 
 
+ACTIVE_JOB_STATUSES = {"queued", "starting", "running", "verifying"}
+
+
 @app.get("/api/jobs")
 async def jobs(
     limit: int | None = None,
@@ -1011,8 +1014,15 @@ async def jobs(
     }
     if requested_statuses - allowed_statuses:
         raise HTTPException(400, "Unsupported job status filter")
+    if limit is not None and not requested_statuses:
+        # The page limit counts finished jobs only. Active jobs sort first, so a long
+        # queue would otherwise push every finished result off the first page.
+        listed = list_jobs(statuses=ACTIVE_JOB_STATUSES) + list_jobs(
+            limit=limit, offset=offset, statuses=allowed_statuses - ACTIVE_JOB_STATUSES)
+    else:
+        listed = list_jobs(limit=limit, offset=offset, statuses=requested_statuses or None)
     payload: dict[str, Any] = {
-        "jobs": list_jobs(limit=limit, offset=offset, statuses=requested_statuses or None),
+        "jobs": listed,
         "jobs_total": count_jobs(statuses=requested_statuses or None),
         "revision": jobs_revision(),
         **public_health(),
