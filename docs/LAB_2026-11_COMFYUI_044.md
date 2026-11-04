@@ -123,6 +123,29 @@ values (kept in `D:\repo-backups\production-2026-11-04\meta\config.local.json`).
 Then start the app again. The full snapshot from right before the upgrade is
 `D:\repo-backups\production-2026-11-04` (`restore.ps1`).
 
+## Production check after the switch (2026-11-04)
+
+The upgraded app replayed six app jobs through its own queue, with the same
+inputs and seeds. These are the flows the lab's PyTorch 2.11 run did not
+reach. All six completed, passed ffprobe with the expected streams and
+duration, and passed a full FFmpeg decode.
+
+| Flow | 0.33 | 0.44 | PSNR vs 0.33 |
+| --- | ---: | ---: | ---: |
+| Turbo v1 text | 107 s | 66 s | 24.8 |
+| Turbo v1 opening (silent) | 412 s | 290 s | 35.1 |
+| Turbo v1 reference | 472 s | 453 s | 30.1 |
+| Turbo v4 lip-sync, Sage+SLA | 482 s | 275 s | 18.9 |
+| Standard lip-sync | 377 s | 369 s | 25.0 |
+| Singularity God opening, Sage | 586 s | 524 s | 21.5 |
+
+- The H3 still (seed 5150) took 64.7 s and is pixel-identical to the lab's
+  0.44 render.
+- The Nunchaku Qwen edit (seed 424242) took 56.5 s, against 62.9 s on 0.33.
+- Doctor passes the new pins (ComfyUI, H3 Turbo, T8). The checks it fails
+  failed the same way before the upgrade: the local config binds the app to
+  0.0.0.0, and Spectrum, ClipProj and their models are not installed.
+
 ## Not covered
 
 - Spectrum and ClipProj are not installed in production, so they were not
