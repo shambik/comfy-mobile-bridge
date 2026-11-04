@@ -10,6 +10,7 @@ import { BotImagesPage } from './bot-images'
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync'
 type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx' | 'singularity' | 'pika'
 type LtxRecipe = 'app' | 'official'
+type PikaSpeed = 'direct' | 'turbo4'
 type SkinTier = 'skin_god' | 'skin_balanced' | 'skin_max' | 'skin_app'
 type SkinMegapixels = 1 | 1.5
 type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number }
@@ -183,6 +184,7 @@ type Preferences = {
   ltxQuality: LtxQuality
   ltxReferenceModel: LtxReferenceModel
   ltxRecipe: LtxRecipe
+  pikaSpeed: PikaSpeed
   ltxSharpDecode: boolean
   ltxCalmSampler: boolean
   turboSteps: number
@@ -201,7 +203,7 @@ type Preferences = {
 
 // Mirrors backend/generation.py SKIN_OPTION_DEFAULTS (the pack's own settings).
 const SKIN_OPTION_DEFAULTS: SkinOptions = { model: 'pruned', speed_lora: 'tier', speed_strength: 1, people_strength: 1, shift_video: 12, shift_audio: 3, scheduler: 'beta', tail_steps: 0 }
-const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxRecipe: 'app', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', skinTier: 'skin_god', skinMegapixels: 1, skinSteps: 8, skinOptions: SKIN_OPTION_DEFAULTS, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
+const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxRecipe: 'app', pikaSpeed: 'direct', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', skinTier: 'skin_god', skinMegapixels: 1, skinSteps: 8, skinOptions: SKIN_OPTION_DEFAULTS, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
 function readPreferences(): Preferences {
@@ -215,6 +217,7 @@ function readPreferences(): Preferences {
       ltxQuality: saved.ltxQuality === 'high' ? 'high' : 'balanced',
       ltxReferenceModel: saved.ltxReferenceModel === '2.3' ? '2.3' : '2.5',
       ltxRecipe: saved.ltxRecipe === 'official' ? 'official' : 'app',
+      pikaSpeed: saved.pikaSpeed === 'turbo4' ? 'turbo4' : 'direct',
       ltxSharpDecode: saved.ltxSharpDecode === true,
       ltxCalmSampler: saved.ltxCalmSampler === true,
       turboSteps: Number.isInteger(saved.turboSteps) && saved.turboSteps! >= 4 && saved.turboSteps! <= 12 ? saved.turboSteps! : 4,
@@ -688,6 +691,7 @@ function App() {
   const [fusedSlaReady, setFusedSlaReady] = useState(false)
   const [singularityReady, setSingularityReady] = useState(false)
   const [pikaReady, setPikaReady] = useState(false)
+  const [pikaTurboReady, setPikaTurboReady] = useState(false)
   const [ltxReady, setLtxReady] = useState(false)
   const [ltxReferenceReady, setLtxReferenceReady] = useState(false)
   const [ltx25ReferenceReady, setLtx25ReferenceReady] = useState(false)
@@ -745,6 +749,7 @@ function App() {
       setFusedSlaReady(Boolean(data.fused_sla_ready))
       setSingularityReady(Boolean(data.singularity_ready))
       setPikaReady(Boolean(data.pika_ready))
+      setPikaTurboReady(Boolean(data.pika_turbo4_ready))
       setLtxReady(Boolean(data.ltx_ready))
       setLtxReferenceReady(Boolean(data.ltx_reference_ready))
       setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
@@ -773,6 +778,7 @@ function App() {
     if ('fused_sla_ready' in data) setFusedSlaReady(Boolean(data.fused_sla_ready))
     if ('singularity_ready' in data) setSingularityReady(Boolean(data.singularity_ready))
     if ('pika_ready' in data) setPikaReady(Boolean(data.pika_ready))
+    if ('pika_turbo4_ready' in data) setPikaTurboReady(Boolean(data.pika_turbo4_ready))
     if ('ltx_ready' in data) setLtxReady(Boolean(data.ltx_ready))
     if ('ltx_reference_ready' in data) setLtxReferenceReady(Boolean(data.ltx_reference_ready))
     if ('ltx25_reference_ready' in data) setLtx25ReferenceReady(Boolean(data.ltx25_reference_ready))
@@ -1076,7 +1082,9 @@ function App() {
       : (preferences.engine === 'singularity' && !singularityReady) || (preferences.engine === 'pika' && (!pikaReady || !PIKA_MODES.includes(mode)))
         ? mode === 'reference' ? 'standard' : 'turbo'
       : preferences.engine
-  const allowedAttentionModes = effectiveEngine === 'pika' && (mode === 'opening' || mode === 'frames') ? ['standard' as AttentionMode, 'sage' as AttentionMode] : ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
+  // Pika Turbo 4-step was lab-tested with Sage only, in opening frame, first + last and lip-sync.
+  const pikaTurbo = effectiveEngine === 'pika' && preferences.pikaSpeed === 'turbo4' && pikaTurboReady && PIKA_TURBO_MODES.includes(mode)
+  const allowedAttentionModes = pikaTurbo ? ['sage' as AttentionMode] : effectiveEngine === 'pika' && (mode === 'opening' || mode === 'frames') ? ['standard' as AttentionMode, 'sage' as AttentionMode] : ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
   const effectiveAttention: AttentionMode = allowedAttentionModes.includes(preferences.attentionMode) ? preferences.attentionMode : allowedAttentionModes[0]
   const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
     ? 'direct'
@@ -1091,7 +1099,7 @@ function App() {
   const skinAspect: '9:16' | '16:9' = preferences.aspect === '16:9' ? '16:9' : '9:16'
   const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
   const generationSteps = effectiveEngine === 'pika'
-    ? 6
+    ? pikaTurbo ? 4 : 6
     : effectiveEngine === 'singularity'
     ? preferences.skinSteps
     : effectiveEngine === 'ltx'
@@ -1106,7 +1114,7 @@ function App() {
           ? preferences.spectrumSteps
           : preferences.standardSteps
   const stepRange = effectiveEngine === 'pika'
-    ? { min: 6, max: 6, recommended: 6 }
+    ? pikaTurbo ? { min: 4, max: 4, recommended: 4 } : { min: 6, max: 6, recommended: 6 }
     : effectiveEngine === 'singularity'
     ? { min: 4, max: 16, recommended: 8 }
     : effectiveEngine === 'ltx'
@@ -1386,6 +1394,7 @@ function App() {
         ltxQuality: jobEngine === 'ltx' ? ltxQualityForSize(job.width, job.height) : current.ltxQuality,
         ltxReferenceModel: job.ltx_reference_model === '2.3' || job.ltx_reference_model === '2.5' ? job.ltx_reference_model : current.ltxReferenceModel,
         ltxRecipe: jobEngine === 'ltx' ? (job.ltx_recipe === 'official' ? 'official' : 'app') : current.ltxRecipe,
+        pikaSpeed: jobEngine === 'pika' ? (job.workflow_variant === 'turbo4' ? 'turbo4' : 'direct') : current.pikaSpeed,
         ltxSharpDecode: jobEngine === 'ltx' ? Boolean(job.ltx_sharp_decode) : current.ltxSharpDecode,
         ltxCalmSampler: jobEngine === 'ltx' ? Boolean(job.ltx_calm_sampler) : current.ltxCalmSampler,
         turboSteps: jobEngine === 'turbo' ? Math.max(4, Math.min(12, job.steps)) : current.turboSteps,
@@ -1627,6 +1636,7 @@ function App() {
     if (mode === 'reference' && !referenceImages.length && !referenceVideos.length) return setMainError('generation', 'צריך לצרף לפחות תמונת או סרטון רפרנס')
     if (mode === 'reference' && effectiveEngine === 'ltx' && (referenceImages.length !== 1 || referenceVideos.length || referenceAudio)) return setMainError('generation', 'LTX רפרנס מקבל תמונת רפרנס אחת בלבד (דף רפרנס), בלי סרטונים או אודיו')
     if (effectiveEngine === 'pika' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Pika תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
+    if (pikaTurbo && duration > PIKA_TURBO_MAX_SECONDS) return setMainError('generation', `Pika Turbo נבדק עד ${PIKA_TURBO_MAX_SECONDS} שניות`)
     if (effectiveEngine === 'singularity' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Singularity תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
     if (seedEnabled && !seedInput.trim()) return setMainError('generation', 'יש להזין מספר Seed או לבטל את הסימון')
     if (batch && paragraphCount > 20) return setMainError('generation', 'אפשר להוסיף עד 20 פרומפטים יחד')
@@ -1641,7 +1651,7 @@ function App() {
       const form = new FormData()
       const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
       form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : effectiveEngine === 'singularity' ? (mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier) : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
+      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : effectiveEngine === 'singularity' ? (mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier) : pikaTurbo ? 'turbo4' : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
       if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
       form.set('attention_mode', effectiveAttention)
@@ -1967,7 +1977,14 @@ function App() {
                 <Sparkles size={16} /><span><strong>Pika</strong><small>אקשן · 6 סטפים</small></span>
               </button>}
             </div>
-            {effectiveEngine === 'pika' && <p className="setting-note">Pika H3 Flex על מודל H3 הרגיל · 6 סטפים קבועים · 1.5MP ב־9:16 או 16:9 · {SKIN_DURATION[0]}–{SKIN_DURATION[1]} שניות · מומלץ לאקשן</p>}
+            {effectiveEngine === 'pika' && <p className="setting-note">Pika H3 Flex על מודל H3 הרגיל · {pikaTurbo ? '4' : '6'} סטפים קבועים · 1.5MP ב־9:16 או 16:9 · {SKIN_DURATION[0]}–{pikaTurbo ? PIKA_TURBO_MAX_SECONDS : SKIN_DURATION[1]} שניות · מומלץ לאקשן</p>}
+            {effectiveEngine === 'pika' && PIKA_TURBO_MODES.includes(mode) && <>
+              <div className="setting-title turbo-profile-title"><span>מהירות Pika</span><small>Turbo נבדק בפריים פותח, פותח + סוגר ודיבוב</small></div>
+              <div className="turbo-profile-toggle">
+                <button type="button" className={!pikaTurbo ? 'active' : ''} aria-pressed={!pikaTurbo} onClick={() => setPreferences(current => ({ ...current, pikaSpeed: 'direct' }))}><strong dir="ltr">Pika · 6 steps</strong><small>כל אפשרויות ה־attention · עד {SKIN_DURATION[1]} שנ׳</small></button>
+                <button type="button" className={pikaTurbo ? 'active' : ''} aria-pressed={pikaTurbo} disabled={!pikaTurboReady} onClick={() => setPreferences(current => ({ ...current, pikaSpeed: 'turbo4' }))}><strong dir="ltr">Turbo · 4 steps</strong><small>≈25–30% מהר יותר · Sage · עד {PIKA_TURBO_MAX_SECONDS} שנ׳ · טשטוש קל בתנועה מהירה</small></button>
+              </div>
+            </>}
             {effectiveEngine === 'singularity' && <>
               <div className="setting-title turbo-profile-title"><span>רמת עור</span><small>LoRA מהירות אחת בכל פעם</small></div>
               <div className="turbo-profile-toggle">
@@ -2432,6 +2449,9 @@ const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
 
 // Mirrors backend/generation.py SKIN_* and PIKA_MODES; LTX_RECIPE_MODES mirrors the official templates in backend/config.py.
 const PIKA_MODES: string[] = ['text', 'opening', 'frames', 'lip_sync', 'reference']
+// Mirrors backend/generation.py PIKA_TURBO4_MODES and PIKA_TURBO4_MAX_DURATION (what the lab tested).
+const PIKA_TURBO_MODES: string[] = ['opening', 'frames', 'lip_sync']
+const PIKA_TURBO_MAX_SECONDS = 5
 const LTX_RECIPE_MODES: string[] = ['opening', 'frames']
 const SKIN_TIERS: SkinTier[] = ['skin_god', 'skin_balanced', 'skin_max', 'skin_app']
 const SKIN_SIZES: Record<SkinMegapixels, Record<'9:16' | '16:9', [number, number]>> = {
@@ -2474,7 +2494,8 @@ function skinSetupParts(job: { workflow_variant?: string; mode?: string; skin_op
   return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, 'Not Fused']
 }
 
-function pikaSetupParts(job: { mode?: string; steps?: number }): string[] {
+function pikaSetupParts(job: { mode?: string; steps?: number; workflow_variant?: string }): string[] {
+  if (job.workflow_variant === 'turbo4') return ['Model: H3 FL2VA', 'Speed LoRA: Pika Turbo 4-step FL2VA 1', `Sampler: T8 Dual-Clock simple, ${job.steps ?? 4} steps`]
   const base = job.mode === 'reference' ? 'Ref2VA' : 'FL2VA'
   return [`Model: H3 ${base}`, `Speed LoRA: Pika ${base} 1`, `Sampler: Pika, ${job.steps ?? 6} steps`]
 }

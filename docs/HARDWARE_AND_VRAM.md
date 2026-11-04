@@ -150,7 +150,8 @@ ComfyUI logs "IMPORT FAILED" for it (`io.Hidden.execution_list`), yet its 549 no
 sampler. Proof it does not change existing flows (2026-11-01, `h3-skinlab/tests/ab_t8.py`): four production jobs re-rendered
 with the same inputs and seeds came out with identical full-size video and audio hashes, with equal times once warm and no
 core sampler or scheduler definition changed. Peak VRAM varies by 300-400 MB with what else is open on the PC, with or
-without T8. Pika and the Singularity App flow tier use no T8 node. Both engines tile the decode at 512/64/64/16.
+without T8. Pika 6-step and the Singularity App flow tier use no T8 node; Pika Turbo 4-step uses the T8 Dual-Clock sampler
+(same size and Steady Memory setting as Pika Sage, peaks 9.19-9.59 GB in the lab). Both engines tile the decode at 512/64/64/16.
 Singularity and Pika count as their own model families, so ComfyUI unloads when switching to or from them.
 
 **H3 stall, other GPU apps, and the Steady Memory node.** An H3 job on this card can stay at 100% GPU util but 130-260 W

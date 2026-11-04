@@ -24,7 +24,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .config import (PIKA_FILES, PIKA_REF2VA_LORA, PIKA_STEPS, ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
+from .config import (PIKA_FILES, PIKA_TURBO4_FILES, PIKA_REF2VA_LORA, PIKA_STEPS, ALLOWED_HOSTS, APP_HOST, APP_PORT, APP_VERSION,
                      AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, AGY_DEFAULT_RUNTIME,
                      CLIPPROJ_NODE_COMMIT, CLIPPROJ_NODE_DIR, COMFY_HOST, COMFY_PORT,
                      CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR,
@@ -38,7 +38,7 @@ from .config import (PIKA_FILES, PIKA_REF2VA_LORA, PIKA_STEPS, ALLOWED_HOSTS, AP
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
-from .generation import (LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, SKIN_DURATION_RANGE,
+from .generation import (LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, PIKA_TURBO4_MAX_DURATION, SKIN_DURATION_RANGE,
                          normalize_generation_settings, normalize_skin_options)
 from .workflows import SKIN_PEOPLE_LORA, skin_loras, skin_prompt
 from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
@@ -585,6 +585,10 @@ def pika_ready() -> bool:
     return all((base / folder / name).exists() for base, folder, name in PIKA_FILES)
 
 
+def pika_turbo4_ready() -> bool:
+    return all((base / folder / name).exists() for base, folder, name in PIKA_TURBO4_FILES)
+
+
 def ltx_ready() -> bool:
     return LTX_WORKFLOW.exists() and all(
         (MODELS / folder / name).exists() for folder, name in LTX_MODEL_FILES
@@ -627,6 +631,7 @@ def public_health():
         "ltx_ready": ltx_ready(),
         "singularity_ready": singularity_ready(),
         "pika_ready": pika_ready(),
+        "pika_turbo4_ready": pika_turbo4_ready(),
         "ltx_reference_ready": ltx_reference_ready("2.5") or ltx_reference_ready("2.3"),
         "ltx25_reference_ready": ltx_reference_ready("2.5"),
         "ltx23_reference_ready": ltx_reference_ready("2.3"),
@@ -2791,6 +2796,12 @@ async def create_jobs(
             raise HTTPException(409, "The Pika H3 Flex LoRAs are not installed yet")
         if not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
             raise HTTPException(400, "Pika supports 2 to 7 seconds")
+        if generation.workflow_variant == "turbo4":
+            if not pika_turbo4_ready():
+                raise HTTPException(409, "The Pika Turbo 4-step LoRA is not installed yet")
+            # Every approved Turbo clip was 5 s; longer clips were never tested.
+            if duration > PIKA_TURBO4_MAX_DURATION:
+                raise HTTPException(400, f"Pika Turbo 4-step was tested up to {PIKA_TURBO4_MAX_DURATION:g} seconds")
         if connected:
             raise HTTPException(400, "Pika is available for standalone jobs only")
     if generation.engine == "singularity":

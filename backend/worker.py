@@ -13,7 +13,7 @@ from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
                      FUSED_WORKFLOW_FILES, INPUT, LTX_MODEL_FILES, LTX_REFERENCE_FILES,
-                     LOGS, MODELS, PIKA_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
+                     LOGS, MODELS, PIKA_FILES, PIKA_TURBO4_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
                      SKIN_FILES, SKIN_MODELS)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
@@ -22,7 +22,7 @@ from .diagnostics import (JobTimeline, comfy_log_lines, host_snapshot, keep_samp
 from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
-from .generation import PIKA_OPTIONS
+from .generation import pika_options
 from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
@@ -805,11 +805,14 @@ class QueueWorker:
                 required = {node["class_type"] for node in ltx_workflow.values()}
         elif job["engine"] in ("singularity", "pika"):
             pika = job["engine"] == "pika"
+            pika_turbo = pika and job.get("workflow_variant") == "turbo4"
             required |= {
                 "LoraLoaderModelOnly", "VAEDecodeTiled", "VAEDecodeAudio", "SamplerCustomAdvanced", "BasicGuider",
                 "RandomNoise", "KSamplerSelect", "ManualSigmas",
             }
-            if not pika and job.get("workflow_variant") != "skin_app":
+            if pika_turbo:
+                required.add("MiniMaxH3DualClockSamplerT8")
+            elif not pika and job.get("workflow_variant") != "skin_app":
                 required |= {"MiniMaxH3DualClockSamplerT8", "MiniMaxH3TurboLoRA"}
             if pika or job["mode"] != "reference":
                 required.add("MiniMaxH3ImageToVideo" if job["mode"] != "reference" else "MiniMaxH3ReferenceToVideo")
@@ -828,10 +831,10 @@ class QueueWorker:
                     raise RuntimeError("Native AudioLock node is not installed")
                 if not job.get("reference_audio_name"):
                     raise RuntimeError("Lip-sync job has no uploaded audio")
-            skin_options = PIKA_OPTIONS if pika else json.loads(job.get("skin_options_json") or "null") or {}
+            skin_options = pika_options(job.get("workflow_variant")) if pika else json.loads(job.get("skin_options_json") or "null") or {}
             if skin_options.get("tail_steps"):
                 required.add("MiniMaxH3AVTailDetailScheduleT8Advanced")
-            skin_files = list(PIKA_FILES if pika else SKIN_FILES)
+            skin_files = list((PIKA_TURBO4_FILES if pika_turbo else PIKA_FILES) if pika else SKIN_FILES)
             if skin_options.get("model") == "full":
                 skin_files.append((SKIN_MODELS, "diffusion_models", SINGULARITY_FULL_MODEL))
             missing_files = [str(base / folder / name) for base, folder, name in skin_files
@@ -954,7 +957,7 @@ class QueueWorker:
         elif job["engine"] in ("singularity", "pika"):
             pika = job["engine"] == "pika"
             workflow_builder = "pika_workflow" if pika else "singularity_workflow"
-            skin_options = PIKA_OPTIONS if pika else json.loads(job.get("skin_options_json") or "null")
+            skin_options = pika_options(job.get("workflow_variant")) if pika else json.loads(job.get("skin_options_json") or "null")
             reference_images = json.loads(job.get("reference_images_json") or "[]")
             if not reference_images and image_name and job["mode"] == "reference":
                 reference_images = [image_name]
