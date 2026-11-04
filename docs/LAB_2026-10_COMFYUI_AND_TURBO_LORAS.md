@@ -2,6 +2,8 @@
 
 **Decision: rejected. The app stays on its current environment.**
 
+(In November 2026 ComfyUI 0.44 passed the same kind of test and was adopted: see `LAB_2026-11_COMFYUI_044.md`. The Turbo LoRA findings below still hold.)
+
 This test was done in October 2026 on an RTX 3080 10 GB with 64 GB of RAM.
 It checked two things in a separate lab copy, with its own ComfyUI, venv and
 bridge, so the app was never touched:

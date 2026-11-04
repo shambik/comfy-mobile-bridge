@@ -125,16 +125,17 @@ environment. Every time and VRAM number in this file came from this stack:
 | Component | Version |
 | --- | --- |
 | GPU driver | NVIDIA 610.88 |
-| Python | 3.10.6 (in a dedicated venv; nothing in the system Python) |
+| Python | 3.12.11 (in a dedicated venv; nothing in the system Python) |
 | PyTorch | 2.11.0 + CUDA 13.0 (torchvision 0.26, torchaudio 2.11) |
 | SageAttention | 1.0.6, with triton-windows 3.6 |
 | Nunchaku | 1.2.1 (4-bit image models in the Image Lab) |
-| ComfyUI | v0.33.0 plus 24 commits (August 2026) |
+| ComfyUI | v0.44.0 `56f179f6` (since 2026-11-04; see `LAB_2026-11_COMFYUI_044.md`) |
 
 Key custom nodes: MiniMax H3 Turbo, H3 Native AudioLock (keeps uploaded audio
 exact for lip-sync), LTXVideo, KJNodes, VideoHelperSuite, the sparse-attention
-nodes, Nunchaku and MagCache. The install also has general-purpose node
-packs (Impact Pack, rgthree, Easy Use and others) that the app does not need.
+nodes, Nunchaku and MagCache, plus the Image Lab packs (ControlNet aux,
+GGUF, LayerStyle, rgthree, Easy Use and others). The 0.44 install has only
+the 23 packs the app uses.
 
 The bridge app itself is Python (FastAPI) and a React UI built with
 Node.js 22+. It also needs Git, FFmpeg/ffprobe and Tailscale.
@@ -148,11 +149,10 @@ SHA-256 before using it.
 
 **A fresh install is not the same as our stack.** Bootstrap builds a new
 environment from the repo's pinned list (`manifests/python-lock.txt`), which
-is Python 3.12 with PyTorch 2.9.1 and CUDA 12.6, and it does not include
-SageAttention. That combination has not been tested with a real render, so
-expect to verify it, and install SageAttention yourself if you want the Sage
-speed-ups. Matching our stack exactly means Python 3.10, PyTorch 2.11 with
-CUDA 13.0, and a recent NVIDIA driver.
+is Python 3.12 with PyTorch 2.11 and CUDA 13.0 (the same versions as our
+stack), but it installs only the core H3 nodes and not SageAttention or
+the Image Lab packs. A fresh bootstrap has only been dry-run, so expect to
+verify it. Install SageAttention yourself if you want the Sage speed-ups.
 
 ```powershell
 git clone https://github.com/shambik/comfy-mobile-bridge.git

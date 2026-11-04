@@ -1,5 +1,8 @@
 # Workflow guide
 
+Times below were measured on ComfyUI 0.33. Since 2026-11-04 the app runs ComfyUI 0.44, which was faster or equal on
+every flow (`LAB_2026-11_COMFYUI_044.md` has the per-flow numbers).
+
 ## LTX 2.5 nine-second production comparison (2026-10-25)
 
 Two native-audio opening-frame jobs on the RTX 3080 10 GB used the same

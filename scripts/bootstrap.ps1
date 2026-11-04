@@ -121,7 +121,7 @@ try {
     }
     & $config.Python -m pip install --disable-pip-version-check --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
-    & $config.Python -m pip install --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu126 -r (Join-Path $repo 'manifests\python-lock.txt')
+    & $config.Python -m pip install --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu130 -r (Join-Path $repo 'manifests\python-lock.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Pinned Python dependency installation failed.' }
 
     foreach ($model in $models.models) {

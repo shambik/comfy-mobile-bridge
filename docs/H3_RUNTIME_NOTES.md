@@ -1,6 +1,9 @@
 # H3 runtime notes
 
-The bridge is configured to use the faster ComfyUI environment:
+Since 2026-11-04 the bridge uses ComfyUI 0.44 in its own folder
+(`D:\Repos\ComfyUI044`, Python 3.12.11, PyTorch 2.11.0+cu130), with
+ComfyUI's user folder in `state\user044`. See `LAB_2026-11_COMFYUI_044.md` for
+the tests and the rollback. Before that it used ComfyUI 0.33 with:
 
 `D:\Repos\ComfyUI_venv\ComfyUI\venv_h3_torch211_cu130\Scripts\python.exe`
 
