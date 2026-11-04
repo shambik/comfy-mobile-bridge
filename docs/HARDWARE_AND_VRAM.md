@@ -145,7 +145,8 @@ took about 35% longer than `dynamic` for the same 1.5 MP H3 Turbo shots.
 
 ## Singularity, Pika and the T8 node pack
 
-Singularity's T8 tiers need `comfyui-minimax-h3-audio-T8` pinned to `e576eba` (newer versions need nodes ComfyUI 0.33 lacks).
+Singularity's T8 tiers use `comfyui-minimax-h3-audio-T8`. On ComfyUI 0.44 it runs at `3a23f33`, where all 780 node classes load. On 0.33 it had to stay at `e576eba`, because newer versions need nodes that 0.33 lacks.
+The notes below were measured on 0.33.
 ComfyUI logs "IMPORT FAILED" for it (`io.Hidden.execution_list`), yet its 549 node classes load, including the Dual-Clock
 sampler. Proof it does not change existing flows (2026-11-01, `h3-skinlab/tests/ab_t8.py`): four production jobs re-rendered
 with the same inputs and seeds came out with identical full-size video and audio hashes, with equal times once warm and no

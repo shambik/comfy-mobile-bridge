@@ -14,13 +14,13 @@
     {
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
-      "revision": "2a68ce33b4c9ea6ee4283e618a74560cefb32694",
+      "revision": "56f179f6c50dad0c4c860ae4da427415c8e86415",
       "target": ".runtime/comfyui"
     },
     {
       "name": "MiniMax H3 Turbo node",
       "url": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git",
-      "revision": "55fee864dd7b2976b1c4ce3c3d5f7968f181409f",
+      "revision": "4274783a23afcfdbea3b4876cb79effd6c510785",
       "target": ".runtime/comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo"
     },
     {
@@ -44,7 +44,7 @@
     {
       "name": "MiniMax H3 audio T8 nodes",
       "url": "https://github.com/T8mars/comfyui-minimax-h3-audio-T8.git",
-      "revision": "e576eba8433e95e737155ac1c430c19e6d3fdfcb",
+      "revision": "3a23f333537d9a715aad7ce79af8d9ec891d9ad8",
       "target": ".runtime/comfyui/custom_nodes/comfyui-minimax-h3-audio-T8"
     }
   ],

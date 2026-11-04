@@ -6,9 +6,10 @@ rem It starts ComfyUI first, then the bridge, without duplicating either
 rem process when its configured port is already listening.
 
 set "REPO=%~dp0"
-set "COMFY_ROOT=D:\Repos\ComfyUI_venv\ComfyUI"
-set "COMFY_PYTHON=%COMFY_ROOT%\venv_h3_torch211_cu130\Scripts\python.exe"
-set "BRIDGE_PYTHON=%COMFY_ROOT%\venv\Scripts\python.exe"
+set "COMFY_ROOT=D:\Repos\ComfyUI044"
+set "COMFY_MODELS=D:\Repos\ComfyUI_venv\ComfyUI\models"
+set "COMFY_PYTHON=%COMFY_ROOT%\venv\Scripts\python.exe"
+set "BRIDGE_PYTHON=D:\Repos\ComfyUI_venv\ComfyUI\venv\Scripts\python.exe"
 set "COMFY_PORT=8190"
 set "BRIDGE_PORT=8787"
 
@@ -39,12 +40,12 @@ if errorlevel 1 (
     start "ComfyUI - H3" /D "%COMFY_ROOT%" "%COMFY_PYTHON%" -u "%COMFY_ROOT%\main.py" ^
         --listen 127.0.0.1 --port %COMFY_PORT% ^
         --base-directory "%COMFY_ROOT%" ^
-        --models-directory "%COMFY_ROOT%\models" ^
+        --models-directory "%COMFY_MODELS%" ^
         --input-directory "%REPO%state\input" ^
         --output-directory "%REPO%state\output" ^
         --temp-directory "%REPO%state\temp" ^
-        --user-directory "%REPO%state\user" ^
-        --database-url "sqlite:///D:/repository/state/user/comfyui.db" ^
+        --user-directory "%REPO%state\user044" ^
+        --database-url "sqlite:///D:/repository/state/user044/comfyui.db" ^
         --disable-auto-launch --disable-api-nodes ^
         --reserve-vram 0.9 --enable-dynamic-vram --async-offload 2 ^
         --preview-method none --log-stdout

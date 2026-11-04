@@ -24,4 +24,5 @@ findings as the current state without checking the code.
 | [`APP_AUDIT_AND_FIX_PLAN.md`](APP_AUDIT_AND_FIX_PLAN.md) | 2026-08-23 audit and fix plan |
 | [`CODE_REVIEW_2026-08-23.md`](CODE_REVIEW_2026-08-23.md) | 2026-08-23 code review |
 | [`LAB_2026-10_COMFYUI_AND_TURBO_LORAS.md`](LAB_2026-10_COMFYUI_AND_TURBO_LORAS.md) | 2026-10 lab test of ComfyUI 0.35.2/0.42.1 and the lightx2v Turbo LoRAs (rejected) |
+| [`LAB_2026-11_COMFYUI_044.md`](LAB_2026-11_COMFYUI_044.md) | 2026-11 lab test and upgrade to ComfyUI 0.44 on PyTorch 2.11 (adopted): times, fixes, rollback |
 | [`multiagents-poc/`](multiagents-poc/) | Design notes for the multi-agent production proof of concept |
