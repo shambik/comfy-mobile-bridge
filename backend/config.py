@@ -205,6 +205,17 @@ PIKA_FILES = (
     (MODELS, "vae", FUSED_VIDEO_VAE),
 )
 PIKA_TURBO4_FILES = PIKA_FILES + ((SKIN_MODELS, "loras", PIKA_TURBO4_FL2VA_LORA),)
+# FastH3 OmniRef 8-step (Comfy-Org's video_fasth3_ominiref_r2v template): reference to video with image, audio and
+# video references. Needs ComfyUI 0.44 (its nodes are built in). "omni_models" in config.local.json may name a
+# separate models folder that ComfyUI reads through extra_model_paths.yaml.
+OMNI_MODELS = _as_path(comfy_config.get("omni_models"), MODELS)
+OMNI_MODEL = "fasth3_omniref_8step_pruned_int8_convrot.safetensors"
+OMNI_FILES = (
+    (OMNI_MODELS, "diffusion_models", OMNI_MODEL),
+    (MODELS, "text_encoders", TEXT_ENCODER),
+    (MODELS, "vae", FUSED_VIDEO_VAE),
+    (MODELS, "vae", AUDIO_VAE),
+)
 # ComfyUI's official LTX-2.5 templates, exported to API form (opening frame and first + last frame).
 OFFICIAL_LTX_TEMPLATES = {
     "opening": ROOT / "workflows" / "official_video_ltx2_5_i2v_api.json",

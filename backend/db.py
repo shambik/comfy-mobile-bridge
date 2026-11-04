@@ -34,7 +34,7 @@ def _create_jobs_table(db):
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         audio_start REAL NOT NULL DEFAULT 0,
         audio_duration REAL,
-        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika')),
+        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')),
         workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla')),
@@ -87,10 +87,11 @@ def _create_jobs_table(db):
               (engine='ltx' AND steps = 8) OR
               (engine='singularity' AND steps BETWEEN 4 AND 16) OR
               (engine='pika' AND steps IN (4,6)) OR
+              (engine='omni' AND steps = 8) OR
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
         CHECK(width BETWEEN 256 AND 2048 AND height BETWEEN 256 AND 2048 AND
               width % 32 = 0 AND height % 32 = 0 AND width * height <= 2000000),
-        CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika')),
+        CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')),
         CHECK((sequence_id IS NULL AND sequence_index IS NULL AND sequence_total IS NULL) OR
               (sequence_id IS NOT NULL AND sequence_index BETWEEN 1 AND sequence_total AND sequence_total BETWEEN 2 AND 20))
     );
@@ -283,7 +284,7 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
