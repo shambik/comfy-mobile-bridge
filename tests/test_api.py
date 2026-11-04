@@ -33,6 +33,26 @@ class JobApiTests(unittest.TestCase):
         data = {"prompt": "A calm cinematic forest", "mode": "text", "duration": "5", **values}
         return self.client.post("/api/jobs", data=data, headers={"X-CSRF-Token": self.token})
 
+    def test_job_page_keeps_finished_results_behind_a_long_queue(self):
+        for _ in range(36):
+            self.assertEqual(self.post(engine="turbo", steps="4", resolution="512x288").status_code, 200)
+        connection = sqlite3.connect(self.path)
+        try:
+            ids = [row[0] for row in connection.execute("SELECT id FROM jobs ORDER BY position")]
+            connection.execute("UPDATE jobs SET status='completed', finished_at=created_at WHERE id=?", (ids[0],))
+            connection.execute("UPDATE jobs SET status='running' WHERE id=?", (ids[1],))
+            connection.commit()
+        finally:
+            connection.close()
+
+        page = self.client.get("/api/jobs?limit=32&include_library=false").json()
+        listed = [job["id"] for job in page["jobs"]]
+        self.assertEqual(page["jobs_total"], 36)
+        self.assertEqual(listed[0], ids[1])
+        self.assertEqual(set(listed[:35]), set(ids[1:]))
+        self.assertEqual(listed[35:], [ids[0]])
+        self.assertEqual([job["id"] for job in self.client.get("/api/jobs?status=queued&limit=5&include_library=false").json()["jobs"]], ids[2:7])
+
     def test_selected_profile_is_persisted(self):
         response = self.post(engine="turbo", steps="6", resolution="512x288")
         self.assertEqual(response.status_code, 200, response.text)
