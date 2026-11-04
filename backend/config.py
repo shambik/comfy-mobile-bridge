@@ -188,6 +188,10 @@ PIKA_FL2VA_LORA = "pika_h3_flex_fl2va_comfy_bf16.safetensors"
 # Pika's release schedule: knots 1000/750/500/250/100/40/0 at video shift 12, fresh noise (lcm).
 PIKA_SIGMAS = "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"
 PIKA_STEPS = 6
+# Pika H3 Flex Turbo (Pika-Labs/Pika-H3-Flex-Turbo-LoRA): the 4-step FL2VA file only, since Turbo
+# looked bad in reference mode. It samples with the T8 Dual-Clock sampler, not Pika's knots.
+PIKA_TURBO4_FL2VA_LORA = "pika_h3_flex_turbo_4step_fl2va.safetensors"
+PIKA_TURBO4_STEPS = 4
 SKIN_FILES = (
     (SKIN_MODELS, "diffusion_models", SINGULARITY_MODEL),
     (SKIN_MODELS, "loras", SKIN_PEOPLE_LORA),
@@ -200,6 +204,7 @@ PIKA_FILES = (
     (SKIN_MODELS, "loras", PIKA_FL2VA_LORA),
     (MODELS, "vae", FUSED_VIDEO_VAE),
 )
+PIKA_TURBO4_FILES = PIKA_FILES + ((SKIN_MODELS, "loras", PIKA_TURBO4_FL2VA_LORA),)
 # ComfyUI's official LTX-2.5 templates, exported to API form (opening frame and first + last frame).
 OFFICIAL_LTX_TEMPLATES = {
     "opening": ROOT / "workflows" / "official_video_ltx2_5_i2v_api.json",

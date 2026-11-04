@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from copy import deepcopy
 
-from .config import (OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_SIGMAS, AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
+from .config import (OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_SIGMAS, PIKA_TURBO4_FL2VA_LORA, AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      FL2VA_MODEL, FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, LTX23_CHECKPOINT,
                      LTX23_DISTILLED_LORA, LTX23_INGREDIENTS_LORA,
@@ -723,7 +723,10 @@ def skin_loras(tier: str, options: dict, mode: str = "reference") -> list[tuple[
     elif options["speed_lora"] == "none":
         speed = []
     else:
-        speed = [PIKA_FL2VA_LORA if options["speed_lora"] == "pika" and mode != "reference"
+        # Frame and lip-sync modes run on the FL2VA base, so they take the FL2VA file.
+        # Pika Turbo has no reference file: the engine refuses Turbo in reference mode.
+        fl2va = {"pika": PIKA_FL2VA_LORA, "pika_turbo4": PIKA_TURBO4_FL2VA_LORA}
+        speed = [fl2va[options["speed_lora"]] if options["speed_lora"] in fl2va and mode != "reference"
                  else SKIN_SPEED_LORAS[options["speed_lora"]]]
     return ([(SKIN_PEOPLE_LORA, options["people_strength"])] if people else []) + \
         [(lora, options["speed_strength"]) for lora in speed]

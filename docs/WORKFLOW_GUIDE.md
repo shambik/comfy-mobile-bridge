@@ -398,6 +398,19 @@ an opening frame or reference, 516-582 s for first + last (2026-11-03, 5 s, 1.5 
 opening frame and first + last. Close games, launchers and browsers before long H3 batches: other programs on the GPU
 make H3 jobs spill and run 2-4x slower.
 
+**Pika Turbo 4-step** (engine `pika`, workflow variant `turbo4`; the "Turbo · 4 steps" switch under Pika): Pika-Labs'
+Pika H3 Flex Turbo 4-step FL2VA LoRA at strength 1 on H3's pruned FL2VA base, T8 Dual-Clock sampler, scheduler `simple`,
+shift 12 video / 3 audio, 4 steps, Sage with the Steady Memory node. Lab-tested 2026-11-03/04 at 1.5 MP and 5 s, all approved
+in review: opening frame `24af717b` 341 s, `8cb338ce` 326 s, `b2d4b58c` 321 s (Pika 6-step about 459-470 s); first + last
+`cac8dc06` 377 s (vs 488 s), `2ae0ff85` 356 s (vs 483 s); lip-sync `566ccb0d` 321 s (vs 442 s), `78605697` 326 s (vs 480 s).
+Fast moves blur a little more than with Pika 6-step. The code allows only what was tested: opening frame, first + last and
+lip-sync, Sage, up to 5 s. Refused, with the reasons: reference (every Turbo reference job looked bad: keep Pika 6-step),
+text and other attention modes (not tested). The model card's shift 6 broke fight anatomy, so shift is fixed at 12. The
+8-step HD LoRA was slower than Pika 6-step (544-575 s) and is not used. App replays with the lab inputs and seeds
+(2026-11-04): first + last `e21d9b34` (346 s) and lip-sync `5cded6ab` (316 s) came out bit-identical to the lab jobs;
+the opening frames `9134a451` (rerun `1d8fb64d`, identical) and `8da3a670` (316 s) differ from their lab jobs, which ran
+right after 8-step HD jobs on the same cached base model, so those lab renders likely carried the previous LoRA's changes.
+
 **Reference prompts:** define each person and name their picture ("<Subject 1> is the man from <Picture 1> (left): ...").
 A short "the two fighters from the pictures" ignored the sheet on both Pika (`985f52a1`) and Singularity God (`a6732612`);
 the same recipes with subject definitions kept both faces (`cab0a33f`, `8c355493`). Many hard cuts and whip pans in 5 s look

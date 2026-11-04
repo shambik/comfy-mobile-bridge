@@ -59,6 +59,25 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("v4", 6))
 
+    def test_pika_turbo_is_persisted_and_keeps_its_tested_length(self):
+        files = {"image": ("face.png", b"image-placeholder", "image/png")}
+        data = {"prompt": "A fighter turns to camera", "mode": "opening", "engine": "pika", "workflow_variant": "turbo4",
+                "steps": "4", "attention_mode": "sage", "aspect_ratio": "16:9", "megapixels": "1.5"}
+        with patch("backend.main.pika_ready", return_value=True), \
+             patch("backend.main.pika_turbo4_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/face.png", "face.png"))):
+            refused = self.client.post("/api/jobs", data={**data, "duration": "6"}, files=files, headers={"X-CSRF-Token": self.token})
+            response = self.client.post("/api/jobs", data={**data, "duration": "5"}, files=files, headers={"X-CSRF-Token": self.token})
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertIn("tested up to 5 seconds", refused.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute("SELECT engine,workflow_variant,steps,attention_mode,width,height FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row, ("pika", "turbo4", 4, "sage", 1632, 928))
+
     def test_reference_audio_is_persisted_as_an_optional_official_reference(self):
         data = {
             "prompt": "<Picture 1> speaks in time with <Audio 1>",

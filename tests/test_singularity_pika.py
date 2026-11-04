@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from backend.config import OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, SKIN_PEOPLE_LORA
-from backend.generation import (PIKA_OPTIONS, SKIN_OPTION_DEFAULTS, normalize_generation_settings,
-                                normalize_skin_options)
+from backend.config import OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_TURBO4_FL2VA_LORA, SKIN_PEOPLE_LORA
+from backend.generation import (PIKA_OPTIONS, PIKA_TURBO4_MODES, PIKA_TURBO4_OPTIONS, SKIN_OPTION_DEFAULTS,
+                                normalize_generation_settings, normalize_skin_options, pika_options)
 from backend.worker import history_retry_phase
 from backend.workflows import (apply_attention_mode, apply_steady_memory, official_ltx_template_workflow, singularity_app_workflow, singularity_workflow,
                                steady_memory_needed,
@@ -43,6 +43,37 @@ class PikaEngineTests(unittest.TestCase):
     def test_lora_matches_the_base_model(self):
         self.assertEqual(skin_loras("skin_max", PIKA_OPTIONS, "opening"), [(PIKA_FL2VA_LORA, 1.0)])
         self.assertEqual(skin_loras("skin_max", PIKA_OPTIONS, "reference"), [(PIKA_REF2VA_LORA, 1.0)])
+
+
+class PikaTurboTests(unittest.TestCase):
+    def test_settings_are_the_tested_recipe(self):
+        for mode in PIKA_TURBO4_MODES:
+            settings = normalize_generation_settings(mode, engine="pika", workflow_variant="turbo4", aspect_ratio="16:9")
+            with self.subTest(mode):
+                self.assertEqual((settings.steps, settings.width, settings.height), (4, 1632, 928))
+                self.assertEqual((settings.attention_mode, settings.workflow_variant), ("sage", "turbo4"))
+        self.assertIs(pika_options("turbo4"), PIKA_TURBO4_OPTIONS)
+        self.assertIs(pika_options("direct"), PIKA_OPTIONS)
+
+    def test_untested_choices_are_refused(self):
+        for kwargs in ({"mode": "reference"}, {"mode": "text"}, {"mode": "closing"}, {"mode": "opening", "steps": 6},
+                       {"mode": "opening", "attention_mode": "standard"}, {"mode": "lip_sync", "attention_mode": "sage_sla"}):
+            with self.subTest(kwargs), self.assertRaises(ValueError):
+                normalize_generation_settings(engine="pika", workflow_variant="turbo4", **kwargs)
+
+    def test_workflow_is_the_lab_graph(self):
+        for mode, kwargs in (("opening", {"first_frame_name": "a.png"}), ("frames", {"first_frame_name": "a.png", "last_frame_name": "b.png"}),
+                             ("lip_sync", {"first_frame_name": "a.png", "audio_name": "a.wav"})):
+            workflow = singularity_workflow("hello", 5, 1, "x", "skin_max", 1632, 928, [], mode=mode,
+                                            steps=4, options=PIKA_TURBO4_OPTIONS, **kwargs)
+            sampler = next(node["inputs"] for node in workflow.values() if node["class_type"] == "MiniMaxH3DualClockSamplerT8")
+            loras = [node["inputs"] for node in workflow.values() if node["class_type"] == "LoraLoaderModelOnly"]
+            with self.subTest(mode):
+                self.assertEqual((sampler["steps"], sampler["scheduler"], sampler["shift_video"], sampler["shift_audio"]),
+                                 (4, "simple", 12.0, 3.0))
+                self.assertEqual([(lora["lora_name"], lora["strength_model"]) for lora in loras], [(PIKA_TURBO4_FL2VA_LORA, 1.0)])
+                self.assertNotIn("ManualSigmas", classes(workflow))
+                self.assertTrue(steady_memory_needed("pika", "sage"))
 
 
 class SingularityEngineTests(unittest.TestCase):

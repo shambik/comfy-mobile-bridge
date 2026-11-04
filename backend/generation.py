@@ -81,6 +81,21 @@ SKIN_DURATION_RANGE = (2.0, 7.0)
 PIKA_STEPS_FIXED = 6
 PIKA_MODES = ("text", "opening", "frames", "lip_sync", "reference")
 PIKA_OPTIONS = {**SKIN_OPTION_DEFAULTS, "model": "base", "speed_lora": "pika", "flow": "pika", "ref_size": "match"}
+# Pika Turbo 4-step (workflow variant "turbo4"): Pika's Turbo LoRA on the FL2VA base, T8 Dual-Clock sampler,
+# simple scheduler, shift 12 video / 3 audio, Sage. Lab-tested at 1.5 MP and 5 s in opening frame, first + last
+# and lip-sync (about 25-30% faster than Pika 6-step). Reference looked bad, the card's shift 6 broke anatomy,
+# and text mode and the other attention modes were not tested, so all of those are refused.
+PIKA_VARIANTS = ("direct", "turbo4")
+PIKA_TURBO4_STEPS_FIXED = 4
+PIKA_TURBO4_MODES = ("opening", "frames", "lip_sync")
+PIKA_TURBO4_MAX_DURATION = 5.0
+PIKA_TURBO4_OPTIONS = {**SKIN_OPTION_DEFAULTS, "model": "base", "speed_lora": "pika_turbo4", "people_strength": 0.0,
+                       "scheduler": "simple", "flow": "t8", "ref_size": "match"}
+
+
+def pika_options(workflow_variant: str | None) -> dict:
+    """The fixed sampler and LoRA settings of a Pika job."""
+    return PIKA_TURBO4_OPTIONS if workflow_variant == "turbo4" else PIKA_OPTIONS
 # LTX-2.5 distilled: one pass of the 8-step distilled schedule. Reference mode
 # uses Lightricks' Ingredients IC-LoRA with one reference sheet image.
 LTX_STEPS = 8
@@ -284,28 +299,35 @@ def _normalize_pika(mode, steps, encoder, turbo_profile, aspect_ratio, workflow_
                     ltx_quality, ltx_reference_model, sharp_decode, calm_sampler) -> GenerationSettings:
     if mode not in PIKA_MODES:
         raise ValueError("Pika supports text, opening frame, first + last, lip-sync and reference")
-    if steps not in (None, PIKA_STEPS_FIXED) or isinstance(steps, bool):
-        raise ValueError(f"Pika runs exactly {PIKA_STEPS_FIXED} steps")
+    variant = workflow_variant or "direct"
+    if variant not in PIKA_VARIANTS:
+        raise ValueError("Pika variants: direct (6 steps) or turbo4 (Turbo 4-step)")
+    turbo = variant == "turbo4"
+    if turbo and mode not in PIKA_TURBO4_MODES:
+        raise ValueError("Pika Turbo 4-step was tested in opening frame, first + last and lip-sync only")
+    fixed_steps = PIKA_TURBO4_STEPS_FIXED if turbo else PIKA_STEPS_FIXED
+    if steps not in (None, fixed_steps) or isinstance(steps, bool):
+        raise ValueError(f"{'Pika Turbo' if turbo else 'Pika'} runs exactly {fixed_steps} steps")
     if (encoder or "native") != "native":
         raise ValueError("Pika uses the native 32B text encoder")
     if turbo_profile not in (None, "v1"):
         raise ValueError("Turbo profile is only available with the turbo engine")
     if ltx_quality is not None or ltx_reference_model is not None or sharp_decode or calm_sampler:
         raise ValueError("LTX options are only available with the ltx engine")
-    if workflow_variant not in (None, "direct"):
-        raise ValueError("Pika has no workflow variants")
     aspect = aspect_ratio or "9:16"
     if aspect not in SKIN_SIZES[1.5]:
         raise ValueError("Pika was tested at 9:16 and 16:9 only")
-    attention = attention_mode or "standard"
+    attention = attention_mode or ("sage" if turbo else "standard")
     if attention not in ENGINE_ATTENTION_MODES["pika"]:
         raise ValueError("The pika engine supports attention modes: " + ", ".join(ENGINE_ATTENTION_MODES["pika"]))
+    if turbo and attention != "sage":
+        raise ValueError("Pika Turbo 4-step was tested with Sage attention only")
     # Sage runs through the steady memory node; sparse was never tested with it on frame-start jobs, where it stalled.
     # See docs/HARDWARE_AND_VRAM.md.
     if mode in ("opening", "frames") and attention in ("sla", "sage_sla"):
         raise ValueError("Pika opening frame and first + last run with standard or Sage attention: sparse stalls at this size")
     width, height = SKIN_SIZES[1.5][aspect]
-    return GenerationSettings("pika", PIKA_STEPS_FIXED, width, height, "native", "v1", 1.5, aspect, "direct", attention)
+    return GenerationSettings("pika", fixed_steps, width, height, "native", "v1", 1.5, aspect, variant, attention)
 
 
 def normalize_skin_options(raw: str | dict | None) -> dict:
