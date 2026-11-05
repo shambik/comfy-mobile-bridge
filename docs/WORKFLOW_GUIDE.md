@@ -398,8 +398,9 @@ Ported from the H3 skin lab (October 2026). Each job is a single shot; none of t
 app's Turbo v4 graph (tier App flow). 2-7 s, 1.0 or 1.5 MP, 9:16 or 16:9, 4-16 steps (default 8), Sage or standard
 attention, native encoder. The tiers pick the LoRAs: God (People + Turbo v4), Balanced (People + Ref2V 8-step), Max
 (Ref2V 8-step), App flow (People on the Turbo v4 graph, no reference). Well tested: reference (about 40 jobs) and
-lip-sync (8 jobs, keepers `cef0958e`, `d8dd0490`). Reference mode redraws the face: it never held the singer's intricate
-paint and jewellery, so use an opening frame or lip-sync for an exact face.
+lip-sync (8 jobs, keepers `cef0958e`, `d8dd0490`). Until 2026-11-05 every Singularity reference job ran without its
+pictures (issue #20), which is why reference mode "never held" the singer's face and paint. With the fix, God and
+Balanced kept the Shadow singer's face, paint and jewellery at 9:16, 1.5 MP (lab, 623 s and 621 s).
 
 **Pika** (engine `pika`, action): H3's own pruned base + the matching Pika H3 Flex LoRA, Pika's fixed 6 knots, ref size
 `match`. 1.5 MP, 9:16 or 16:9, 2-7 s. Standard attention by default: a 5 s job takes about 10.5-13 min (reference 630 s,
@@ -426,8 +427,8 @@ the opening frames `9134a451` (rerun `1d8fb64d`, identical) and `8da3a670` (316 
 right after 8-step HD jobs on the same cached base model, so those lab renders likely carried the previous LoRA's changes.
 
 **Reference prompts:** define each person and name their picture ("<Subject 1> is the man from <Picture 1> (left): ...").
-A short "the two fighters from the pictures" ignored the sheet on both Pika (`985f52a1`) and Singularity God (`a6732612`);
-the same recipes with subject definitions kept both faces (`cab0a33f`, `8c355493`). Many hard cuts and whip pans in 5 s look
+The earlier evidence for this is void: `985f52a1`, `a6732612`, `cab0a33f` and `8c355493` all ran without their pictures
+(issue #20), so the subject definitions helped only as text. Still define each person; it costs nothing. Many hard cuts and whip pans in 5 s look
 chaotic; prefer one or two shots.
 
 **LTX recipe** (`ltx_recipe=official`, opening frame and first + last): ComfyUI's own LTX-2.5 templates instead of the app's
