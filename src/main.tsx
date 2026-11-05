@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
@@ -1858,15 +1858,26 @@ function App() {
     return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
   }
 
-  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void) => {
+  // Collapse or expand every folder nested in a project at once; expanding also opens the project itself.
+  const setNestedGroups = (key: string, nestedKeys: string[], collapse: boolean) => setCollapsedAssetGroups(current => ({
+    ...current, ...Object.fromEntries(nestedKeys.map(nested => [nested, collapse])), ...(collapse ? {} : { [key]: false }),
+  }))
+
+  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void, nestedKeys: string[] = []) => {
     const collapsed = !!collapsedAssetGroups[key]
+    const allNestedCollapsed = !collapsed && nestedKeys.length > 0 && nestedKeys.every(nested => collapsedAssetGroups[nested])
     return <section className={`asset-result-container ${level}${collapsed ? ' collapsed' : ''}`} key={key}>
       <div className="asset-container-head">
         <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
           {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
           <Folder size={17}/><strong>{title}</strong><span>{assets.length} נכסים</span>
         </button>
-        {onCreateFolder && <button type="button" className="asset-container-add" onClick={onCreateFolder}><FolderPlus size={14}/> תיקייה חדשה</button>}
+        {(onCreateFolder || nestedKeys.length > 1) && <div className="asset-container-actions">
+          {nestedKeys.length > 1 && <button type="button" className="asset-container-add asset-container-bulk" onClick={() => setNestedGroups(key, nestedKeys, !(collapsed || allNestedCollapsed))}>
+            {collapsed || allNestedCollapsed ? <><ChevronsUpDown size={14}/> הרחב הכול</> : <><ChevronsDownUp size={14}/> כווץ הכול</>}
+          </button>}
+          {onCreateFolder && <button type="button" className="asset-container-add" onClick={onCreateFolder}><FolderPlus size={14}/> תיקייה חדשה</button>}
+        </div>}
       </div>
       {!collapsed && <div className={`asset-container-content ${children ? 'nested' : 'cards'}`}>{children || assets.map(renderResultAsset)}</div>}
     </section>
@@ -1881,7 +1892,8 @@ function App() {
       {folderGroups.map(group => renderAssetContainer(`folder:${group.folder.id}`, group.folder.name, group.assets, 'folder', undefined, () => { void createStudioFolder(project.id) }))}
       {!rootAssets.length && !folderGroups.length && <div className="asset-container-empty">אין נכסים בפרויקט הזה.</div>}
     </>
-    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) })
+    const nestedKeys = [...(rootAssets.length ? [`root:${project.id}`] : []), ...folderGroups.map(group => `folder:${group.folder.id}`)]
+    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) }, nestedKeys)
   }
 
   return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>

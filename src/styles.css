@@ -226,7 +226,7 @@ footer { text-align: center; color: #4f5953; font-size: 10px; padding-top: 34px;
 .asset-container-head { display: flex; align-items: stretch; min-width: 0; }
 .asset-container-head > .asset-container-toggle { width: auto; flex: 1 1 auto; min-width: 0; }
 .asset-container-add { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 0 0 auto; padding: 0 10px; border: 0; border-left: 1px solid #2d3931; background: #151c17; color: #a9c59c; font-size: 9px; white-space: nowrap; cursor: pointer; }
-.asset-container-add:hover { background: #202c21; color: #d4e7b8; }
+.asset-container-actions { display: flex; flex: 0 0 auto; align-items: stretch; }.asset-container-actions > .asset-container-add + .asset-container-add { border-left: 1px solid #2d3931; }.asset-container-add:hover { background: #202c21; color: #d4e7b8; }
 .asset-result-container.folder > .asset-container-head > .asset-container-toggle { min-height: 42px; background: #171e19; }
 .bulk-dock + .asset-results-tree { position: relative; z-index: 0; }
 .bulk-dock + .asset-results-tree .asset-container-head { position: relative; z-index: 1; }
@@ -889,6 +889,7 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
   .asset-container-toggle span { grid-column: 3; margin: 0; }
   .asset-container-head { flex-wrap: wrap; }
   .asset-container-head > .asset-container-toggle { flex: 1 1 100%; }
-  .asset-container-head > .asset-container-add { flex: 1 1 100%; min-height: 36px; justify-content: flex-start; padding-inline: 14px; border-left: 0; border-top: 1px solid #2d3931; }
-  .asset-result-container.collapsed > .asset-container-head > .asset-container-add { display: none; }
+  .asset-container-head > .asset-container-actions { flex: 1 1 100%; border-top: 1px solid #2d3931; }
+  .asset-container-actions > .asset-container-add { flex: 1 1 0; min-height: 36px; justify-content: flex-start; padding-inline: 14px; border-left: 0; }
+  .asset-result-container.collapsed > .asset-container-head > .asset-container-actions { display: none; }
 }
