@@ -880,3 +880,15 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .advanced-log .node-note { font-size: 11px; opacity: .75; margin: 4px 0; }
 .job-inputs { white-space: normal; }
 .job-setup { white-space: normal; }
+
+/* Phones: folder headers show the whole name, the count under it, and "new folder" on its own row only while open. */
+@media (max-width: 619px) {
+  .asset-container-toggle { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; column-gap: 0; row-gap: 2px; }
+  .asset-container-toggle > svg { grid-row: 1 / span 2; }
+  .asset-container-toggle strong { grid-column: 3; white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.25; }
+  .asset-container-toggle span { grid-column: 3; margin: 0; }
+  .asset-container-head { flex-wrap: wrap; }
+  .asset-container-head > .asset-container-toggle { flex: 1 1 100%; }
+  .asset-container-head > .asset-container-add { flex: 1 1 100%; min-height: 36px; justify-content: flex-start; padding-inline: 14px; border-left: 0; border-top: 1px solid #2d3931; }
+  .asset-result-container.collapsed > .asset-container-head > .asset-container-add { display: none; }
+}

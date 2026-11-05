@@ -1860,7 +1860,7 @@ function App() {
 
   const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void) => {
     const collapsed = !!collapsedAssetGroups[key]
-    return <section className={`asset-result-container ${level}`} key={key}>
+    return <section className={`asset-result-container ${level}${collapsed ? ' collapsed' : ''}`} key={key}>
       <div className="asset-container-head">
         <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
           {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
