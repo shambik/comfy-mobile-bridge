@@ -58,8 +58,11 @@ class H3StillWorkflowTests(unittest.TestCase):
 
     def test_reference_turbo_uses_ref2va_turbo_chain(self):
         workflow = self.build(input_mode="reference", engine="turbo", steps=6, reference_names=["face.png"])
+        self.assertEqual(workflow["18"]["class_type"], "LoraLoaderModelOnly")
         self.assertEqual(workflow["18"]["inputs"]["lora_name"], "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
+        self.assertEqual(workflow["20"]["inputs"], {"sampler_name": "euler"})
         self.assertEqual(workflow["14"]["inputs"]["sampler"], ["20", 0])
+        self.assertEqual(workflow["9"]["inputs"]["model"], ["19", 0])
 
     def test_invalid_input_combinations_raise(self):
         with self.assertRaises(H3StillError):

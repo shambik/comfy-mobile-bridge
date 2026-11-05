@@ -640,7 +640,7 @@ def reference_workflow(
         **_resolution_selector(width, height, megapixels, aspect_ratio),
         **_duration_selector(duration),
         "127": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
-        "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "beta" if turbo else "simple", "steps": steps, "denoise": 1.0}},
+        "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "simple", "steps": steps, "denoise": 1.0}},
         "136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
             "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": prompt,
             "width": ["7", 0], "height": ["7", 1], "length": ["106", 1], "ref_image_size": "match"}},
@@ -664,15 +664,17 @@ def reference_workflow(
         nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
         reference_input(nodes["136"]["inputs"], "ref_audios", 0, ["180", 0])
     if turbo:
+        # Lightx2v/ModelTC's Ref2V Turbo LoRA is in ComfyUI's standard key format, so it loads with
+        # LoraLoaderModelOnly (larryvrh's MiniMaxH3TurboLoRA patched 0 weights). The chain follows ModelTC's
+        # own graph, example_workflows/video_minimax_h3_ref2v_lightx2v_turbo.json: shift 12/3, euler, simple.
         nodes.update({
-            "128": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
-                "model": ["127", 0], "lora_name": REF2VA_TURBO_LORA,
-                "strength": 1.0, "low_vram": True,
+            "128": {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": ["127", 0], "lora_name": REF2VA_TURBO_LORA, "strength_model": 1.0,
             }},
             "129": {"class_type": "MiniMaxH3SigmaShift", "inputs": {
                 "model": ["128", 0], "shift_video": 12.0, "shift_audio": 3.0,
             }},
-            "130": {"class_type": "MiniMaxH3TurboSampler", "inputs": {}},
+            "130": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
         })
     elif spectrum:
         nodes.update({

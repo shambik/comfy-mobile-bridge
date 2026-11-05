@@ -160,7 +160,27 @@ def _load_workflow() -> dict[str, Any]:
 
 def _configure_turbo(workflow: dict[str, Any], *, reference: bool, turbo_profile: str) -> None:
     if reference:
-        lora_name = REF2VA_TURBO_LORA
+        # The Ref2V Turbo LoRA (Lightx2v/ModelTC) is in ComfyUI's standard format: LoraLoaderModelOnly and
+        # euler, as in ModelTC's Ref2V graph. larryvrh's MiniMaxH3TurboLoRA node patched 0 of its weights.
+        workflow["18"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": ["6", 0], "lora_name": REF2VA_TURBO_LORA, "strength_model": 1.0},
+            "_meta": {"title": "H3 Ref2V Turbo LoRA"},
+        }
+        workflow["19"] = {
+            "class_type": "MiniMaxH3SigmaShift",
+            "inputs": {"model": ["18", 0], "shift_video": 12.0, "shift_audio": 3.0},
+            "_meta": {"title": "H3 Turbo sigma shift"},
+        }
+        workflow["20"] = {
+            "class_type": "KSamplerSelect",
+            "inputs": {"sampler_name": "euler"},
+            "_meta": {"title": "H3 Ref2V Turbo sampler"},
+        }
+        workflow["9"]["inputs"]["model"] = ["19", 0]
+        workflow["16"]["inputs"]["model"] = ["19", 0]
+        workflow["14"]["inputs"]["sampler"] = ["20", 0]
+        return
     else:
         if turbo_profile not in TURBO_LORAS:
             raise H3StillError("Turbo profile must be v1 or v4")

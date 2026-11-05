@@ -889,7 +889,7 @@ class QueueWorker:
         elif job["mode"] == "reference" and job["engine"] != "fused_sla":
             required.add("MiniMaxH3ReferenceToVideo")
             if job["engine"] == "turbo":
-                required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
+                required |= {"LoraLoaderModelOnly", "KSamplerSelect", "MiniMaxH3SigmaShift"}
                 if not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
                     raise RuntimeError(f"Ref2VA Turbo LoRA is not installed: {REF2VA_TURBO_LORA}")
             elif job["engine"] == "spectrum":

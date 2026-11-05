@@ -25,7 +25,7 @@ def model_chain(workflow: dict) -> list[str]:
         consumers = [key for key, node in workflow.items()
                      if node["inputs"].get("model") == [current, 0]]
         patches = [key for key in consumers
-                   if workflow[key]["class_type"] in {"MiniMaxH3TurboLoRA", "PathchSageAttentionKJ",
+                   if workflow[key]["class_type"] in {"MiniMaxH3TurboLoRA", "LoraLoaderModelOnly", "PathchSageAttentionKJ",
                                                      "H3SLAAttention", "MiniMaxChunkFeedForward"}]
         if not patches:
             return chain
@@ -103,7 +103,8 @@ class AttentionWorkflowTests(unittest.TestCase):
         )
         reference = reference_workflow("test", 5, 1, "p", "ref.png", steps=6, turbo=True)
         self.assertEqual(
-            model_chain(apply_attention_mode(reference, "sla"))[-1], "H3SLAAttention",
+            model_chain(apply_attention_mode(reference, "sla")),
+            ["UNETLoader", "LoraLoaderModelOnly", "H3SLAAttention"],
         )
 
     @needs_official_fused

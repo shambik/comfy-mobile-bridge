@@ -245,9 +245,13 @@ class WorkflowTests(unittest.TestCase):
             image_names=["one.png", "two.png"], video_names=["ref.mp4"],
             include_audio=False,
         )
-        self.assertEqual(workflow["128"]["inputs"]["lora_name"], "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
+        # ModelTC's Ref2V Turbo graph: the standard LoRA loader (larryvrh's node patched 0 weights), euler, simple.
+        self.assertEqual(workflow["128"]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(workflow["128"]["inputs"], {"model": ["127", 0], "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors", "strength_model": 1.0})
         self.assertEqual(workflow["129"]["class_type"], "MiniMaxH3SigmaShift")
-        self.assertEqual(workflow["130"]["class_type"], "MiniMaxH3TurboSampler")
+        self.assertEqual(workflow["130"]["inputs"], {"sampler_name": "euler"})
+        self.assertEqual(workflow["124"]["inputs"]["scheduler"], "simple")
+        self.assertNotIn("MiniMaxH3TurboLoRA", {node["class_type"] for node in workflow.values()})
         inputs = workflow["136"]["inputs"]
         self.assertEqual(inputs["ref_images.ref_image_0"], ["137", 0])
         self.assertEqual(inputs["ref_images.ref_image_1"], ["138", 0])
