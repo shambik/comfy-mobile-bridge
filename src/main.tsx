@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
@@ -207,6 +207,7 @@ type Preferences = {
 const SKIN_OPTION_DEFAULTS: SkinOptions = { model: 'pruned', speed_lora: 'tier', flow: 't8', speed_strength: 1, people_strength: 1, shift_video: 12, shift_audio: 3, scheduler: 'beta', tail_steps: 0 }
 const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxRecipe: 'app', pikaSpeed: 'direct', omniMegapixels: 1.5, ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', skinTier: 'skin_god', skinMegapixels: 1, skinSteps: 8, skinOptions: SKIN_OPTION_DEFAULTS, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
+const queueCollapsedKey = 'h3-queue-collapsed-v1'
 
 function readPreferences(): Preferences {
   try {
@@ -737,6 +738,10 @@ function App() {
   const [editFolder, setEditFolder] = useState('')
   const [editFilename, setEditFilename] = useState('')
   const [collapsedAssetGroups, setCollapsedAssetGroups] = useState<Record<string, boolean>>({})
+  // The waiting jobs fold away like a result folder; the choice is per browser and survives a reload.
+  const [queueCollapsed, setQueueCollapsed] = useState(() => {
+    try { return localStorage.getItem(queueCollapsedKey) === '1' } catch { return false }
+  })
   const loadInFlightRef = useRef(false)
   const comfyLoadInFlightRef = useRef(false)
   const jobsRevisionRef = useRef('')
@@ -1205,6 +1210,11 @@ function App() {
     ...queued.map(job => ({ kind: 'job' as const, position: job.position || Number.MAX_SAFE_INTEGER, job })),
     ...queuedSequences.map(sequence => ({ kind: 'sequence' as const, position: sequence.position, sequence })),
   ].sort((a, b) => a.position - b.position)
+  const toggleQueue = () => setQueueCollapsed(current => {
+    const next = !current
+    try { localStorage.setItem(queueCollapsedKey, next ? '1' : '0') } catch { /* storage unavailable: keep it for this page only */ }
+    return next
+  })
 
   const mutate = async (url: string, method = 'POST', body?: BodyInit, sessionToken = csrf) => {
     const controller = new AbortController()
@@ -1848,15 +1858,26 @@ function App() {
     return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={() => useJobSeed(job)} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
   }
 
-  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void) => {
+  // Collapse or expand every folder nested in a project at once; expanding also opens the project itself.
+  const setNestedGroups = (key: string, nestedKeys: string[], collapse: boolean) => setCollapsedAssetGroups(current => ({
+    ...current, ...Object.fromEntries(nestedKeys.map(nested => [nested, collapse])), ...(collapse ? {} : { [key]: false }),
+  }))
+
+  const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void, nestedKeys: string[] = []) => {
     const collapsed = !!collapsedAssetGroups[key]
-    return <section className={`asset-result-container ${level}`} key={key}>
+    const allNestedCollapsed = !collapsed && nestedKeys.length > 0 && nestedKeys.every(nested => collapsedAssetGroups[nested])
+    return <section className={`asset-result-container ${level}${collapsed ? ' collapsed' : ''}`} key={key}>
       <div className="asset-container-head">
         <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
           {collapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
           <Folder size={17}/><strong>{title}</strong><span>{assets.length} נכסים</span>
         </button>
-        {onCreateFolder && <button type="button" className="asset-container-add" onClick={onCreateFolder}><FolderPlus size={14}/> תיקייה חדשה</button>}
+        {(onCreateFolder || nestedKeys.length > 1) && <div className="asset-container-actions">
+          {nestedKeys.length > 1 && <button type="button" className="asset-container-add asset-container-bulk" onClick={() => setNestedGroups(key, nestedKeys, !(collapsed || allNestedCollapsed))}>
+            {collapsed || allNestedCollapsed ? <><ChevronsUpDown size={14}/> הרחב הכול</> : <><ChevronsDownUp size={14}/> כווץ הכול</>}
+          </button>}
+          {onCreateFolder && <button type="button" className="asset-container-add" onClick={onCreateFolder}><FolderPlus size={14}/> תיקייה חדשה</button>}
+        </div>}
       </div>
       {!collapsed && <div className={`asset-container-content ${children ? 'nested' : 'cards'}`}>{children || assets.map(renderResultAsset)}</div>}
     </section>
@@ -1871,7 +1892,8 @@ function App() {
       {folderGroups.map(group => renderAssetContainer(`folder:${group.folder.id}`, group.folder.name, group.assets, 'folder', undefined, () => { void createStudioFolder(project.id) }))}
       {!rootAssets.length && !folderGroups.length && <div className="asset-container-empty">אין נכסים בפרויקט הזה.</div>}
     </>
-    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) })
+    const nestedKeys = [...(rootAssets.length ? [`root:${project.id}`] : []), ...folderGroups.map(group => `folder:${group.folder.id}`)]
+    return renderAssetContainer(`project:${project.id}`, project.name, assets, 'project', content, () => { void createStudioFolder(project.id) }, nestedKeys)
   }
 
   return <main className={`shell ${page === 'production' ? 'production-shell-host' : ''}`}>
@@ -2180,13 +2202,23 @@ function App() {
       <div className="section-heading"><div><span>התור שלך</span><h2>{active.length || activeSequences.length ? 'היצירה בתנועה' : queued.length || queuedSequences.length ? 'ממתין ליצירה' : 'הכול שקט כרגע'}</h2></div><span className="queue-count">{active.length + queued.length + activeSequences.length + queuedSequences.length}</span></div>
       <MainSectionError message={mainErrors.queue} onDismiss={() => clearMainError('queue')} />
       {!active.length && !queued.length && !activeSequences.length && !queuedSequences.length && <div className="empty"><div><Play size={22} /></div><p>הסרטון הבא שלך מתחיל בפרומפט למעלה</p></div>}
-      <div className="queue-cards-grid">
+      {(!!active.length || !!activeSequences.length) && <div className="queue-cards-grid">
         {activeSequences.map(sequence => <SequenceCard key={sequence.id} sequence={sequence} assignment={assignmentFor('sequence',sequence.id)} csrf={csrf} onCancel={() => mutate(`/api/sequences/${sequence.id}/cancel`)} />)}
         {active.map(j => <JobCard key={j.id} job={j} assignment={assignmentFor('job',j.id)} csrf={csrf} onCancel={() => mutate(`/api/jobs/${j.id}/cancel`)} />)}
-        {queuedTasks.map(task => task.kind === 'sequence'
-          ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} csrf={csrf} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
-          : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} csrf={csrf} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
-      </div>
+      </div>}
+      {!!queuedTasks.length && <section className="asset-result-container queue-folder">
+        <div className="asset-container-head">
+          <button type="button" className="asset-container-toggle" onClick={toggleQueue} aria-expanded={!queueCollapsed}>
+            {queueCollapsed ? <ChevronLeft size={17}/> : <ChevronDown size={17}/>}
+            <Folder size={17}/><strong>ממתינים בתור</strong><span>{queuedTasks.length} {queuedTasks.length === 1 ? 'עבודה' : 'עבודות'}</span>
+          </button>
+        </div>
+        {!queueCollapsed && <div className="asset-container-content cards queue-cards-grid">
+          {queuedTasks.map(task => task.kind === 'sequence'
+            ? <SequenceCard key={task.sequence.id} sequence={task.sequence} assignment={assignmentFor('sequence',task.sequence.id)} csrf={csrf} onCancel={() => mutate(`/api/sequences/${task.sequence.id}/cancel`)} />
+            : <JobCard key={task.job.id} job={task.job} assignment={assignmentFor('job',task.job.id)} csrf={csrf} index={queued.indexOf(task.job)} total={queued.length} onUp={() => move(task.job.id, -1)} onDown={() => move(task.job.id, 1)} onDelete={() => { void deleteGeneratedAsset('job',task.job.id,task.job.prompt.slice(0,80)) }} />)}
+        </div>}
+      </section>}
     </section>
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
