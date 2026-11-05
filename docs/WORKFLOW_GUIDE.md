@@ -104,6 +104,26 @@ reference video at 0.6 MP in 721 s. The app does not limit the size: the form wa
 video is attached. Recommended: 0.6 MP with a reference video, and close other GPU apps first.
 Reference images and audio add far less.
 
+### Turbo reference LoRA (2026-11-05)
+
+Until 2026-11-05 Turbo reference loaded Lightx2v/ModelTC's Ref2V Turbo 4-step LoRA through larryvrh's
+`MiniMaxH3TurboLoRA` node, which patched none of its weights (issue #25): Turbo reference ran on the plain Ref2VA
+model, so 4 steps came out smeared and 8 steps looked fine only because the plain model nearly converges in 8. It
+now follows ModelTC's own graph (`LoraLoaderModelOnly`, shift 12/3, euler, simple); the ComfyUI log shows "208
+patches attached". Lab A/B, fighter sheets, 1 MP 16:9, 5 s, one seed, about 9.5 GB:
+
+| Setup | Time | Result |
+| --- | --- | --- |
+| no LoRA, 4 steps (old) | 306 s | smeared |
+| no LoRA, 8 steps (old) | 534 s | clean |
+| **Ref2V 4-step LoRA, 4 steps** | **302 s** | **clean** |
+| Ref2V 4-step LoRA, 8 steps | 539 s | clean, a little more detail |
+| Ref2V 8-step v1.0 LoRA, 8 steps | 540 s | clean, slightly cleaner fast motion |
+| larryvrh v4 (EMA-600), 8 steps | 534 s | clean, close to the old 8-step take |
+
+Use 4 steps: same look as 8 in about 40 % less time. The old "Results by mode" Turbo reference times above were
+measured without the LoRA. H3 reference stills (Turbo, 8 steps) take the same path: 56 s against 61 s before.
+
 ## H3 speed options: attention modes
 
 Same job, same seed, re-rendered with each mode on Turbo (5 s clips, 6 steps,
