@@ -202,7 +202,7 @@ type Preferences = {
 }
 
 // Mirrors backend/generation.py SKIN_OPTION_DEFAULTS (the pack's own settings).
-const SKIN_OPTION_DEFAULTS: SkinOptions = { model: 'pruned', speed_lora: 'tier', speed_strength: 1, people_strength: 1, shift_video: 12, shift_audio: 3, scheduler: 'beta', tail_steps: 0 }
+const SKIN_OPTION_DEFAULTS: SkinOptions = { model: 'pruned', speed_lora: 'tier', flow: 't8', speed_strength: 1, people_strength: 1, shift_video: 12, shift_audio: 3, scheduler: 'beta', tail_steps: 0 }
 const defaultPreferences: Preferences = { engine: 'turbo', encoder: 'native', turboProfile: 'v1', attentionMode: 'standard', ltxQuality: 'balanced', ltxRecipe: 'app', pikaSpeed: 'direct', ltxReferenceModel: '2.5', ltxSharpDecode: false, ltxCalmSampler: false, turboSteps: 4, fusedSlaSteps: 4, fusedWorkflow: 'direct', skinTier: 'skin_god', skinMegapixels: 1, skinSteps: 8, skinOptions: SKIN_OPTION_DEFAULTS, standardSteps: 20, spectrumSteps: 16, resolution: '736x416', aspect: '16:9', megapixels: 0.31 }
 const preferenceKey = 'h3-generation-preferences-v1'
 
@@ -1097,11 +1097,15 @@ function App() {
         : preferences.fusedWorkflow === 'ref2va' || preferences.fusedWorkflow === 'ref2va_multiref' ? 'i2v_fl2v' : preferences.fusedWorkflow
   const effectiveEncoder: Encoder = mode === 'lip_sync' || effectiveEngine === 'fused_sla' || effectiveEngine === 'singularity' || effectiveEngine === 'pika' ? 'native' : preferences.encoder
   const skinAspect: '9:16' | '16:9' = preferences.aspect === '16:9' ? '16:9' : '9:16'
+  const effectiveSkinTier: SkinTier = mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier
+  // Pika sampler (lcm on Pika's 6 fixed sigmas): steps, scheduler, shift and tail steps do not apply.
+  const skinPikaFlow = effectiveEngine === 'singularity' && effectiveSkinTier !== 'skin_app' && preferences.skinOptions.flow === 'pika'
+  const effectiveSkinOptions: SkinOptions = { ...preferences.skinOptions, flow: skinPikaFlow ? 'pika' : 't8' }
   const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
   const generationSteps = effectiveEngine === 'pika'
     ? pikaTurbo ? 4 : 6
     : effectiveEngine === 'singularity'
-    ? preferences.skinSteps
+    ? skinPikaFlow ? 6 : preferences.skinSteps
     : effectiveEngine === 'ltx'
     ? 8
     : mode === 'reference' && effectiveEngine === 'turbo'
@@ -1116,7 +1120,7 @@ function App() {
   const stepRange = effectiveEngine === 'pika'
     ? pikaTurbo ? { min: 4, max: 4, recommended: 4 } : { min: 6, max: 6, recommended: 6 }
     : effectiveEngine === 'singularity'
-    ? { min: 4, max: 16, recommended: 8 }
+    ? skinPikaFlow ? { min: 6, max: 6, recommended: 6 } : { min: 4, max: 16, recommended: 8 }
     : effectiveEngine === 'ltx'
     ? { min: 8, max: 8, recommended: 8 }
     : effectiveEngine === 'fused_sla'
@@ -1659,7 +1663,7 @@ function App() {
       if (effectiveEngine === 'ltx' && preferences.ltxRecipe === 'official' && LTX_RECIPE_MODES.includes(mode)) form.set('ltx_recipe', 'official')
       if (effectiveEngine === 'pika') { form.set('aspect_ratio', skinAspect); form.set('megapixels', '1.5') }
       if (ltxReference) { form.set('ltx_reference_model', effectiveLtxReferenceModel); form.set('aspect_ratio', '16:9') }
-      if (effectiveEngine === 'singularity') { form.set('aspect_ratio', skinAspect); form.set('megapixels', String(preferences.skinMegapixels)); form.set('skin_options', JSON.stringify(preferences.skinOptions)) }
+      if (effectiveEngine === 'singularity') { form.set('aspect_ratio', skinAspect); form.set('megapixels', String(preferences.skinMegapixels)); form.set('skin_options', JSON.stringify(effectiveSkinOptions)) }
       if (ltxVideoOptions) { form.set('ltx_sharp_decode', String(preferences.ltxSharpDecode)); form.set('ltx_calm_sampler', String(preferences.ltxCalmSampler)) }
       if (mode === 'frames') {
         form.set('first_frame', openingFrame!)
@@ -1997,15 +2001,18 @@ function App() {
               <details className="skin-advanced">
                 <summary>הגדרות מתקדמות</summary>
                 <div className="skin-advanced-grid">
+                  <label><span>Sampler</span><select value={skinPikaFlow ? 'pika' : 't8'} disabled={effectiveSkinTier === 'skin_app'} onChange={event => setPreferences(current => ({ ...current, skinOptions: { ...current.skinOptions, flow: event.target.value as 't8' | 'pika', tail_steps: event.target.value === 'pika' ? 0 : current.skinOptions.tail_steps } }))}><option value="t8">T8 Dual-Clock</option><option value="pika">Pika (6 steps)</option></select></label>
                   <label><span>מודל</span><select value={preferences.skinOptions.model} onChange={event => setSkinOption('model', event.target.value as SkinOptions['model'])}><option value="pruned">Pruned 21GB</option><option value="full">Full 34GB</option></select></label>
                   <label><span>Speed LoRA</span><select value={preferences.skinOptions.speed_lora} onChange={event => setSkinOption('speed_lora', event.target.value as SkinOptions['speed_lora'])}><option value="tier">לפי הרמה</option><option value="ema600">EMA-600 (Turbo v4)</option><option value="ref8">Ref2V 8-step</option><option value="ref_v01">Ref2VA v0.1 (האפליקציה)</option><option value="none">בלי</option></select></label>
                   <label><span>People strength</span><input dir="ltr" type="number" min="0" max="2" step="0.05" value={preferences.skinOptions.people_strength} onChange={event => setSkinOption('people_strength', clampNumber(event.target.value, 0, 2, 1))} /></label>
                   <label><span>Speed strength</span><input dir="ltr" type="number" min="0" max="2" step="0.05" value={preferences.skinOptions.speed_strength} onChange={event => setSkinOption('speed_strength', clampNumber(event.target.value, 0, 2, 1))} /></label>
-                  <label><span>Shift video</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_video} onChange={event => setSkinOption('shift_video', clampNumber(event.target.value, 1, 30, 12))} /></label>
-                  <label><span>Shift audio</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_audio} onChange={event => setSkinOption('shift_audio', clampNumber(event.target.value, 1, 30, 3))} /></label>
-                  <label><span>Scheduler</span><select value={preferences.skinOptions.scheduler} onChange={event => setSkinOption('scheduler', event.target.value as SkinOptions['scheduler'])}><option value="beta">beta</option><option value="beta57">beta57</option><option value="native_flow">native_flow</option></select></label>
-                  <label><span>Tail detail steps</span><input dir="ltr" type="number" min="0" max="4" step="1" value={preferences.skinOptions.tail_steps} onChange={event => setSkinOption('tail_steps', Math.round(clampNumber(event.target.value, 0, 4, 0)))} /></label>
+                  <label><span>Shift video</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_video} disabled={skinPikaFlow} onChange={event => setSkinOption('shift_video', clampNumber(event.target.value, 1, 30, 12))} /></label>
+                  <label><span>Shift audio</span><input dir="ltr" type="number" min="1" max="30" step="0.5" value={preferences.skinOptions.shift_audio} disabled={skinPikaFlow} onChange={event => setSkinOption('shift_audio', clampNumber(event.target.value, 1, 30, 3))} /></label>
+                  <label><span>Scheduler</span><select value={preferences.skinOptions.scheduler} disabled={skinPikaFlow} onChange={event => setSkinOption('scheduler', event.target.value as SkinOptions['scheduler'])}><option value="beta">beta</option><option value="beta57">beta57</option><option value="native_flow">native_flow</option></select></label>
+                  <label><span>Tail detail steps</span><input dir="ltr" type="number" min="0" max="4" step="1" value={preferences.skinOptions.tail_steps} disabled={skinPikaFlow} onChange={event => setSkinOption('tail_steps', Math.round(clampNumber(event.target.value, 0, 4, 0)))} /></label>
                 </div>
+                {skinPikaFlow && <p className="setting-note">Pika sampler: lcm on Pika's 6 fixed steps, as in the Pika engine. Steps, scheduler, shift and tail-detail steps do not apply.</p>}
+                {effectiveSkinTier === 'skin_app' && <p className="setting-note">App flow uses the app's Turbo sampler; the sampler choice applies to God, Balanced and Max.</p>}
                 <button type="button" className="skin-advanced-reset" onClick={() => setPreferences(current => ({ ...current, skinOptions: SKIN_OPTION_DEFAULTS, skinSteps: 8 }))}>ברירת מחדל של החבילה</button>
               </details>
               <p className="setting-note">Singularity Ref2VA · מעבר אחד של 8 סטפים · 1.0 או 1.5MP ב־9:16 או 16:9 · {SKIN_DURATION[0]}–{SKIN_DURATION[1]} שניות. המילה r34l1sm נוספת לבד ברמות עם People. בפרומפט: אור רך, פנים גדולות בפריים, בלי glow/flawless/wet skin ובלי הוראות שליליות.</p>
