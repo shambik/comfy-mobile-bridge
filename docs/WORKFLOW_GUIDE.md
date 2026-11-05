@@ -65,7 +65,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Animate one still image | **Opening frame** mode | H3 Turbo + sparse, or LTX with "sharp decode" on |
 | Move from one image to another | **First + last frame** (I2V) | H3 Turbo + Sage + sparse, Fused SLA I2V/FL2V, or LTX |
 | End on a chosen image | **Closing frame** mode | H3 or LTX |
-| Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
+| Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, Omni (follows a song or a video's moves), or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
@@ -432,6 +432,15 @@ text and other attention modes (not tested). The model card's shift 6 broke figh
 (2026-11-04): first + last `e21d9b34` (346 s) and lip-sync `5cded6ab` (316 s) came out bit-identical to the lab jobs;
 the opening frames `9134a451` (rerun `1d8fb64d`, identical) and `8da3a670` (316 s) differ from their lab jobs, which ran
 right after 8-step HD jobs on the same cached base model, so those lab renders likely carried the previous LoRA's changes.
+
+**Omni** (engine `omni`, reference mode only): Comfy-Org's FastH3 OmniRef 8-step template
+(`video_fasth3_ominiref_r2v`): `fasth3_omniref_8step_pruned_int8_convrot.safetensors`, 8 steps, euler + simple, shift 12/3,
+Comfy Kitchen attention with VSA sparse attention (keep 10 %). 0.6, 1.0 or 1.5 MP at 9:16 or 16:9, 2-7 s, up to 9 images,
+one reference video and one audio reference; a reference video goes in without its soundtrack. Measured on the 3080 at
+5 s (ComfyUI 0.44 + PyTorch 2.11, lab bridge, 2026-11-05): two image sheets at 1.5 MP 351 s; sheet + song at 1.5 MP
+300 s, and it follows the song (envelope correlation 0.70); sheet + reference video at 0.6 MP 722 s, copying the video's
+moves; all at about 9.5 GB. Same results as the earlier PyTorch 2.14 lab runs. A reference video at 1 MP or more spills
+past 10 GB (about 11 min a step); the app allows it and the form warns, recommending 0.6 MP.
 
 **Reference prompts:** define each person and name their picture ("<Subject 1> is the man from <Picture 1> (left): ...").
 The earlier evidence for this is void: `985f52a1`, `a6732612`, `cab0a33f` and `8c355493` all ran without their pictures

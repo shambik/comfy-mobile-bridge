@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from copy import deepcopy
 
-from .config import (OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_SIGMAS, PIKA_TURBO4_FL2VA_LORA, AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
+from .config import (OFFICIAL_LTX_TEMPLATES, OMNI_MODEL, PIKA_FL2VA_LORA, PIKA_REF2VA_LORA, PIKA_SIGMAS, PIKA_TURBO4_FL2VA_LORA, AUDIO_VAE, CLIPPROJ_PROJECTION, CLIPPROJ_TEXT_ENCODER,
                      FL2VA_MODEL, FUSED_MOTION_ADAPTER, FUSED_SLA_MODEL,
                      FUSED_VIDEO_VAE, FUSED_WORKFLOW_FILES, LTX23_CHECKPOINT,
                      LTX23_DISTILLED_LORA, LTX23_INGREDIENTS_LORA,
@@ -861,6 +861,73 @@ def singularity_workflow(
     if audio_name:
         nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
         reference_input(nodes["136"]["inputs"], "ref_audios", 0, ["180", 0])
+    return deepcopy(nodes)
+
+
+
+def omni_workflow(
+    prompt: str,
+    duration: float,
+    seed: int,
+    prefix: str,
+    width: int,
+    height: int,
+    image_names: list[str],
+    video_names: list[str] | None = None,
+    audio_name: str | None = None,
+    include_audio: bool = True,
+):
+    """FastH3 OmniRef 8-step, as Comfy-Org's video_fasth3_ominiref_r2v template: euler + simple, 8 steps, CFG 1
+    (BasicGuider), shift 12 video / 3 audio, Comfy Kitchen INT8 attention and VSA sparse attention keeping 10 %.
+
+    Reference videos go in for motion and camera only. Their soundtrack is not passed in: in the lab it made
+    Omni invent a new lip-sync performance instead of keeping the moves."""
+    nodes = {
+        "119": {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}},
+        "120": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+        "127": {"class_type": "UNETLoader", "inputs": {"unet_name": OMNI_MODEL, "weight_dtype": "default"}},
+        "128": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax", "device": "default"}},
+        "141": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["127", 0], "shift_video": 12.0, "shift_audio": 3.0}},
+        "142": {"class_type": "ModelAttentionBackend", "inputs": {"model": ["141", 0], "attention": "comfy kitchen attention"}},
+        "143": {"class_type": "BlockSparseAttention", "inputs": {
+            "model": ["142", 0], "selection": "vsa", "selection.keep_percent": 10.0, "start_percent": 0.0,
+            "end_percent": 1.0, "dense_blocks": "", "min_tokens": 12288, "extra_tokens": 256,
+            "sink_conditioning": "exact_kv_and_rows", "verbose": False}},
+        "136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+            "clip": ["128", 0], "vae": ["119", 0], "audio_vae": ["120", 0], "prompt": prompt,
+            "width": width, "height": height, "length": h3_frame_count(duration), "ref_image_size": "match"}},
+        "123": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "124": {"class_type": "BasicScheduler", "inputs": {"model": ["143", 0], "scheduler": "simple", "steps": 8, "denoise": 1.0}},
+        "126": {"class_type": "BasicGuider", "inputs": {"model": ["143", 0], "conditioning": ["136", 0]}},
+        "129": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "125": {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": ["129", 0], "guider": ["126", 0], "sampler": ["123", 0], "sigmas": ["124", 0],
+            "latent_image": ["136", 1]}},
+        "122": {"class_type": "VAEDecode", "inputs": {"samples": ["125", 0], "vae": ["119", 0]}},
+    }
+    if include_audio:
+        nodes["121"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["125", 0], "vae": ["120", 0]}}
+        nodes["130"] = {"class_type": "CreateVideo", "inputs": {"images": ["122", 0], "audio": ["121", 0], "fps": float(FPS)}}
+    else:
+        nodes["130"] = {"class_type": "CreateVideo", "inputs": {"images": ["122", 0], "fps": float(FPS)}}
+    nodes["92"] = {"class_type": "SaveVideo", "inputs": {"video": ["130", 0], "filename_prefix": prefix,
+                                                        "format": "mp4", "codec": "auto"}}
+    # ComfyUI reads autogrow inputs only as flat "group.slot" keys; a nested {"ref_images": {...}} dict is
+    # dropped without an error, and the node then runs on the prompt alone.
+    reference = nodes["136"]["inputs"]
+    for index, name in enumerate(image_names[:9]):
+        node_id = str(137 + index)
+        nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        reference[f"ref_images.ref_image_{index}"] = [node_id, 0]
+    for index, name in enumerate((video_names or [])[:3]):
+        load_id = str(150 + index * 2)
+        component_id = str(151 + index * 2)
+        nodes[load_id] = {"class_type": "LoadVideo", "inputs": {"file": name}}
+        nodes[component_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [load_id, 0]}}
+        reference[f"ref_videos.ref_video_{index}"] = [component_id, 0]
+    if audio_name:
+        nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
+        reference["ref_audios.ref_audio_0"] = ["180", 0]
     return deepcopy(nodes)
 
 

@@ -13,7 +13,7 @@ from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_
                      CLIPPROJ_TEXT_ENCODER, FUSED_MAINODES_DIR, FUSED_MOTION_ADAPTER,
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
                      FUSED_WORKFLOW_FILES, INPUT, LTX_MODEL_FILES, LTX_REFERENCE_FILES,
-                     LOGS, MODELS, PIKA_FILES, PIKA_TURBO4_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
+                     LOGS, MODELS, OMNI_FILES, PIKA_FILES, PIKA_TURBO4_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
                      SKIN_FILES, SKIN_MODELS)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
@@ -27,7 +27,7 @@ from .workflows import (official_ltx_template_workflow, workflow_node_values, ap
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
                         native_audio_lock_workflow,
-                        official_fused_workflow,
+                        official_fused_workflow, omni_workflow,
                         reference_workflow, singularity_app_workflow, singularity_workflow,
                         spectrum_workflow, standard_workflow, turbo_workflow)
 
@@ -90,7 +90,7 @@ class QueueWorker:
         if job["engine"] == "fused_sla":
             return "fused_sla"
         # Their models are not the Turbo family's: unload when switching, as between LTX and H3.
-        if job["engine"] in ("singularity", "pika"):
+        if job["engine"] in ("singularity", "pika", "omni"):
             return job["engine"]
         return "h3"
 
@@ -803,6 +803,22 @@ class QueueWorker:
                         calm_sampler=bool(job.get("ltx_calm_sampler")),
                     )
                 required = {node["class_type"] for node in ltx_workflow.values()}
+        elif job["engine"] == "omni":
+            if job["mode"] != "reference":
+                raise RuntimeError("Omni runs reference mode only")
+            required |= {
+                "MiniMaxH3ReferenceToVideo", "MiniMaxH3SigmaShift", "ModelAttentionBackend", "BlockSparseAttention",
+                "KSamplerSelect", "BasicScheduler", "BasicGuider", "RandomNoise", "SamplerCustomAdvanced",
+                "VAEDecode", "VAEDecodeAudio", "LoadImage",
+            }
+            if job.get("reference_audio_name"):
+                required.add("LoadAudio")
+            if json.loads(job.get("reference_videos_json") or "[]"):
+                required |= {"LoadVideo", "GetVideoComponents"}
+            missing_files = [str(base / folder / name) for base, folder, name in OMNI_FILES
+                             if not (base / folder / name).exists()]
+            if missing_files:
+                raise RuntimeError("The Omni engine is not fully installed: " + ", ".join(missing_files))
         elif job["engine"] in ("singularity", "pika"):
             pika = job["engine"] == "pika"
             pika_turbo = pika and job.get("workflow_variant") == "turbo4"
@@ -953,6 +969,17 @@ class QueueWorker:
                 audio_name=job["reference_audio_name"],
                 first_frame_name=job["first_frame_name"],
                 width=job["width"], height=job["height"],
+            )
+        elif job["engine"] == "omni":
+            workflow_builder = "omni_workflow"
+            reference_images = json.loads(job.get("reference_images_json") or "[]")
+            if not reference_images and image_name:
+                reference_images = [image_name]
+            workflow = omni_workflow(
+                job["prompt"], job["duration"], seed, prefix, job["width"], job["height"], reference_images,
+                video_names=json.loads(job.get("reference_videos_json") or "[]"),
+                audio_name=job.get("reference_audio_name"),
+                include_audio=not bool(job.get("no_audio")),
             )
         elif job["engine"] in ("singularity", "pika"):
             pika = job["engine"] == "pika"

@@ -146,6 +146,7 @@ audio track. Engines:
 | LTX 2.5 | Lightricks LTX 2.5, 8 distilled steps, video with generated audio; reference mode offers LTX 2.5 or 2.3 recipes |
 | Singularity | Realistic-skin H3 model, 8 steps, tiers with People and speed LoRAs; see the workflow guide |
 | Pika | H3 + Pika H3 Flex LoRA, fixed 6 steps at 1.5 MP, best for action; Turbo 4-step (opening frame, first + last, lip-sync, Sage, up to 5 s) is about 25-30% faster; see the workflow guide |
+| Omni | Comfy-Org's FastH3 OmniRef 8-step, reference mode only: images, a song or a reference video (copies its moves); see the workflow guide |
 
 Per-job options include Sage and sparse (SLA) attention speed-ups where the
 engine supports them, the ClipProj 4B text encoder as a memory saver, and for

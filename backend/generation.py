@@ -41,6 +41,8 @@ ENGINE_ATTENTION_MODES = {
     "ltx": ("standard",),
     "singularity": ("sage", "standard"),
     "pika": ("sage", "standard", "sla", "sage_sla"),
+    # Omni's graph has its own attention (Comfy Kitchen INT8 + VSA sparse); no per-job choice.
+    "omni": ("standard",),
 }
 # Singularity skin engine: every single-shot H3 mode, one 8-step pass.
 # Tiers pick the LoRAs (one speed LoRA at a time). Lab-tested on the 3080 at
@@ -91,6 +93,22 @@ PIKA_TURBO4_MODES = ("opening", "frames", "lip_sync")
 PIKA_TURBO4_MAX_DURATION = 5.0
 PIKA_TURBO4_OPTIONS = {**SKIN_OPTION_DEFAULTS, "model": "base", "speed_lora": "pika_turbo4", "people_strength": 0.0,
                        "scheduler": "simple", "flow": "t8", "ref_size": "match"}
+
+
+# FastH3 OmniRef 8-step: Comfy-Org's video_fasth3_ominiref_r2v template (8 steps, euler + simple, CFG 1,
+# shift 12 video / 3 audio, VSA keep 10 %). Lab-tested on the 3080 at 5 s in reference mode with image sheets
+# (0.6 MP 130 s, 1 MP 206 s, 1.5 MP 346 s), a song as audio reference, and a reference video. With a video the
+# 1 MP and 1.5 MP runs spill past 10 GB (about 11 min a step). The size is not limited: the form warns and
+# recommends 0.6 MP with a reference video (owner's choice, 2026-11-05).
+OMNI_STEPS = 8
+OMNI_MODES = ("reference",)
+OMNI_SIZES = {
+    0.6: {"9:16": (576, 1024), "16:9": (1024, 576)},
+    1.0: {"9:16": (768, 1344), "16:9": (1344, 768)},
+    1.5: {"9:16": (928, 1632), "16:9": (1632, 928)},
+}
+OMNI_VIDEO_RECOMMENDED_MEGAPIXELS = 0.6
+OMNI_DURATION_RANGE = (2.0, 7.0)
 
 
 def pika_options(workflow_variant: str | None) -> dict:
@@ -155,8 +173,11 @@ def normalize_generation_settings(
     ltx_calm_sampler: bool = False,
 ) -> GenerationSettings:
     resolved_engine = engine or ("standard" if mode in ("reference", "lip_sync") else "turbo")
-    if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla", "ltx", "singularity", "pika"):
-        raise ValueError("Engine must be turbo, standard, spectrum, fused_sla, ltx, singularity or pika")
+    if resolved_engine not in ("turbo", "standard", "spectrum", "fused_sla", "ltx", "singularity", "pika", "omni"):
+        raise ValueError("Engine must be turbo, standard, spectrum, fused_sla, ltx, singularity, pika or omni")
+    if resolved_engine == "omni":
+        return _normalize_omni(mode, steps, encoder, turbo_profile, megapixels, aspect_ratio, workflow_variant,
+                               attention_mode, ltx_quality, ltx_reference_model, ltx_sharp_decode, ltx_calm_sampler)
     if resolved_engine == "pika":
         return _normalize_pika(mode, steps, encoder, turbo_profile, aspect_ratio, workflow_variant, attention_mode,
                                ltx_quality, ltx_reference_model, ltx_sharp_decode, ltx_calm_sampler)
@@ -328,6 +349,32 @@ def _normalize_pika(mode, steps, encoder, turbo_profile, aspect_ratio, workflow_
         raise ValueError("Pika opening frame and first + last run with standard or Sage attention: sparse stalls at this size")
     width, height = SKIN_SIZES[1.5][aspect]
     return GenerationSettings("pika", fixed_steps, width, height, "native", "v1", 1.5, aspect, variant, attention)
+
+
+def _normalize_omni(mode, steps, encoder, turbo_profile, megapixels, aspect_ratio, workflow_variant, attention_mode,
+                    ltx_quality, ltx_reference_model, sharp_decode, calm_sampler) -> GenerationSettings:
+    if mode not in OMNI_MODES:
+        raise ValueError("Omni runs reference mode only (its template has no other flow)")
+    if steps not in (None, OMNI_STEPS) or isinstance(steps, bool):
+        raise ValueError(f"Omni runs exactly {OMNI_STEPS} steps")
+    if (workflow_variant or "direct") != "direct":
+        raise ValueError("Omni has no workflow variants")
+    if (encoder or "native") != "native":
+        raise ValueError("Omni uses the native 32B text encoder")
+    if turbo_profile not in (None, "v1"):
+        raise ValueError("Turbo profile is only available with the turbo engine")
+    if (attention_mode or "standard") != "standard":
+        raise ValueError("Omni's attention is part of its graph; there is no attention option")
+    if ltx_quality is not None or ltx_reference_model is not None or sharp_decode or calm_sampler:
+        raise ValueError("LTX options are only available with the ltx engine")
+    size = 1.5 if megapixels is None else float(megapixels)
+    if size not in OMNI_SIZES:
+        raise ValueError("Omni was tested at 0.6, 1 and 1.5 MP only")
+    aspect = aspect_ratio or "9:16"
+    if aspect not in OMNI_SIZES[size]:
+        raise ValueError("Omni was tested at 9:16 and 16:9 only")
+    width, height = OMNI_SIZES[size][aspect]
+    return GenerationSettings("omni", OMNI_STEPS, width, height, "native", "v1", size, aspect, "direct", "standard")
 
 
 def normalize_skin_options(raw: str | dict | None) -> dict:
