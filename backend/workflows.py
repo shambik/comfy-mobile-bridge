@@ -597,6 +597,16 @@ def spectrum_workflow(
     return deepcopy(nodes)
 
 
+def reference_input(inputs: dict, group: str, index: int, link: list) -> None:
+    """Wire one MiniMaxH3ReferenceToVideo autogrow slot, e.g. ("ref_images", 0) -> "ref_images.ref_image_0".
+
+    ComfyUI reads autogrow inputs only as flat dotted keys. A nested
+    {"ref_images": {"ref_image_0": ...}} dict is dropped without an error and
+    the node then runs on the prompt alone.
+    """
+    inputs[f"{group}.{group.removesuffix('s')}_{index}"] = link
+
+
 def reference_workflow(
     prompt: str,
     duration: int,
@@ -633,27 +643,26 @@ def reference_workflow(
         "124": {"class_type": "BasicScheduler", "inputs": {"model": [model_node, 0], "scheduler": "beta" if turbo else "simple", "steps": steps, "denoise": 1.0}},
         "136": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
             "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": prompt,
-            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1], "ref_image_size": "match",
-             "ref_images": {}}},
+            "width": ["7", 0], "height": ["7", 1], "length": ["106", 1], "ref_image_size": "match"}},
     })
     for index, name in enumerate(image_names[:9]):
         node_id = str(137 + index)
         nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
-        nodes["136"]["inputs"]["ref_images"][f"ref_image_{index}"] = [node_id, 0]
+        reference_input(nodes["136"]["inputs"], "ref_images", index, [node_id, 0])
     for index, name in enumerate(video_names[:3]):
         load_id = str(150 + index * 2)
         component_id = str(151 + index * 2)
         nodes[load_id] = {"class_type": "LoadVideo", "inputs": {"file": name}}
         nodes[component_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [load_id, 0]}}
-        nodes["136"]["inputs"].setdefault("ref_videos", {})[f"ref_video_{index}"] = [component_id, 0]
+        reference_input(nodes["136"]["inputs"], "ref_videos", index, [component_id, 0])
         if include_audio:
-            nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
+            reference_input(nodes["136"]["inputs"], "ref_video_audios", index, [component_id, 1])
     if audio_name:
         # Keep the standalone audio loader away from the image reference
         # range (137-145).  Reusing node 138 silently replaced image 2 and
         # wired both ref_image_1 and ref_audio_0 to LoadAudio.
         nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
-        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["180", 0]}
+        reference_input(nodes["136"]["inputs"], "ref_audios", 0, ["180", 0])
     if turbo:
         nodes.update({
             "128": {"class_type": "MiniMaxH3TurboLoRA", "inputs": {
@@ -836,23 +845,22 @@ def singularity_workflow(
         return deepcopy(nodes)
     nodes["136"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
         "clip": ["13", 0], "vae": ["11", 0], "audio_vae": ["24", 0], "prompt": skin_prompt(prompt, people),
-        "width": width, "height": height, "length": h3_frame_count(duration), "ref_image_size": options["ref_size"],
-        "ref_images": {}}}
+        "width": width, "height": height, "length": h3_frame_count(duration), "ref_image_size": options["ref_size"]}}
     for index, name in enumerate(image_names[:9]):
         node_id = str(137 + index)
         nodes[node_id] = {"class_type": "LoadImage", "inputs": {"image": name}}
-        nodes["136"]["inputs"]["ref_images"][f"ref_image_{index}"] = [node_id, 0]
+        reference_input(nodes["136"]["inputs"], "ref_images", index, [node_id, 0])
     for index, name in enumerate((video_names or [])[:3]):
         load_id = str(150 + index * 2)
         component_id = str(151 + index * 2)
         nodes[load_id] = {"class_type": "LoadVideo", "inputs": {"file": name}}
         nodes[component_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [load_id, 0]}}
-        nodes["136"]["inputs"].setdefault("ref_videos", {})[f"ref_video_{index}"] = [component_id, 0]
+        reference_input(nodes["136"]["inputs"], "ref_videos", index, [component_id, 0])
         if include_audio:
-            nodes["136"]["inputs"].setdefault("ref_video_audios", {})[f"ref_video_audio_{index}"] = [component_id, 1]
+            reference_input(nodes["136"]["inputs"], "ref_video_audios", index, [component_id, 1])
     if audio_name:
         nodes["180"] = {"class_type": "LoadAudio", "inputs": {"audio": audio_name}}
-        nodes["136"]["inputs"]["ref_audios"] = {"ref_audio_0": ["180", 0]}
+        reference_input(nodes["136"]["inputs"], "ref_audios", 0, ["180", 0])
     return deepcopy(nodes)
 
 

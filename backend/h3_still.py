@@ -28,6 +28,7 @@ from .config import (
     REF2VA_TURBO_LORA,
     TURBO_LORAS,
 )
+from .workflows import reference_input
 
 ASPECT_LABELS = {
     "1:1": "1:1 (Square)",
@@ -220,7 +221,6 @@ def _configure_reference(
             "height": ["115", 1],
             "length": 5,
             "ref_image_size": ref_image_size,
-            "ref_images": {},
         },
         "_meta": {"title": "H3 reference-image conditioning"},
     }
@@ -231,7 +231,7 @@ def _configure_reference(
             "inputs": {"image": name},
             "_meta": {"title": f"Reference image {index + 1}"},
         }
-        workflow["136"]["inputs"]["ref_images"][f"ref_image_{index}"] = [node_id, 0]
+        reference_input(workflow["136"]["inputs"], "ref_images", index, [node_id, 0])
     workflow["16"]["inputs"]["conditioning"] = ["136", 0]
     workflow["14"]["inputs"]["latent_image"] = ["136", 1]
 

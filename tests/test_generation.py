@@ -235,10 +235,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["180"], {
             "class_type": "LoadAudio", "inputs": {"audio": "voice.wav"},
         })
-        self.assertEqual(
-            workflow["136"]["inputs"]["ref_audios"],
-            {"ref_audio_0": ["180", 0]},
-        )
+        self.assertEqual(workflow["136"]["inputs"]["ref_audios.ref_audio_0"], ["180", 0])
+        self.assertEqual(workflow["136"]["inputs"]["ref_images.ref_image_0"], ["137", 0])
+        self.assertNotIn("ref_audios", workflow["136"]["inputs"])
 
     def test_reference_turbo_uses_dedicated_chain_and_multiple_media(self):
         workflow = reference_workflow(
@@ -249,8 +248,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["128"]["inputs"]["lora_name"], "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
         self.assertEqual(workflow["129"]["class_type"], "MiniMaxH3SigmaShift")
         self.assertEqual(workflow["130"]["class_type"], "MiniMaxH3TurboSampler")
-        self.assertEqual(workflow["136"]["inputs"]["ref_images"], {"ref_image_0": ["137", 0], "ref_image_1": ["138", 0]})
-        self.assertEqual(workflow["136"]["inputs"]["ref_videos"], {"ref_video_0": ["151", 0]})
+        inputs = workflow["136"]["inputs"]
+        self.assertEqual(inputs["ref_images.ref_image_0"], ["137", 0])
+        self.assertEqual(inputs["ref_images.ref_image_1"], ["138", 0])
+        self.assertEqual(inputs["ref_videos.ref_video_0"], ["151", 0])
+        self.assertFalse([key for key in inputs if key.startswith("ref_video_audios")])
+        self.assertFalse([key for key, value in inputs.items() if isinstance(value, dict)])
         self.assertNotIn("23", workflow)
 
     def test_spectrum_is_separate_from_turbo_and_keeps_frames(self):

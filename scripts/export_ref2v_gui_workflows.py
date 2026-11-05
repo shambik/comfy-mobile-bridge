@@ -18,6 +18,7 @@ from backend.workflows import reference_workflow  # noqa: E402
 
 
 COMFY_URL = "http://127.0.0.1:8190"
+REFERENCE_GROUPS = ("ref_images.", "ref_videos.", "ref_video_audios.", "ref_audios.")
 OUT = ROOT / "workflows"
 
 
@@ -59,6 +60,10 @@ def export(api_prompt: dict, info: dict, name: str) -> None:
         ui_inputs = []
         widgets = []
 
+        api_inputs = dict(api_inputs)
+        for flat_key in [item for item in api_inputs if item.startswith(REFERENCE_GROUPS)]:
+            group, _, slot = flat_key.partition(".")
+            api_inputs.setdefault(group, {})[slot] = api_inputs.pop(flat_key)
         expanded = dict(api_inputs)
         for key in ("ref_images", "ref_videos", "ref_video_audios", "ref_audios"):
             values = api_inputs.get(key)
