@@ -393,7 +393,9 @@ paint and jewellery, so use an opening frame or lip-sync for an exact face.
 Sampler (advanced panel): T8 Dual-Clock (default, steps/scheduler/shift apply) or Pika (lcm on Pika's 6 fixed steps; the
 other sampling controls are locked). Lab A/B 2026-11-05, Shadow reference, God Tier, 9:16, 1.5 MP, same seed: T8 8 steps
 623 s, Pika 6 steps 480 s (23% faster), the same likeness; the Pika run opened in profile with the face visible where
-T8 opened on the back of his head. One seed only. App flow keeps its own Turbo sampler.
+T8 opened on the back of his head. Text mode, two characters, same seeds: T8 473/468 s, Pika 366/361 s; Pika gave a
+different take of each (same description, different face and framing) and softer, less defined hands on the
+fisherman. One seed per case. App flow keeps its own Turbo sampler.
 
 **Pika** (engine `pika`, action): H3's own pruned base + the matching Pika H3 Flex LoRA, Pika's fixed 6 knots, ref size
 `match`. 1.5 MP, 9:16 or 16:9, 2-7 s. Standard attention by default: a 5 s job takes about 10.5-13 min (reference 630 s,
