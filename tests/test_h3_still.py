@@ -49,10 +49,11 @@ class H3StillWorkflowTests(unittest.TestCase):
         self.assertNotIn("104", workflow)
         self.assertEqual(workflow["136"]["class_type"], "MiniMaxH3ReferenceToVideo")
         self.assertEqual(workflow["136"]["inputs"]["ref_image_size"], "max")
-        self.assertEqual(
-            workflow["136"]["inputs"]["ref_images"],
-            {"ref_image_0": ["137", 0], "ref_image_1": ["138", 0]},
-        )
+        inputs = workflow["136"]["inputs"]
+        self.assertEqual(inputs["ref_images.ref_image_0"], ["137", 0])
+        self.assertEqual(inputs["ref_images.ref_image_1"], ["138", 0])
+        # ComfyUI silently drops a nested {"ref_images": {...}} dict.
+        self.assertFalse([key for key, value in inputs.items() if isinstance(value, dict)])
         self.assertEqual(workflow["14"]["inputs"]["latent_image"], ["136", 1])
 
     def test_reference_turbo_uses_ref2va_turbo_chain(self):

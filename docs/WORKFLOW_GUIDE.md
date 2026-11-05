@@ -65,7 +65,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Animate one still image | **Opening frame** mode | H3 Turbo + sparse, or LTX with "sharp decode" on |
 | Move from one image to another | **First + last frame** (I2V) | H3 Turbo + Sage + sparse, Fused SLA I2V/FL2V, or LTX |
 | End on a chosen image | **Closing frame** mode | H3 or LTX |
-| Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s |
+| Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
@@ -92,6 +92,17 @@ keeps the uploaded audio exact. The music-video skills
 `realistic-rap-turbo-music-video`) cover song analysis, shot planning and when
 to use lip-sync versus regular Turbo; `h3-prompt-writing-master` covers prompt
 structure for every H3 mode.
+
+### Reference videos are slow (2026-11-05)
+
+Until 2026-11-05 the Standard, Turbo, Spectrum, Singularity and Pika reference graphs sent their
+references in a form ComfyUI ignores, so those jobs rendered from the prompt alone (issue #20). With the
+references wired, a reference video adds about as many tokens as the clip being generated. Measured on
+the 3080: Turbo reference at 1 MP (1344x736) with one 5 s reference video ran about 375 s per step
+(3,147 s, 52 min, for 8 steps) at 9.9 GB, against 452 s in total when the video was ignored. Omni ran a
+reference video at 0.6 MP in 721 s. The app does not limit the size: the form warns when a reference
+video is attached. Recommended: 0.6 MP with a reference video, and close other GPU apps first.
+Reference images and audio add far less.
 
 ## H3 speed options: attention modes
 
@@ -387,8 +398,9 @@ Ported from the H3 skin lab (October 2026). Each job is a single shot; none of t
 app's Turbo v4 graph (tier App flow). 2-7 s, 1.0 or 1.5 MP, 9:16 or 16:9, 4-16 steps (default 8), Sage or standard
 attention, native encoder. The tiers pick the LoRAs: God (People + Turbo v4), Balanced (People + Ref2V 8-step), Max
 (Ref2V 8-step), App flow (People on the Turbo v4 graph, no reference). Well tested: reference (about 40 jobs) and
-lip-sync (8 jobs, keepers `cef0958e`, `d8dd0490`). Reference mode redraws the face: it never held the singer's intricate
-paint and jewellery, so use an opening frame or lip-sync for an exact face.
+lip-sync (8 jobs, keepers `cef0958e`, `d8dd0490`). Until 2026-11-05 every Singularity reference job ran without its
+pictures (issue #20), which is why reference mode "never held" the singer's face and paint. With the fix, God and
+Balanced kept the Shadow singer's face, paint and jewellery at 9:16, 1.5 MP (lab, 623 s and 621 s).
 
 Sampler (advanced panel): T8 Dual-Clock (default, steps/scheduler/shift apply) or Pika (lcm on Pika's 6 fixed steps; the
 other sampling controls are locked). Lab A/B 2026-11-05, Shadow reference, God Tier, 9:16, 1.5 MP, same seed: T8 8 steps
@@ -422,8 +434,8 @@ the opening frames `9134a451` (rerun `1d8fb64d`, identical) and `8da3a670` (316 
 right after 8-step HD jobs on the same cached base model, so those lab renders likely carried the previous LoRA's changes.
 
 **Reference prompts:** define each person and name their picture ("<Subject 1> is the man from <Picture 1> (left): ...").
-A short "the two fighters from the pictures" ignored the sheet on both Pika (`985f52a1`) and Singularity God (`a6732612`);
-the same recipes with subject definitions kept both faces (`cab0a33f`, `8c355493`). Many hard cuts and whip pans in 5 s look
+The earlier evidence for this is void: `985f52a1`, `a6732612`, `cab0a33f` and `8c355493` all ran without their pictures
+(issue #20), so the subject definitions helped only as text. Still define each person; it costs nothing. Many hard cuts and whip pans in 5 s look
 chaotic; prefer one or two shots.
 
 **LTX recipe** (`ltx_recipe=official`, opening frame and first + last): ComfyUI's own LTX-2.5 templates instead of the app's

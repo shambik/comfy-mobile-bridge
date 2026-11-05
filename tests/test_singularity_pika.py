@@ -40,6 +40,18 @@ class PikaEngineTests(unittest.TestCase):
                 self.assertFalse([name for name in classes(workflow) if "T8" in name])
                 self.assertIn("ManualSigmas", classes(workflow))
 
+    def test_reference_inputs_are_flat_keys(self):
+        # ComfyUI silently drops a nested {"ref_images": {...}} dict and then renders the prompt alone.
+        workflow = singularity_workflow("hello", 5, 1, "x", "skin_max", 1632, 928, ["a.png", "b.png"], mode="reference",
+                                        steps=6, options=PIKA_OPTIONS, video_names=["v.mp4"], audio_name="s.wav")
+        inputs = workflow["136"]["inputs"]
+        self.assertEqual(inputs["ref_images.ref_image_0"], ["137", 0])
+        self.assertEqual(inputs["ref_images.ref_image_1"], ["138", 0])
+        self.assertEqual(inputs["ref_videos.ref_video_0"], ["151", 0])
+        self.assertEqual(inputs["ref_video_audios.ref_video_audio_0"], ["151", 1])
+        self.assertEqual(inputs["ref_audios.ref_audio_0"], ["180", 0])
+        self.assertFalse([key for key, value in inputs.items() if isinstance(value, dict)])
+
     def test_lora_matches_the_base_model(self):
         self.assertEqual(skin_loras("skin_max", PIKA_OPTIONS, "opening"), [(PIKA_FL2VA_LORA, 1.0)])
         self.assertEqual(skin_loras("skin_max", PIKA_OPTIONS, "reference"), [(PIKA_REF2VA_LORA, 1.0)])
