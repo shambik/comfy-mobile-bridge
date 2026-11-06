@@ -148,8 +148,43 @@ around 0.7–1.5 MP) [Results by mode, job45cc]:
   Fused SLA at 1.5 MP against the standard mode; its speed is inconsistent.
 - **Chunked feed-forward** was tested and gave no speed-up (it only saves
   memory), so it is not offered [C].
+
+### Int8 attention (opt-in, 2026-11-06)
+
+ComfyUI 0.44's built-in Comfy Kitchen INT8 attention (`ModelAttentionBackend`,
+"comfy kitchen attention"). No install, launch flag or restart; the FastH3 Omni
+graph already uses it. Offered as attention mode **Int8** only where the lab
+tested it; the defaults did not change. Same seeds per row, ComfyUI 0.44:
+
+| Engine and mode | Before | Int8 | Look |
+| --- | --- | --- | --- |
+| Turbo v4 lip-sync, 1.5 MP 9:16, 5 s (with the INT8 decode VAE) | 722 s standard | **351 s** | same character and performance |
+| Turbo v4 two-character scene, 3 shots (opening, first + last, opening), 1.5 MP 9:16 | 2,208 s standard | **1,086 s** | same |
+| Singularity Ref2V God, 3 shots, 1.5 MP 9:16 | 1,612 s Sage, 2,648 s standard | **1,348 s** | same faces and performance |
+| Singularity Pika flow opening frame, 1.5 MP 9:16 | 413 s Sage, 666 s standard | **348 s** | same performance |
+| LTX lip-sync, 1600×896, 6 s | 259 s standard | **153 s** | frames nearly identical (PSNR 28) |
+| LTX two-character scene at 2 MP (1056×1888), 3 shots | 910 s standard | **667 s** | same motion |
+
+- **Where it is offered:** Turbo opening frame, lip-sync and first + last
+  frame; Singularity reference and opening frame; LTX lip-sync, opening frame
+  and first + last frame. Everything else refuses it until it is tested.
+- **On Turbo, Int8 also decodes with the INT8 video VAE**
+  (`minimax_h3_video_vae_int8_convrot`): 63 s -> 27 s at 1.5 MP, PSNR 42-47 dB
+  against the fp16 VAE on the same latent. Turbo was tested that way.
+- **Memory:** the same GPU peak as standard (9.4-9.8 GB at 1.5 MP and 2 MP).
+- **Same seed, slightly different take:** like Sage, it changes the numerics,
+  so the same seed gives the same scene and beats with small differences in
+  motion (PSNR 21-29 against standard).
+- **At LTX 2 MP the decode dominates:** sharp decode takes 86 s per shot with
+  either attention, so the gain there is 27% instead of 41%.
+- **Not offered:** block skipping. Skipping 6 or 12 quiet transformer blocks
+  saved another 10-20% on Turbo but softened fine detail in motion (lab
+  K2/K4).
 - **ClipProj 4B** is a lighter text encoder, marked experimental in the app;
   its quality and speed are **untested** in the lab.
+- **Full lab write-up:** `docs/H3_PERFORMANCE_TESTS_RTX3080.md` has every
+  measurement (one-step profile, VAE decode, block probe and skipping, what did
+  not help) and a checklist for repeating the tests on another machine.
 
 ## LTX
 
@@ -478,6 +513,9 @@ extras; low-passed lip-sync audio makes characters freeze, so always send the re
 ## Not tested yet
 
 - Standard and Spectrum engine speed and quality on this card.
+- Int8 attention on Turbo text and reference, Singularity frame and lip-sync
+  modes, the Pika engine, Fused SLA, Standard, Spectrum, LTX text, closing
+  frame and reference, and H3 stills (the app refuses Int8 there until tested).
 - ClipProj quality versus the native 32B encoder.
 - "Sharp decode" and "calm sampler" on closing and first + last frame beyond a
   single app run each [T8, T9].

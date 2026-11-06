@@ -37,7 +37,7 @@ def _create_jobs_table(db):
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')),
         workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
-        attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla')),
+        attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla','int8')),
         ltx_reference_model TEXT CHECK(ltx_reference_model IS NULL OR ltx_reference_model IN ('2.5','2.3')),
         ltx_sharp_decode INTEGER NOT NULL DEFAULT 0,
         ltx_calm_sampler INTEGER NOT NULL DEFAULT 0,
@@ -284,7 +284,7 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
@@ -294,7 +294,7 @@ def init_db():
                     # read as standard attention.
                     db.execute(
                         "ALTER TABLE jobs ADD COLUMN attention_mode TEXT NOT NULL DEFAULT 'standard' "
-                        "CHECK(attention_mode IN ('standard','sage','sla','sage_sla'))"
+                        "CHECK(attention_mode IN ('standard','sage','sla','sage_sla','int8'))"
                     )
                 columns = _table_columns(db)
                 # LTX reference model and opt-in decode/sampler fixes: plain

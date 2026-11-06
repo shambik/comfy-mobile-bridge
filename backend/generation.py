@@ -32,14 +32,23 @@ FUSED_FIXED_VARIANTS = {"i2v_fl2v", "derope", "dyrope"}
 # Per-job attention speed-ups. "standard" leaves the workflow untouched.
 # Turbo accepts every mode; Fused SLA already runs sparse attention, so it only
 # adds Sage. Standard and Spectrum stay on standard attention.
-ATTENTION_MODES = ("standard", "sage", "sla", "sage_sla")
+# "int8" is ComfyUI's built-in Comfy Kitchen INT8 attention (ModelAttentionBackend, no install or launch flag). It is
+# opt-in and offered only for the engine/mode pairs it was lab-tested on (INT8_ATTENTION_TESTED): on the 3080 with the
+# same seeds it kept the look and GPU peak and was faster than Sage and standard. On Turbo it also decodes with the
+# INT8 video VAE, the combination that was tested. See docs/WORKFLOW_GUIDE.md.
+ATTENTION_MODES = ("standard", "sage", "sla", "sage_sla", "int8")
+INT8_ATTENTION_TESTED = {
+    "turbo": ("opening", "lip_sync", "frames"),
+    "singularity": ("reference", "opening"),
+    "ltx": ("lip_sync", "opening", "frames"),
+}
 ENGINE_ATTENTION_MODES = {
     "turbo": ATTENTION_MODES,
     "fused_sla": ("standard", "sage"),
     "standard": ("standard",),
     "spectrum": ("standard",),
-    "ltx": ("standard",),
-    "singularity": ("sage", "standard"),
+    "ltx": ("standard", "int8"),
+    "singularity": ("sage", "standard", "int8"),
     "pika": ("sage", "standard", "sla", "sage_sla"),
     # Omni's graph has its own attention (Comfy Kitchen INT8 + VSA sparse); no per-job choice.
     "omni": ("standard",),
@@ -269,10 +278,11 @@ def normalize_generation_settings(
         resolved_turbo_profile = "v1"
     resolved_attention = attention_mode or "standard"
     if resolved_attention not in ATTENTION_MODES:
-        raise ValueError("Attention mode must be standard, sage, sla or sage_sla")
+        raise ValueError("Attention mode must be standard, sage, sla, sage_sla or int8")
     if resolved_attention not in ENGINE_ATTENTION_MODES[resolved_engine]:
         allowed = ", ".join(ENGINE_ATTENTION_MODES[resolved_engine])
         raise ValueError(f"The {resolved_engine} engine supports attention modes: {allowed}")
+    _check_int8_tested(resolved_engine, mode, resolved_attention)
     return GenerationSettings(
         resolved_engine, resolved_steps, width, height,
         resolved_encoder, resolved_turbo_profile, resolved_megapixels, resolved_aspect,
@@ -308,7 +318,8 @@ def _normalize_singularity(mode, steps, encoder, turbo_profile, megapixels, aspe
         raise ValueError("The Singularity skin engine was tested at 9:16 and 16:9 only")
     attention = attention_mode or "sage"
     if attention not in ENGINE_ATTENTION_MODES["singularity"]:
-        raise ValueError("The singularity engine supports attention modes: sage, standard")
+        raise ValueError("The singularity engine supports attention modes: sage, standard, int8")
+    _check_int8_tested("singularity", mode, attention)
     width, height = SKIN_SIZES[size_megapixels][aspect]
     return GenerationSettings(
         "singularity", resolved_steps, width, height, "native", "v1",
@@ -406,6 +417,14 @@ def normalize_skin_options(raw: str | dict | None) -> dict:
     return options
 
 
+def _check_int8_tested(engine: str, mode: str, attention: str) -> None:
+    """Refuse int8 attention outside the engine/mode pairs the lab tested."""
+    tested = INT8_ATTENTION_TESTED.get(engine, ())
+    if attention == "int8" and mode not in tested:
+        names = {"opening": "opening frame", "lip_sync": "lip-sync", "frames": "first + last frame", "reference": "reference"}
+        raise ValueError(f"int8 attention was tested on {engine} for {', '.join(names[m] for m in tested)} only")
+
+
 def ltx_quality_for_size(width: int, height: int) -> str:
     """Recover the LTX quality preset from a stored job size."""
     for quality, sizes in LTX_SIZES.items():
@@ -427,8 +446,10 @@ def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
         raise ValueError("Turbo profile is only available with the turbo engine")
     if (workflow_variant or "direct") != "direct":
         raise ValueError("Fused workflow variants require the Fused SLA engine")
-    if (attention_mode or "standard") != "standard":
-        raise ValueError("The ltx engine supports attention modes: standard")
+    attention = attention_mode or "standard"
+    if attention not in ENGINE_ATTENTION_MODES["ltx"]:
+        raise ValueError("The ltx engine supports attention modes: standard, int8")
+    _check_int8_tested("ltx", mode, attention)
     quality = ltx_quality or "balanced"
     if quality not in LTX_SIZES:
         raise ValueError("LTX quality must be balanced or high")
@@ -454,6 +475,6 @@ def _normalize_ltx(mode, steps, encoder, turbo_profile, aspect_ratio,
     width, height = LTX_SIZES[quality][aspect]
     return GenerationSettings(
         "ltx", LTX_STEPS, width, height, "native", "v1",
-        round(width * height / 1_000_000, 2), aspect, "direct", "standard",
+        round(width * height / 1_000_000, 2), aspect, "direct", attention,
         None, bool(sharp_decode), bool(calm_sampler),
     )

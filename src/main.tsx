@@ -20,7 +20,7 @@ type LtxReferenceModel = '2.5' | '2.3'
 type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
 type Encoder = 'native' | 'clipproj'
 type TurboProfile = 'v1' | 'v4'
-type AttentionMode = 'standard' | 'sage' | 'sla' | 'sage_sla'
+type AttentionMode = 'standard' | 'sage' | 'sla' | 'sage_sla' | 'int8'
 type Resolution = '512x288' | '736x416' | '864x480' | '768x768' | '1024x768' | '768x1024' | '1344x768' | '768x1344'
 type Status = 'queued' | 'starting' | 'running' | 'verifying' | 'completed' | 'failed' | 'canceled'
 type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | 'completed' | 'failed' | 'canceled'
@@ -1095,7 +1095,8 @@ function App() {
       : preferences.engine
   // Pika Turbo 4-step was lab-tested with Sage only, in opening frame, first + last and lip-sync.
   const pikaTurbo = effectiveEngine === 'pika' && preferences.pikaSpeed === 'turbo4' && pikaTurboReady && PIKA_TURBO_MODES.includes(mode)
-  const allowedAttentionModes = pikaTurbo ? ['sage' as AttentionMode] : effectiveEngine === 'pika' && (mode === 'opening' || mode === 'frames') ? ['standard' as AttentionMode, 'sage' as AttentionMode] : ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard']
+  const allowedAttentionModes = (pikaTurbo ? ['sage' as AttentionMode] : effectiveEngine === 'pika' && (mode === 'opening' || mode === 'frames') ? ['standard' as AttentionMode, 'sage' as AttentionMode] : ATTENTION_MODES_BY_ENGINE[effectiveEngine] || ['standard'])
+    .filter(attention => attention !== 'int8' || (INT8_MODES_BY_ENGINE[effectiveEngine] || []).includes(mode))
   const effectiveAttention: AttentionMode = allowedAttentionModes.includes(preferences.attentionMode) ? preferences.attentionMode : allowedAttentionModes[0]
   const effectiveFusedWorkflow: FusedWorkflow = effectiveEngine !== 'fused_sla'
     ? 'direct'
@@ -2135,10 +2136,11 @@ function App() {
                 {allowedAttentionModes.map(attention => (
                   <button key={attention} type="button" className={effectiveAttention === attention ? 'active' : ''} aria-pressed={effectiveAttention === attention} onClick={() => setPreferences(current => ({ ...current, attentionMode: attention }))}>
                     <strong dir="ltr">{attentionLabel(attention)}</strong>
-                    <small>{attention === 'standard' ? 'כמו היום' : attention === 'sage' ? (effectiveEngine === 'fused_sla' ? 'ניסיוני ב־Fused SLA' : '≈25–35% מהיר יותר · אותה תמונה') : attention === 'sla' ? '≈55–75% מהיר יותר · שינוי קל בתמונה' : 'הכי מהיר · שינוי קל בתמונה'}</small>
+                    <small>{attention === 'int8' ? (effectiveEngine === 'singularity' ? '≈16% מהיר מ־Sage · אותה תמונה' : effectiveEngine === 'ltx' ? '≈30–40% מהיר יותר · אותה תמונה' : '≈50% מהיר יותר · אותה תמונה') : attention === 'standard' ? 'כמו היום' : attention === 'sage' ? (effectiveEngine === 'fused_sla' ? 'ניסיוני ב־Fused SLA' : '≈25–35% מהיר יותר · אותה תמונה') : attention === 'sla' ? '≈55–75% מהיר יותר · שינוי קל בתמונה' : 'הכי מהיר · שינוי קל בתמונה'}</small>
                   </button>
                 ))}
               </div>
+              {effectiveAttention === 'int8' && <p className="setting-note">Int8 = ה־attention המובנה של ComfyUI ב־int8; נבדק במעבדה עם אותם seeds: אותה תמונה ואותו זיכרון.{effectiveEngine === 'turbo' ? ' ב־Turbo גם הפענוח עובר ל־VAE ב־int8 (פי 2 מהיר יותר).' : ''}</p>}
               {effectiveEngine === 'fused_sla' && effectiveAttention === 'sage' && <p className="setting-note">ב־Fused SLA המהירות עם Sage לא עקבית ב־1.5MP; בדקי מול רגיל</p>}
             </>}
           </div>
@@ -2506,14 +2508,21 @@ function modeLabel(mode: Mode) {
 }
 
 const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
-  turbo: ['standard', 'sage', 'sla', 'sage_sla'],
+  turbo: ['standard', 'sage', 'sla', 'sage_sla', 'int8'],
   fused_sla: ['standard', 'sage'],
   standard: ['standard'],
   spectrum: ['standard'],
-  ltx: ['standard'],
-  singularity: ['sage', 'standard'],
+  ltx: ['standard', 'int8'],
+  singularity: ['sage', 'standard', 'int8'],
   pika: ['standard', 'sage', 'sla', 'sage_sla'],
   omni: ['standard'],
+}
+
+// Mirrors backend/generation.py INT8_ATTENTION_TESTED: int8 is offered only where the lab tested it.
+const INT8_MODES_BY_ENGINE: Partial<Record<Engine, string[]>> = {
+  turbo: ['opening', 'lip_sync', 'frames'],
+  singularity: ['reference', 'opening'],
+  ltx: ['lip_sync', 'opening', 'frames'],
 }
 
 // Mirrors backend/generation.py SKIN_* and PIKA_MODES; LTX_RECIPE_MODES mirrors the official templates in backend/config.py.
@@ -2608,13 +2617,14 @@ function ltxQualityForSize(width: number, height: number): LtxQuality {
 }
 
 function isAttentionMode(value: unknown): value is AttentionMode {
-  return value === 'standard' || value === 'sage' || value === 'sla' || value === 'sage_sla'
+  return value === 'standard' || value === 'sage' || value === 'sla' || value === 'sage_sla' || value === 'int8'
 }
 
 function attentionLabel(mode: AttentionMode | string) {
   if (mode === 'sage') return 'Sage'
   if (mode === 'sla') return 'Sparse'
   if (mode === 'sage_sla') return 'Sage + Sparse'
+  if (mode === 'int8') return 'Int8'
   return 'רגיל'
 }
 
