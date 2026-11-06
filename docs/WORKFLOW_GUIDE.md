@@ -182,6 +182,9 @@ tested it; the defaults did not change. Same seeds per row, ComfyUI 0.44:
   K2/K4).
 - **ClipProj 4B** is a lighter text encoder, marked experimental in the app;
   its quality and speed are **untested** in the lab.
+- **Full lab write-up:** `docs/H3_PERFORMANCE_TESTS_RTX3080.md` has every
+  measurement (one-step profile, VAE decode, block probe and skipping, what did
+  not help) and a checklist for repeating the tests on another machine.
 
 ## LTX
 
