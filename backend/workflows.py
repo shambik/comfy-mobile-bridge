@@ -991,9 +991,15 @@ SLA_ATTENTION_INPUTS = {
 }
 
 
+INT8_ATTENTION_NODE = "ModelAttentionBackend"
+INT8_ATTENTION_INPUTS = {"attention": "comfy kitchen attention"}
+
+
 def attention_node_classes(attention_mode: str) -> set[str]:
     """ComfyUI node classes an attention mode adds to a workflow."""
     classes = set()
+    if attention_mode == "int8":
+        classes.add(INT8_ATTENTION_NODE)
     if attention_mode in {"sage", "sage_sla"}:
         classes.add(SAGE_ATTENTION_NODE)
     if attention_mode in {"sla", "sage_sla"}:
@@ -1030,12 +1036,14 @@ def apply_attention_mode(workflow: dict, attention_mode: str) -> dict:
     """
     if attention_mode == "standard":
         return workflow
-    if attention_mode not in {"sage", "sla", "sage_sla"}:
+    if attention_mode not in {"sage", "sla", "sage_sla", "int8"}:
         raise ValueError(f"Unknown attention mode: {attention_mode}")
     nodes = deepcopy(workflow)
     sage_inputs = {"sage_attention": "auto", "allow_compile": False}
     existing_sla = [key for key, node in nodes.items() if node["class_type"] == SLA_ATTENTION_NODE]
     if existing_sla:
+        if attention_mode == "int8":
+            raise ValueError("int8 attention is not offered on graphs that already run sparse attention")
         if attention_mode != "sage":
             raise ValueError("This workflow already uses sparse attention; only Sage can be added")
         upstream = nodes[existing_sla[0]]["inputs"]["model"][0]
@@ -1055,10 +1063,33 @@ def apply_attention_mode(workflow: dict, attention_mode: str) -> dict:
         if lora is None:
             break
         anchor = lora
+    if attention_mode == "int8":
+        _insert_model_patch(nodes, anchor, INT8_ATTENTION_NODE, dict(INT8_ATTENTION_INPUTS))
+        return nodes
     if attention_mode in {"sage", "sage_sla"}:
         anchor = _insert_model_patch(nodes, anchor, SAGE_ATTENTION_NODE, sage_inputs)
     if attention_mode in {"sla", "sage_sla"}:
         _insert_model_patch(nodes, anchor, SLA_ATTENTION_NODE, dict(SLA_ATTENTION_INPUTS))
+    return nodes
+
+
+def int8_decode_needed(engine: str, attention_mode: str) -> bool:
+    """Turbo's int8 option also decodes with the INT8 video VAE: the combination that was lab-tested (decode 63 s ->
+    27 s at 1.5 MP, PSNR 42-47 dB against the fp16 VAE on the same latent). The other int8 engines already decode with
+    an INT8 VAE (Singularity) or their own VAE (LTX)."""
+    return engine == "turbo" and attention_mode == "int8"
+
+
+def apply_int8_decode(workflow: dict) -> dict:
+    """Return a copy whose video decoders use the INT8 video VAE; the frame encode keeps its own VAE."""
+    nodes = deepcopy(workflow)
+    decoders = [node for node in nodes.values() if node["class_type"] in ("VAEDecode", "VAEDecodeTiled")]
+    if not decoders:
+        raise ValueError("Workflow has no video decoder for the INT8 VAE")
+    loader = str(max(int(key) for key in nodes if key.isdigit()) + 1)
+    nodes[loader] = {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}}
+    for node in decoders:
+        node["inputs"]["vae"] = [loader, 0]
     return nodes
 
 

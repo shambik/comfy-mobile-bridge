@@ -24,6 +24,7 @@ from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
 from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
+                        apply_int8_decode, int8_decode_needed,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
                         native_audio_lock_workflow,
@@ -942,6 +943,10 @@ class QueueWorker:
                 raise RuntimeError("H3 Fused SLA is not fully installed: " + ", ".join(missing_files))
         elif job["engine"] == "turbo":
             required |= {"MiniMaxH3TurboLoRA", "MiniMaxH3TurboSampler", "MiniMaxH3SigmaShift"}
+            if int8_decode_needed("turbo", job.get("attention_mode") or "standard"):
+                int8_vae = MODELS / "vae" / FUSED_VIDEO_VAE
+                if not int8_vae.exists():
+                    raise RuntimeError(f"The int8 option needs {int8_vae.name} in models/vae")
         elif job["engine"] == "spectrum":
             required |= {"KSamplerSelect", "MiniMaxH3SigmaShift", "SpectrumApplyMiniMaxH3"}
         else:
@@ -1103,6 +1108,8 @@ class QueueWorker:
             workflow_builder = workflow_builder_name
 
         workflow = apply_attention_mode(workflow, attention_mode)
+        if int8_decode_needed(job["engine"], attention_mode):
+            workflow = apply_int8_decode(workflow)
         if steady_memory_needed(job["engine"], attention_mode):
             workflow = apply_steady_memory(workflow)
         runtime["workflow"] = {

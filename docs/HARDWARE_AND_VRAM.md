@@ -39,6 +39,7 @@ card" and "How to verify a change" exactly.
 | Turbo LoRA | `low_vram: True` | `backend/workflows.py` | Applies the LoRA without a full extra copy of the weights |
 | Fused SLA graphs | MiniMax's official `*_lowvram.api.json` graphs | `backend/config.py` (`FUSED_WORKFLOW_FILES`) | The official low-VRAM variants |
 | Attention speed-ups | Sage and/or sparse (SLA) attention, per job | `backend/generation.py` (`ATTENTION_MODES`) | Faster and lighter attention on this card |
+| Int8 attention (opt-in) | ComfyUI's built-in Comfy Kitchen INT8 attention (`ModelAttentionBackend`), per job; on Turbo also the INT8 decode VAE | `backend/generation.py` (`INT8_ATTENTION_TESTED`), `backend/workflows.py` | Fastest tested attention on this card (Ampere has INT8 tensor cores); same GPU peak as standard. Check `comfy_kitchen.int8_attention_is_available()` on another GPU |
 | LTX models | LTX 2.5 transformer and Gemma encoder in INT8 | `backend/config.py` | BF16 does not fit |
 | LTX sizes | Balanced 896×1600, High 1056×1888 (trimmed to fit 2.0 MP; the lab ran 1088×1920) | `backend/generation.py` (`LTX_SIZES`) | One full-resolution pass within the cap |
 | LTX default decode | `VAEDecodeTiled` 512 px tiles, 64-frame chunks | `backend/workflows.py` | Fits in memory, but the chunk joins soften frames every 2 s |
