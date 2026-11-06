@@ -1,0 +1,194 @@
+{
+  "11": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "13": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "15": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 1120983928639653585
+    }
+  },
+  "16": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "201",
+        0
+      ],
+      "conditioning": [
+        "104",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ],
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 16
+    }
+  },
+  "14": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "16",
+        0
+      ],
+      "sampler": [
+        "130",
+        0
+      ],
+      "sigmas": [
+        "132",
+        0
+      ],
+      "latent_image": [
+        "104",
+        1
+      ]
+    }
+  },
+  "91": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "10",
+        0
+      ],
+      "fps": 24.0,
+      "bit_depth": 8,
+      "audio": [
+        "23",
+        0
+      ]
+    }
+  },
+  "92": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "91",
+        0
+      ],
+      "filename_prefix": "speed_test",
+      "format": "mp4",
+      "codec": "auto"
+    }
+  },
+  "24": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "23": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "24",
+        0
+      ]
+    }
+  },
+  "127": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "160": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "127",
+        0
+      ],
+      "lora_name": "pika_h3_flex_fl2va_comfy_bf16.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "130": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "lcm"
+    }
+  },
+  "132": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0"
+    }
+  },
+  "104": {
+    "class_type": "MiniMaxH3ImageToVideo",
+    "inputs": {
+      "clip": [
+        "13",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ],
+      "prompt": "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\nintegrated_multimodal_description: [Shot 1] Photorealistic cinematic film, 35mm with natural grain, warm tungsten work lamps and a cool blue glow from the gadget, rain streaking the dark skylight, real unretouched skin with visible pores. Keep exactly the faces and costumes of the two men in <Picture 1>; their faces must stay the same people in every frame. The pirate: red patterned bandana, dark deep-set eyes, hollow cheeks, long pointed dark goatee and thin moustache, silver hoop earring, long dark dreadlocks threaded with colourful beads, weathered brown leather coat. The inventor: wild shaggy grey-white hair, brass goggles pushed up on his forehead, very wide pale-blue eyes, short dark beard and moustache, grey work shirt under a stained white lab coat. Normal real-time speed, no slow motion. The inventor (S1) has an excitable, quick, energetic male voice. The pirate (S2) has a deep, gravelly male voice with a dry, teasing edge. One continuous five-second shot. 0-1 s: the camera is already pushing forward past the swaying hanging cables; the inventor twists a tiny screwdriver inside the glowing gadget and a few sparks flick out. 1-2 s: his eyes snap up and, without turning around, the inventor (S1) says: \"You're late. It's already awake.\" 2-3.5 s: the pirate shoves off the door frame and strides in fast, boots thudding, shoulders rolling, a smirk spreading. 3.5-4.5 s: the pirate (S2) says, leaning one hand on the bench: \"Machines don't wake up, Doc.\" 4.5-5 s: the inventor spins round on his stool toward the pirate with a delighted grin and throws his arms open, while the camera keeps pushing in. SPEED IS CRITICAL: everything moves at normal real-time speed, like 24fps footage played back at 24fps - fast, natural motion, NO slow motion. Nobody freezes or holds a pose: bodies, hands, heads and the camera keep moving until the very last frame.\n\noverall_soundscape: Rain drums on the glass skylight, the gadget hums and spits small sparks, a soft crackle from the Tesla coil in the back, heavy boots knocking on the wooden floor, the stool creaking as he spins.\n\nnon_diegetic_music: N/A",
+      "width": 928,
+      "height": 1632,
+      "length": 124,
+      "first_frame": [
+        "200",
+        0
+      ]
+    }
+  },
+  "200": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "input_image_1.png"
+    },
+    "is_changed": [
+      "a1f08c2a11aea5a5d98b2b37a965e5bcc853a5a957ff9f4e66259bf4aca44ade"
+    ]
+  },
+  "201": {
+    "class_type": "PathchSageAttentionKJ",
+    "inputs": {
+      "model": [
+        "160",
+        0
+      ],
+      "sage_attention": "auto",
+      "allow_compile": false
+    }
+  }
+}

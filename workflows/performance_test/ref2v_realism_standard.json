@@ -1,0 +1,232 @@
+{
+  "11": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "13": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "15": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 1796479405543809721
+    }
+  },
+  "16": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "130",
+        0
+      ],
+      "conditioning": [
+        "136",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ],
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 16
+    }
+  },
+  "14": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "16",
+        0
+      ],
+      "sampler": [
+        "130",
+        1
+      ],
+      "sigmas": [
+        "130",
+        2
+      ],
+      "latent_image": [
+        "136",
+        1
+      ]
+    }
+  },
+  "91": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "10",
+        0
+      ],
+      "fps": 24.0,
+      "bit_depth": 8,
+      "audio": [
+        "23",
+        0
+      ]
+    }
+  },
+  "92": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "91",
+        0
+      ],
+      "filename_prefix": "speed_test",
+      "format": "mp4",
+      "codec": "auto"
+    }
+  },
+  "24": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "23": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "14",
+        0
+      ],
+      "vae": [
+        "24",
+        0
+      ]
+    }
+  },
+  "127": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "160": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "127",
+        0
+      ],
+      "lora_name": "h3-realism-people-t2v-i2v-r2v.safetensors",
+      "strength_model": 1.0
+    }
+  },
+  "161": {
+    "class_type": "MiniMaxH3TurboLoRA",
+    "inputs": {
+      "model": [
+        "160",
+        0
+      ],
+      "lora_name": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "strength": 1.0,
+      "low_vram": true
+    }
+  },
+  "130": {
+    "class_type": "MiniMaxH3DualClockSamplerT8",
+    "inputs": {
+      "model": [
+        "161",
+        0
+      ],
+      "av_latent": [
+        "136",
+        1
+      ],
+      "steps": 8,
+      "shift_video": 12.0,
+      "shift_audio": 3.0,
+      "sampler_name": "dual_clock_euler",
+      "scheduler": "beta"
+    }
+  },
+  "136": {
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "inputs": {
+      "clip": [
+        "13",
+        0
+      ],
+      "vae": [
+        "11",
+        0
+      ],
+      "audio_vae": [
+        "24",
+        0
+      ],
+      "prompt": "r34l1sm\n\nsubject_definitions:\n<Subject 1> is the inventor, the man from <Picture 2> and <Picture 3> (right): his exact face with very wide pale-blue eyes and a short dark beard, wild shaggy grey-white hair, brass goggles pushed up on his forehead, a grey work shirt under a stained white lab coat.\n<Subject 2> is the pirate, the man from <Picture 1> and <Picture 3> (left): his exact face with dark deep-set eyes, hollow cheeks and a long pointed dark goatee, a red patterned bandana, long dark dreadlocks threaded with colourful beads, a silver hoop earring, a weathered brown leather coat.\n<Subject 3> is the cluttered inventor's workshop from <Picture 3>: a long wooden workbench with copper coils, tools and a brass-and-glass gadget glowing blue, shelves of jars and gears, warm work lamps, a rain-streaked glass skylight.\n\nsummary:\n[reference generation] A 5-second continuous shot: the visitor arrives late and teases the inventor.\n\nretention_analysis:\n<Subject 1> (appears in every shot): fully_preserved - retain his face, hair, goggles and clothes.\n<Subject 2> (appears in every shot): fully_preserved - retain the face, hair and clothes.\n<Subject 3>: fully_preserved - the same workshop, light and gadget in every shot. Use only the appearance of the pictures; no picture panels, borders, text or grey background.\n\ndetailed_description:\nThe video is live-action, shot on 35mm film with natural grain, warm tungsten work lamps and a cool blue glow from the gadget, rain streaking the dark skylight, real unretouched skin with visible pores, fine wrinkles and natural skin texture. <Subject 1> (S1) has an excitable, quick, energetic male voice. <Subject 2> (S2) has a deep, gravelly male voice with a dry, teasing edge. SPEED IS CRITICAL: everything moves at normal real-time speed, like 24fps footage played back at 24fps - fast, natural motion, NO slow motion. Nobody freezes or holds a pose: bodies, hands, heads and the camera keep moving until the very last frame.\n[Shot 1] 0-5 s, one continuous shot, vertical frame: the camera pushes forward past swaying hanging cables toward the long workbench, <Subject 2> in the open doorway behind, rain and night outside. 0-1 s: <Subject 1> sits hunched at the bench twisting a tiny screwdriver in the glowing gadget; a few sparks flick out. 1-2 s: his eyes snap up and, without turning around, <Subject 1> (S1) says: \"You're late. It's already awake.\" 2-3.5 s: <Subject 2> shoves off the door frame and strides in fast, boots thudding, a smirk spreading. 3.5-4.5 s: leaning one hand on the bench, <Subject 2> (S2) says: \"Machines don't wake up, Doc.\" 4.5-5 s: <Subject 1> spins round on his stool with a delighted grin and throws his arms open while the camera keeps pushing in.\n\noverall_soundscape:\nRain drums on the glass skylight, the gadget hums and spits small sparks, a soft crackle from a Tesla coil in the back, heavy boots knocking on the wooden floor, the stool creaking as he spins.\n\nnon_diegetic_music: N/A",
+      "width": 928,
+      "height": 1632,
+      "length": 124,
+      "ref_image_size": "max",
+      "ref_images.ref_image_0": [
+        "137",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "138",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "139",
+        0
+      ]
+    }
+  },
+  "137": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "input_image_1.png"
+    },
+    "is_changed": [
+      "a12bd22b2b242a6175859c9a0eee070fbaea0e2344a40c5f0a60dc69f44a20a1"
+    ]
+  },
+  "138": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "input_image_2.png"
+    },
+    "is_changed": [
+      "bbb23184ef88c57ec4f1b7f96a0ef94260a6fca4207531ede1ecfd050bde2fdf"
+    ]
+  },
+  "139": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "input_image_3.png"
+    },
+    "is_changed": [
+      "9fffa4aa1fe10a12ceb797e774f0a27b1a987b0a771b249d25c91161e6e7d556"
+    ]
+  }
+}
