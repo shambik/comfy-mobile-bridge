@@ -745,7 +745,12 @@ function App() {
   const loadInFlightRef = useRef(false)
   const comfyLoadInFlightRef = useRef(false)
   const jobsRevisionRef = useRef('')
-  const [loadedJobsLimit, setLoadedJobsLimit] = useState(32)
+  // The 2 s refresh timer keeps the first render's load(), so the page size it asks for lives in a ref: a refresh
+  // after "Load more" must keep the loaded jobs instead of falling back to the first 32.
+  const loadedJobsLimitRef = useRef(32)
+  const setLoadedJobsLimit = (limit: number) => { loadedJobsLimitRef.current = limit }
+  // A full load asked for while another load is in flight runs right after it, instead of being dropped.
+  const pendingFullLoadRef = useRef<number | null>(null)
 
   const loadSession = async (): Promise<string | null> => {
     try {
@@ -808,8 +813,11 @@ function App() {
     if ('gpu_conflict' in data) setGpuConflict(Boolean(data.gpu_conflict))
   }
 
-  const load = async (forceFull = false, requestedLimit = loadedJobsLimit) => {
-    if (loadInFlightRef.current) return
+  const load = async (forceFull = false, requestedLimit = loadedJobsLimitRef.current) => {
+    if (loadInFlightRef.current) {
+      if (forceFull) pendingFullLoadRef.current = Math.max(pendingFullLoadRef.current ?? 0, requestedLimit)
+      return
+    }
     loadInFlightRef.current = true
     try {
       if (!forceFull && jobsRevisionRef.current) {
@@ -832,6 +840,9 @@ function App() {
     } finally {
       setJobsLoading(false)
       loadInFlightRef.current = false
+      const pending = pendingFullLoadRef.current
+      pendingFullLoadRef.current = null
+      if (pending !== null) void load(true, pending)
     }
   }
 
@@ -2256,7 +2267,7 @@ function App() {
           </>
         })()}
       </div>
-      {!bulkMode && jobs.length < jobsTotal && <button type="button" className="history-load-more" onClick={() => { const next = Math.min(jobsTotal, loadedJobsLimit + 24); setLoadedJobsLimit(next); void load(true, next) }}>Load 24 more · {jobsTotal - jobs.length} remaining</button>}
+      {!bulkMode && jobs.length < jobsTotal && <button type="button" className="history-load-more" onClick={() => { const next = Math.min(jobsTotal, loadedJobsLimitRef.current + 24); setLoadedJobsLimit(next); void load(true, next) }}>Load 24 more · {jobsTotal - jobs.length} remaining</button>}
       {!visibleSequenceHistory.length && !visibleHistory.length && <div className="empty"><div><Folder size={22}/></div><p>No generated videos are stored in this location.</p></div>}
     </section>}
     <footer>H3 עובד מקומית · החיבור זמין רק ברשת הפרטית שלך</footer>
