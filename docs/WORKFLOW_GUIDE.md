@@ -68,6 +68,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, Omni (follows a song or a video's moves), or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
+| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48 fps, Lanczos or Real-ESRGAN ×2 for 2560 px; one 5 s shot at up to 1.5 MP (see below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -444,6 +445,34 @@ decode. A frame-based review selected source frames 48-131 for the 3.5-second
 establishing cut. This is an environment-only shot: its moving camera and
 clouds establish no evidence about character animation. The complete new
 episode is still in production; no replacement master has been published.
+
+## Upscale and motion smoothing (finished videos, 2026-11-08)
+
+Measured through the lab bridge on a 5 s Pika shot (1632×928, 24 fps, 124 frames); every output passed
+`ffprobe` and a full FFmpeg decode with its sound.
+
+Every finished video card has two buttons. Each one queues a new job (engine `post`) that is filed in
+the same project folder as its source. The new job gets its own card and does not change the source.
+
+| Button | Method | Result | Time per 5 s shot (1632×928, RTX 3080) · peak VRAM |
+| --- | --- | --- | --- |
+| החלקת תנועה (motion smoothing) | RIFE 4.26 | 2× frames, 24 → 48 fps, same size, source sound kept | 21 s · 2.1 GB |
+| | FILM | the same, a little smoother on large motion, heavier on the GPU | 78 s · 7.4 GB |
+| הגדלה (upscale) | Lanczos | Resize to a 1920 or 2560 long side; adds no detail | 23 s to 1920×1088; 62 s for a 48 fps clip to 2560×1456 · 1.5 GB |
+| | Real-ESRGAN ×2 | Sharpens edges and textures, then Lanczos to the target | 232 s to 2560×1456 · 4.7 GB |
+
+Limits (the server refuses anything else and says why):
+
+- RIFE, FILM and Real-ESRGAN accept sources up to 1632×928 (1.5 MP) and up to 125 frames, which is one 5 s shot.
+- Lanczos accepts up to 248 frames, so it can upscale a smoothed 48 fps clip. Real-ESRGAN cannot.
+- Smoothing needs a source of up to 25 fps. A clip that is already 48 fps cannot be smoothed again.
+- Upscale targets are a 1920 or 2560 long side, with the aspect ratio kept (2560×1456 for 16:9).
+- Both steps on one shot: smooth first, then upscale the result with Lanczos. In the lab, smoothing first
+  was about 10× faster than upscaling first.
+
+Why these limits: FILM at 2560×1456 spilled past 10 GB (12+ minutes per window), and longer clips need
+the lab's frame windows, which the app does not have. The models are in `models/frame_interpolation`
+and `models/upscale_models` of the app's ComfyUI.
 
 ## Singularity, Pika and the official LTX templates
 
