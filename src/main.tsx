@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, X, Zap } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, Upload, X, Zap } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
@@ -685,7 +685,7 @@ function App() {
   const [closingPreview, setClosingPreview] = useState('')
   const [sending, setSending] = useState(false)
   const [rerunLoading, setRerunLoading] = useState<string | null>(null)
-  const [postSheet, setPostSheet] = useState<{ job: Job; operation: PostOperation } | null>(null)
+  const [postSheet, setPostSheet] = useState<{ job?: Job; operation: PostOperation } | null>(null)
   const [mainErrors, setMainErrors] = useState<Partial<Record<MainErrorScope, string>>>({})
   const setMainError = (scope: MainErrorScope, message = '') => setMainErrors(current => ({ ...current, [scope]: message }))
   const clearMainError = (scope: MainErrorScope) => setMainErrors(current => ({ ...current, [scope]: '' }))
@@ -2237,7 +2237,7 @@ function App() {
     </section>
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
-      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
+      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setPostSheet({ operation: 'upscale' })}><Upload size={14} /> עיבוד וידאו חיצוני</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
       <MainSectionError message={mainErrors.library} onDismiss={() => clearMainError('library')} />
       {!!selectedResults.length && <div className="join-dock">
         <div className="join-dock-head"><div><Combine size={18} /><span><strong>{selectedResults.length} קטעים נבחרו</strong><small>זה יהיה סדר החיבור</small></span></div><button type="button" onClick={() => setSelectedResults([])}>נקה</button></div>
@@ -2299,7 +2299,7 @@ function App() {
     </>}
     <FeedbackToast feedback={feedback.feedback} onDismiss={feedback.dismiss} />
     <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
-    {postSheet && <PostProcessSheet job={{ id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration }} operation={postSheet.operation} csrf={csrf}
+    {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration }} operation={postSheet.operation} csrf={csrf}
       onClose={() => setPostSheet(null)} onQueued={() => { setPostSheet(null); feedback.notify('success', 'נוספה עבודת עיבוד לתור'); void load(true) }} />}
   </main>
 }

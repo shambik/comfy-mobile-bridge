@@ -1,6 +1,8 @@
 """Upscale / interpolation jobs (issue #37): tested limits, graphs, the API and the jobs table."""
 import json
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,8 +14,8 @@ import backend.db as db_module
 import backend.library as library
 from backend.db import connect, now_iso
 from backend.main import app, worker
-from backend.post_process import (plan_post_process, post_model_files, post_node_classes,
-                                  post_process_workflow, post_title, upscale_size)
+from backend.post_process import (aspect_label, crop_percent, plan_post_process, post_model_files, post_node_classes,
+                                  post_process_workflow, post_title, probe_video, upscale_size)
 from backend.worker import QueueWorker
 
 SHOT = {"width": 1632, "height": 928, "fps": 24.0, "frames": 121, "duration": 5.042, "audio": True}
@@ -30,11 +32,18 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(options["audio"])
 
     def test_upscale_keeps_aspect_on_multiples_of_16(self):
-        self.assertEqual(upscale_size(1632, 928, 2560), (2560, 1456))
-        self.assertEqual(upscale_size(928, 1632, 2560), (1456, 2560))
-        self.assertEqual(upscale_size(1632, 928, 1920), (1920, 1088))
+        # near-16:9 / 9:16 sources get the standard delivery sizes with a small center crop
+        for size, long_side, target in (((1632, 928), 2560, (2560, 1440)), ((1344, 736), 1920, (1920, 1080)),
+                                        ((928, 1632), 2560, (1440, 2560)), ((768, 1344), 1920, (1080, 1920)),
+                                        ((1056, 1888), 2560, (1440, 2560)), ((1024, 576), 1920, (1920, 1080))):
+            self.assertEqual(upscale_size(*size, long_side), target, size)
+        self.assertEqual(crop_percent(1344, 736, 1920, 1080), 2.6)
+        # other shapes keep their own, on multiples of 16
+        self.assertEqual(upscale_size(768, 768, 1920), (1920, 1920))
+        self.assertEqual(upscale_size(1216, 1632, 2560), (1904, 2560))
         options = plan_post_process(SHOT, "upscale", "gan", 2560)
-        self.assertEqual((options["width"], options["height"], options["fps"], options["frames"]), (2560, 1456, 24.0, 121))
+        self.assertEqual((options["width"], options["height"], options["fps"], options["frames"]), (2560, 1440, 24.0, 121))
+        self.assertEqual(options["crop_percent"], 1.1)
 
     def test_unknown_operation_or_method_is_refused(self):
         for operation, method in (("sharpen", "rife"), ("interpolate", "lanczos"), ("upscale", "rife"),
@@ -85,7 +94,8 @@ class WorkflowTests(unittest.TestCase):
         options = plan_post_process(SHOT, "upscale", "gan", 2560)
         graph = post_process_workflow(options, "src.mp4", "p")
         self.assertEqual(graph["12"]["inputs"]["image"], ["11", 0])
-        self.assertEqual((graph["12"]["inputs"]["width"], graph["12"]["inputs"]["height"]), (2560, 1456))
+        self.assertEqual((graph["12"]["inputs"]["width"], graph["12"]["inputs"]["height"]), (2560, 1440))
+        self.assertEqual(graph["12"]["inputs"]["crop"], "center")
         self.assertEqual(graph["30"]["inputs"]["fps"], ["2", 2])
         self.assertEqual(classes(graph), post_node_classes(options))
         self.assertEqual(post_model_files(options), [("upscale_models", "RealESRGAN_x2plus.pth")])
@@ -99,14 +109,14 @@ class WorkflowTests(unittest.TestCase):
 
     def test_title_names_the_change(self):
         options = plan_post_process(SHOT, "upscale", "lanczos", 2560)
-        self.assertTrue(post_title(options, "a bus at dawn").startswith("Lanczos upscale · 1632x928 -> 2560x1456"))
+        self.assertTrue(post_title(options, "a bus at dawn").startswith("Lanczos upscale · 1632x928 -> 2560x1440"))
 
     def test_post_jobs_unload_the_diffusion_family(self):
         self.assertEqual(QueueWorker._engine_family({"engine": "post"}), "post")
         self.assertNotEqual(QueueWorker._engine_family({"engine": "turbo"}), "post")
 
 
-class PostProcessApiTests(unittest.TestCase):
+class ApiBase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="h3-post-test-")
         self.root = Path(self.temp.name)
@@ -148,6 +158,8 @@ class PostProcessApiTests(unittest.TestCase):
     def post(self, job_id: str, body: dict):
         return self.client.post(f"/api/jobs/{job_id}/post-process", json=body, headers={"X-CSRF-Token": self.token})
 
+
+class PostProcessApiTests(ApiBase):
     def test_queues_a_post_job_filed_next_to_the_source(self):
         self.add_job("src")
         project = library.create_project("Missed Bus")
@@ -161,13 +173,14 @@ class PostProcessApiTests(unittest.TestCase):
             place = db.execute("SELECT project_id, folder_id FROM asset_assignments WHERE source_type='job' AND source_id=?",
                                (new_id,)).fetchone()
         self.assertEqual((row["engine"], row["mode"], row["workflow_variant"], row["steps"], row["width"], row["height"],
-                          row["status"]), ("post", "upscale", "gan", 1, 2560, 1456, "queued"))
+                          row["status"]), ("post", "upscale", "gan", 1, 2560, 1440, "queued"))
         self.assertEqual(json.loads(row["post_options_json"])["source_job_id"], "src")
         self.assertTrue((self.input / row["input_name"]).is_file())
         self.assertEqual(tuple(place), (project["id"], folder["id"]))
         public = self.client.get("/api/jobs").json()
         job = next(item for item in public["jobs"] if item["id"] == new_id)
         self.assertEqual(job["post_options"]["width"], 2560)
+        self.assertEqual(job["aspect_ratio"], "16:9")
 
     def test_only_finished_jobs(self):
         self.add_job("busy", status="running")
@@ -188,6 +201,68 @@ class PostProcessApiTests(unittest.TestCase):
         self.add_job("src")
         response = self.client.post("/api/jobs/src/post-process", json={"operation": "interpolate", "method": "rife"})
         self.assertEqual(response.status_code, 403)
+
+
+def make_clip(path: Path, width: int, height: int, fps: int, seconds: float, rotation: int | None = None):
+    """A small real clip with sound; `rotation` adds a phone-style display rotation flag."""
+    plain = path.with_name("plain_" + path.name)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate={fps}",
+                    "-f", "lavfi", "-i", "sine=frequency=440", "-t", str(seconds), "-c:v", "libx264", "-pix_fmt",
+                    "yuv420p", "-c:a", "aac", "-shortest", str(plain)], check=True)
+    if rotation is None:
+        plain.replace(path)
+    else:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-display_rotation", str(rotation), "-i", str(plain),
+                        "-c", "copy", str(path)], check=True)
+        plain.unlink()
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+class UploadTests(ApiBase):
+    def setUp(self):
+        super().setUp()
+        self.real_probe = patch("backend.main.probe_video", side_effect=probe_video)
+        self.real_probe.start()
+
+    def tearDown(self):
+        self.real_probe.stop()
+        super().tearDown()
+
+    def upload(self, path: Path, data: dict, content_type: str = "video/mp4"):
+        with path.open("rb") as handle:
+            return self.client.post("/api/post-process", data=data, headers={"X-CSRF-Token": self.token},
+                                    files={"video": (path.name, handle, content_type)})
+
+    def test_phone_rotation_is_applied_and_job_is_queued(self):
+        clip = self.root / "phone.mov"
+        make_clip(clip, 640, 360, 24, 2, rotation=90)
+        response = self.upload(clip, {"operation": "upscale", "method": "lanczos", "long_side": "1920"}, "video/quicktime")
+        self.assertEqual(response.status_code, 200, response.text)
+        options = response.json()["options"]
+        self.assertEqual((options["source_width"], options["source_height"]), (360, 640))
+        self.assertEqual((options["width"], options["height"]), (1080, 1920))
+        self.assertEqual(options["source_filename"], "phone.mov")
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (response.json()["created"][0],)).fetchone())
+        self.assertEqual((row["engine"], row["aspect_ratio"], row["no_audio"]), ("post", "9:16", 0))
+        self.assertTrue(row["prompt"].endswith("External video: phone.mov"))
+        self.assertEqual([p.name for p in self.input.iterdir()], [row["input_name"]])   # the raw upload is gone
+
+    def test_refused_upload_leaves_no_files(self):
+        clip = self.root / "clip.mp4"
+        make_clip(clip, 640, 360, 24, 2)
+        response = self.upload(clip, {"operation": "upscale", "method": "seedvr2", "long_side": "2560"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(list(self.input.iterdir()), [])
+
+    def test_wrong_type_is_refused(self):
+        clip = self.root / "clip.gif"
+        clip.write_bytes(b"GIF89a")
+        self.assertEqual(self.upload(clip, {"operation": "upscale", "method": "lanczos"}, "image/gif").status_code, 400)
+
+    def test_aspect_labels(self):
+        self.assertEqual([aspect_label(*s) for s in ((1920, 1080), (1080, 1920), (1000, 1000), (1440, 1080))],
+                         ["16:9", "9:16", "1:1", "4:3"])
 
 
 class PostJobsTableTests(unittest.TestCase):
@@ -211,10 +286,10 @@ class PostJobsTableTests(unittest.TestCase):
 
     def test_post_jobs_may_exceed_the_generation_size_but_generation_jobs_may_not(self):
         db_module.init_db()
-        self.insert("post", 2560, 1456)
-        self.insert("post", 1456, 2560)
-        for engine, width, height, steps in (("turbo", 2560, 1456, 6), ("post", 2560, 1456, 4), ("post", 4096, 4096, 1),
-                                             ("post", 2568, 1456, 1)):
+        for size in ((2560, 1440), (1440, 2560), (1920, 1080), (1080, 2338)):
+            self.insert("post", *size)
+        for engine, width, height, steps in (("turbo", 2560, 1440, 6), ("post", 2560, 1440, 4), ("post", 4096, 4096, 1),
+                                             ("post", 2567, 1440, 1)):
             with self.assertRaises(sqlite3.IntegrityError, msg=(engine, width, height, steps)):
                 self.insert(engine, width, height, steps)
 
@@ -224,7 +299,7 @@ class PostJobsTableTests(unittest.TestCase):
         with connect() as db:   # simulate a database from before issue #37
             sql = db.execute("SELECT sql FROM sqlite_master WHERE name='jobs'").fetchone()[0]
             db.execute("ALTER TABLE jobs RENAME TO jobs_new_style")
-            old = (sql.replace("engine='post' AND steps = 1", "engine='omni' AND steps = 9")
+            old = (sql.replace("width % 2 = 0 AND height % 2 = 0", "width % 16 = 0 AND height % 16 = 0")
                       .replace(",'post')", ")").replace("        post_options_json TEXT,\n", ""))
             self.assertNotIn("post_options_json", old)
             db.execute(old)
@@ -235,7 +310,7 @@ class PostJobsTableTests(unittest.TestCase):
         with connect() as db:
             self.assertEqual(db.execute("SELECT id FROM jobs").fetchall()[0][0], "turbo-1632x928-6")
             self.assertIn("post_options_json", [r[1] for r in db.execute("PRAGMA table_info(jobs)")])
-        self.insert("post", 2560, 1456)
+        self.insert("post", 1920, 1080)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,8 @@ from .library import (assign_asset, create_folder, create_project, delete_folder
                       rename_asset, rename_folder, rename_project, resolve_asset_path,
                       validate_location)
 from .media import extract_last_frame
-from .post_process import plan_post_process, post_title, probe_video
+from .post_process import (UPLOAD_MAX_BYTES, UPLOAD_TYPES, aspect_label, plan_post_process, post_title,
+                           prepare_upload, probe_video)
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog, process_manager
 from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
@@ -3205,10 +3206,50 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
         raise HTTPException(400, str(exc)) from exc
     new_id = uuid.uuid4().hex
     input_name = f"post_{new_id}_source{Path(source_path).suffix or '.mp4'}"
-    input_path = INPUT / input_name
-    await asyncio.to_thread(shutil.copyfile, source_path, input_path)
+    await asyncio.to_thread(shutil.copyfile, source_path, INPUT / input_name)
     options["source_job_id"] = job_id
+    return _queue_post_job(new_id, input_name, options, source["prompt"],
+                           source.get("aspect_ratio") or aspect_label(probe["width"], probe["height"]), job_id)
+
+
+@app.post("/api/post-process")
+async def post_process_upload(request: Request, video: UploadFile = File(...), operation: str = Form(...),
+                              method: str = Form(...), long_side: int | None = Form(None)):
+    """Queue an upscale or interpolation of an uploaded video (same tested limits as finished jobs)."""
+    require_csrf(request)
+    if video.content_type not in UPLOAD_TYPES:
+        raise HTTPException(400, "Only MP4, MOV, WebM or MKV videos are allowed")
+    new_id = uuid.uuid4().hex
+    raw = INPUT / f".post_{new_id}_upload{UPLOAD_TYPES[video.content_type]}"
+    input_name = f"post_{new_id}_source.mp4"
+    size = 0
+    try:
+        with raw.open("wb") as handle:
+            while chunk := await video.read(4 * 1024 * 1024):
+                size += len(chunk)
+                if size > UPLOAD_MAX_BYTES:
+                    raise HTTPException(400, "The video is larger than 500 MB")
+                handle.write(chunk)
+        try:
+            probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
+            options = plan_post_process(probe, operation, method, long_side)
+        except ValueError as exc:
+            (INPUT / input_name).unlink(missing_ok=True)
+            raise HTTPException(400, str(exc)) from exc
+    finally:
+        raw.unlink(missing_ok=True)
+    filename = Path(video.filename or "video").name[:120]
+    options["source_filename"] = filename
+    return _queue_post_job(new_id, input_name, options, f"External video: {filename}",
+                           aspect_label(probe["width"], probe["height"]), None)
+
+
+def _queue_post_job(new_id: str, input_name: str, options: dict, source_prompt: str, aspect: str,
+                    source_job_id: str | None) -> dict:
+    """Insert the post job; a job made from a finished video is filed in the same project folder."""
+    input_path = INPUT / input_name
     now = now_iso()
+    location = None
     try:
         with connect() as db:
             position = next_position(db)
@@ -3218,18 +3259,19 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
                     megapixels,aspect_ratio,seed,status,position,input_path,input_name,no_audio,post_options_json,
                     created_at,updated_at)
                    VALUES(?,?,?,?,'post',?,'v1','standard','native',1,?,?,?,?,?,'queued',?,?,?,?,?,?,?)""",
-                (new_id, post_title(options, source["prompt"]), body.operation,
-                 max(0.5, min(60.0, options["source_duration"])), body.method, options["width"], options["height"],
-                 round(options["width"] * options["height"] / 1_000_000, 2), source.get("aspect_ratio") or "16:9",
+                (new_id, post_title(options, source_prompt), options["operation"],
+                 max(0.5, min(60.0, options["source_duration"])), options["method"], options["width"], options["height"],
+                 round(options["width"] * options["height"] / 1_000_000, 2), aspect,
                  str(secrets.randbits(63)), position, str(input_path), input_name, int(not options["audio"]),
                  json.dumps(options), now, now),
             )
-            location = db.execute(
-                "SELECT project_id, folder_id FROM asset_assignments WHERE source_type='job' AND source_id=?",
-                (job_id,),
-            ).fetchone() if db.execute(
+            if source_job_id and db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_assignments'"
-            ).fetchone() else None
+            ).fetchone():
+                location = db.execute(
+                    "SELECT project_id, folder_id FROM asset_assignments WHERE source_type='job' AND source_id=?",
+                    (source_job_id,),
+                ).fetchone()
     except Exception:
         input_path.unlink(missing_ok=True)
         raise

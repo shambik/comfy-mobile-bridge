@@ -92,7 +92,7 @@ def _create_jobs_table(db):
               (engine='post' AND steps = 1) OR
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
         CHECK((engine='post' AND width BETWEEN 256 AND 4096 AND height BETWEEN 256 AND 4096 AND
-               width % 16 = 0 AND height % 16 = 0 AND width * height <= 3800000) OR
+               width % 2 = 0 AND height % 2 = 0 AND width * height <= 3800000) OR
               (engine <> 'post' AND width BETWEEN 256 AND 2048 AND height BETWEEN 256 AND 2048 AND
                width % 32 = 0 AND height % 32 = 0 AND width * height <= 2000000)),
         CHECK(mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')),
@@ -288,7 +288,7 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "engine='post' AND steps = 1" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "width % 2 = 0 AND height % 2 = 0" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)

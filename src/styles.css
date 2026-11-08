@@ -905,3 +905,7 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .post-sheet-options button.active small { color: #b8cdb9; }
 .app-modal > p.post-sheet-note { color: #8f9b92; font-size: 11px; }
 .app-modal > p.post-sheet-error { padding: 9px 11px; border: 1px solid #80514a; border-radius: 10px; background: #2b1917; color: #f0b3aa; }
+.post-sheet-file { position: relative; display: flex; align-items: center; min-height: 48px; padding: 0 12px; border: 1px dashed #526158; border-radius: 12px; background: #121713; color: #c5d0c7; font-size: 12px; cursor: pointer; overflow: hidden; }
+.post-sheet-file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.post-sheet-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.post-sheet-options button:disabled { opacity: .6; }

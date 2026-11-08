@@ -27,6 +27,9 @@ LANCZOS_MAX_FRAMES = 248            # Lanczos also ran on 247-frame 48 fps clips
 INTERPOLATE_MAX_FPS = 25.0          # sources were 24 fps; re-interpolating a 48 fps result is untested
 UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
 UPSCALE_MAX_PIXELS = 2560 * 1456
+# Near-16:9 and near-9:16 sources (the app's sizes are 1.75-1.83, not exactly 1.78) go to the standard delivery
+# sizes, 1920x1080 / 2560x1440 and the portrait pair, with a small center crop. Other shapes keep their own.
+STANDARD_RATIO_TOLERANCE = 0.04
 
 
 def probe_video(path: Path) -> dict:
@@ -48,9 +51,20 @@ def probe_video(path: Path) -> dict:
 
 
 def upscale_size(width: int, height: int, long_side: int) -> tuple[int, int]:
-    """Keep the aspect ratio, put the long side at `long_side`, both sides multiples of 16."""
+    """Standard 16:9 / 9:16 size when the source is close to it; otherwise its own shape on multiples of 16."""
+    landscape = width >= height
+    standard = 16 / 9 if landscape else 9 / 16
+    if abs((width / height) / standard - 1) <= STANDARD_RATIO_TOLERANCE:
+        short = long_side * 9 // 16
+        return (long_side, short) if landscape else (short, long_side)
     scale = long_side / max(width, height)
     return (round(width * scale / 16) * 16, round(height * scale / 16) * 16)
+
+
+def crop_percent(width: int, height: int, target_width: int, target_height: int) -> float:
+    """How much of the source the center crop removes to reach the target's shape."""
+    ratio = (width / height) / (target_width / target_height)
+    return round((1 - min(ratio, 1 / ratio)) * 100, 1)
 
 
 def plan_post_process(source: dict, operation: str, method: str, long_side: int | None = None) -> dict:
@@ -83,7 +97,8 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
             raise ValueError("The target is larger than the tested 2560x1456")
         if target[0] <= width or target[1] <= height:
             raise ValueError(f"The source ({width}x{height}) is already at least that size")
-        options.update(width=target[0], height=target[1], fps=round(fps, 3), frames=frames, long_side=long_side)
+        options.update(width=target[0], height=target[1], fps=round(fps, 3), frames=frames, long_side=long_side,
+                       crop_percent=crop_percent(width, height, *target))
     return options
 
 
@@ -124,7 +139,7 @@ def post_process_workflow(options: dict, video_name: str, prefix: str) -> dict:
             frames = ["11", 0]
         g["12"] = {"class_type": "ImageScale", "inputs": {"image": frames, "upscale_method": "lanczos",
                                                          "width": options["width"], "height": options["height"],
-                                                         "crop": "disabled"}}
+                                                         "crop": "center"}}
         frames = ["12", 0]
     g["30"] = {"class_type": "CreateVideo", "inputs": {"images": frames, "fps": fps}}
     if options.get("audio"):
@@ -142,3 +157,34 @@ def post_title(options: dict, source_prompt: str) -> str:
     else:
         head = f"{label} upscale · {options['source_width']}x{options['source_height']} -> {options['width']}x{options['height']}"
     return f"{head} · {source_prompt.strip()[:160]}"
+
+
+UPLOAD_TYPES = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm", "video/x-matroska": ".mkv"}
+UPLOAD_MAX_BYTES = 500 * 1024 * 1024
+UPLOAD_MAX_SECONDS = 60.0
+
+
+def prepare_upload(raw: Path, target: Path) -> dict:
+    """Re-encode an uploaded video to what LoadVideo reads reliably and probe it.
+
+    Phone clips often carry a rotation flag, a variable frame rate or HEVC; FFmpeg applies the rotation, makes the
+    frame rate constant and writes near-lossless H.264 (CRF 10) with AAC sound, so the job sees what the user sees.
+    """
+    first = probe_video(raw)
+    if first["duration"] > UPLOAD_MAX_SECONDS:
+        raise ValueError(f"The video is {first['duration']:.0f} s; upload clips of up to {UPLOAD_MAX_SECONDS:.0f} s")
+    out = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-map", "0:v:0", "-map", "0:a:0?",
+                          "-c:v", "libx264", "-crf", "10", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-fps_mode", "cfr",
+                          "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", str(target)],
+                         capture_output=True, text=True, timeout=600)
+    if out.returncode:
+        target.unlink(missing_ok=True)
+        raise ValueError("The video could not be converted: " + (out.stderr.strip().splitlines() or ["unknown error"])[-1])
+    return probe_video(target)
+
+
+def aspect_label(width: int, height: int) -> str:
+    ratio = width / height
+    return min(("16:9", 16 / 9), ("9:16", 9 / 16), ("1:1", 1.0), ("4:3", 4 / 3), ("3:4", 3 / 4),
+               key=lambda item: abs(item[1] - ratio))[0]
