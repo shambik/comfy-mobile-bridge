@@ -53,6 +53,7 @@ from .library import (assign_asset, create_folder, create_project, delete_folder
                       rename_asset, rename_folder, rename_project, resolve_asset_path,
                       validate_location)
 from .media import extract_last_frame
+from .post_process import plan_post_process, post_title, probe_video
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog, process_manager
 from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
@@ -3177,6 +3178,68 @@ async def cancel_job(request: Request, job_id: str):
     if not await worker.cancel(job_id):
         raise HTTPException(409, "Job cannot be canceled")
     return {"ok": True}
+
+
+class PostProcessBody(BaseModel):
+    operation: str
+    method: str
+    long_side: int | None = None
+
+
+@app.post("/api/jobs/{job_id}/post-process")
+async def post_process_job(request: Request, job_id: str, body: PostProcessBody):
+    """Queue an upscale or interpolation of a finished video as its own job, filed next to the source."""
+    require_csrf(request)
+    source = get_job(job_id, public=False)
+    if not source:
+        raise HTTPException(404, "Job not found")
+    if source["status"] != "completed":
+        raise HTTPException(409, "Only a finished video can be upscaled or interpolated")
+    source_path = resolve_asset_path("job", job_id)
+    if not source_path or not Path(source_path).is_file():
+        raise HTTPException(409, "The source video file is missing")
+    try:
+        probe = await asyncio.to_thread(probe_video, Path(source_path))
+        options = plan_post_process(probe, body.operation, body.method, body.long_side)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    new_id = uuid.uuid4().hex
+    input_name = f"post_{new_id}_source{Path(source_path).suffix or '.mp4'}"
+    input_path = INPUT / input_name
+    await asyncio.to_thread(shutil.copyfile, source_path, input_path)
+    options["source_job_id"] = job_id
+    now = now_iso()
+    try:
+        with connect() as db:
+            position = next_position(db)
+            db.execute(
+                """INSERT INTO jobs
+                   (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,attention_mode,encoder,steps,width,height,
+                    megapixels,aspect_ratio,seed,status,position,input_path,input_name,no_audio,post_options_json,
+                    created_at,updated_at)
+                   VALUES(?,?,?,?,'post',?,'v1','standard','native',1,?,?,?,?,?,'queued',?,?,?,?,?,?,?)""",
+                (new_id, post_title(options, source["prompt"]), body.operation,
+                 max(0.5, min(60.0, options["source_duration"])), body.method, options["width"], options["height"],
+                 round(options["width"] * options["height"] / 1_000_000, 2), source.get("aspect_ratio") or "16:9",
+                 str(secrets.randbits(63)), position, str(input_path), input_name, int(not options["audio"]),
+                 json.dumps(options), now, now),
+            )
+            location = db.execute(
+                "SELECT project_id, folder_id FROM asset_assignments WHERE source_type='job' AND source_id=?",
+                (job_id,),
+            ).fetchone() if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_assignments'"
+            ).fetchone() else None
+    except Exception:
+        input_path.unlink(missing_ok=True)
+        raise
+    if location:
+        try:
+            assign_asset("job", new_id, location[0], location[1])
+        except Exception:
+            logging.exception("Could not file post-process job %s next to its source", new_id)
+    worker.notify()
+    return {"created": [new_id], "options": options}
 
 
 @app.delete("/api/jobs/{job_id}")

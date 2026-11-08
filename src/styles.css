@@ -893,3 +893,15 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
   .asset-container-actions > .asset-container-add { flex: 1 1 0; min-height: 36px; justify-content: flex-start; padding-inline: 14px; border-left: 0; }
   .asset-result-container.collapsed > .asset-container-head > .asset-container-actions { display: none; }
 }
+/* Upscale / interpolation sheet (issue #37) */
+.post-sheet { max-height: calc(100dvh - 32px); overflow-y: auto; }
+.app-modal > p.post-sheet-source { color: #d6e2d8; font-size: 13px; font-weight: 700; text-align: right; }
+.post-sheet-options { display: grid; gap: 8px; }
+.post-sheet-sizes { grid-template-columns: 1fr 1fr; }
+.post-sheet-options button { display: grid; gap: 3px; min-height: 52px; padding: 10px 12px; border: 1px solid #38443d; border-radius: 12px; background: #151a16; color: #c5d0c7; text-align: right; }
+.post-sheet-options button strong { font-size: 13px; text-align: right; }
+.post-sheet-options button small { color: #8f9b92; font-size: 11px; line-height: 1.45; }
+.post-sheet-options button.active { border-color: #9fc8a8; background: #22301f; color: #e8f2e9; box-shadow: inset 0 0 0 1px #9fc8a8; }
+.post-sheet-options button.active small { color: #b8cdb9; }
+.app-modal > p.post-sheet-note { color: #8f9b92; font-size: 11px; }
+.app-modal > p.post-sheet-error { padding: 9px 11px; border: 1px solid #80514a; border-radius: 10px; background: #2b1917; color: #f0b3aa; }

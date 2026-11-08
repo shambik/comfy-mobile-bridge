@@ -23,6 +23,7 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
+from .post_process import post_model_files, post_node_classes, post_process_workflow
 from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         apply_int8_decode, int8_decode_needed,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
@@ -91,7 +92,7 @@ class QueueWorker:
         if job["engine"] == "fused_sla":
             return "fused_sla"
         # Their models are not the Turbo family's: unload when switching, as between LTX and H3.
-        if job["engine"] in ("singularity", "pika", "omni"):
+        if job["engine"] in ("singularity", "pika", "omni", "post"):
             return job["engine"]
         return "h3"
 
@@ -754,7 +755,19 @@ class QueueWorker:
             required.add("CLIPLoader")
 
         ltx_workflow = None
-        if job["engine"] == "ltx":
+        post_options = json.loads(job.get("post_options_json") or "null") if job["engine"] == "post" else None
+        if job["engine"] == "post":
+            # Upscale / interpolation of a finished video: none of the diffusion node classes are involved.
+            if not post_options:
+                raise RuntimeError("Post-process job has no options")
+            required = post_node_classes(post_options)
+            missing_files = [str(MODELS / folder / name) for folder, name in post_model_files(post_options)
+                             if not (MODELS / folder / name).exists()]
+            if missing_files:
+                raise RuntimeError("Post-process model is not installed: " + ", ".join(missing_files))
+            if not job.get("input_name") or not (INPUT / job["input_name"]).is_file():
+                raise RuntimeError("The source video for this post-process job is missing")
+        elif job["engine"] == "ltx":
             # LTX runs its own graph; none of the H3 node classes are involved.
             reference_model = (job.get("ltx_reference_model") or "2.5") if job["mode"] == "reference" else None
             model_files = LTX_REFERENCE_FILES[reference_model] if reference_model else LTX_MODEL_FILES
@@ -963,7 +976,10 @@ class QueueWorker:
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
         workflow_builder = "unknown"
-        if ltx_workflow is not None:
+        if job["engine"] == "post":
+            workflow_builder = "post_process_workflow"
+            workflow = post_process_workflow(post_options, job["input_name"], prefix)
+        elif ltx_workflow is not None:
             workflow_builder = ("ltx_reference_workflow" if job["mode"] == "reference" else
                                 "official_ltx_template_workflow" if job.get("ltx_recipe") == "official" else "ltx_video_workflow")
             workflow = ltx_workflow
