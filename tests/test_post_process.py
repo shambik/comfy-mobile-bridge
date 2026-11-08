@@ -64,7 +64,20 @@ class PlanTests(unittest.TestCase):
         doubled = {**SHOT, "fps": 48.0, "frames": 241}
         self.assertEqual(plan_post_process(doubled, "upscale", "lanczos", 2560)["frames"], 241)
         with self.assertRaises(ValueError):
-            plan_post_process({**SHOT, "frames": 300}, "upscale", "lanczos", 2560)
+            plan_post_process({**SHOT, "frames": 301}, "upscale", "lanczos", 2560)
+        self.assertEqual(plan_post_process({**SHOT, "fps": 60.0, "frames": 300}, "upscale", "lanczos", 2560)["frames"], 300)
+
+    def test_1080p_30fps_uploads_follow_the_lab_results(self):
+        phone = {"width": 1920, "height": 1080, "fps": 30.0, "frames": 150, "duration": 5.0, "audio": True}
+        portrait = {**phone, "width": 1080, "height": 1920}
+        rife = plan_post_process(phone, "interpolate", "rife")
+        self.assertEqual((rife["fps"], rife["frames"]), (60.0, 299))
+        self.assertEqual(plan_post_process(portrait, "interpolate", "rife")["width"], 1080)
+        self.assertEqual(plan_post_process(phone, "upscale", "gan", 2560)["width"], 2560)
+        with self.assertRaisesRegex(ValueError, "use RIFE"):
+            plan_post_process(phone, "interpolate", "film")
+        with self.assertRaises(ValueError):
+            plan_post_process({**phone, "frames": 151}, "interpolate", "rife")
 
     def test_interpolating_a_48fps_clip_is_refused(self):
         with self.assertRaises(ValueError):
@@ -194,7 +207,7 @@ class PostProcessApiTests(ApiBase):
         with patch("backend.main.probe_video", return_value={**SHOT, "frames": 241}):
             response = self.post("src", {"operation": "interpolate", "method": "film"})
         self.assertEqual(response.status_code, 400)
-        self.assertIn("125 frames", response.json()["detail"])
+        self.assertIn("150 frames", response.json()["detail"])
         self.assertEqual(list(self.input.iterdir()), [])
 
     def test_csrf_is_required(self):

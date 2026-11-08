@@ -16,7 +16,7 @@ type SourceSize = { width: number; height: number; duration: number }
 const METHODS: Record<PostOperation, { id: string; label: string; detail: string }[]> = {
   interpolate: [
     { id: 'rife', label: 'RIFE 4.26', detail: 'מהיר · כ־20 שניות לשוט של 5 שניות · זיכרון נמוך' },
-    { id: 'film', label: 'FILM', detail: 'איטי יותר · כ־80 שניות לשוט של 5 שניות · כ־7GB' },
+    { id: 'film', label: 'FILM', detail: 'איטי יותר · כ־80 שניות לשוט של 5 שניות · עד 1.5MP' },
   ],
   upscale: [
     { id: 'lanczos', label: 'Lanczos', detail: 'מהיר · כ־25 שניות לשוט · מגדיל בלי להמציא פרטים' },
@@ -144,7 +144,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, onClo
           </button>
         })}
       </div>}
-      <p className="post-sheet-note">נבדק על שוטים של עד 5 שניות ועד 1.5MP (Lanczos גם על קליפים של 48fps). אפשר להגדיל קליפ אחרי החלקת תנועה ב־Lanczos.</p>
+      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות, עד 1080p ועד 30fps (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה ב־Lanczos.</p>
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>
     </form>

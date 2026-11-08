@@ -6,8 +6,11 @@ remake, The Last Fold, Pirate & Inventor) is allowed:
 - Interpolation 2x (24 -> 48 fps) with RIFE 4.26 (~21 s per 5 s shot at 1632x928, ~1.6 GB) or FILM (~77 s, ~7 GB).
 - Upscale with Lanczos (~31-36 s per shot to 2560x1456, also run on 247-frame 48 fps clips) or Real-ESRGAN x2plus
   then a Lanczos fit (~235 s per shot to 2560x1456, ~4 GB).
-- RIFE, FILM and Real-ESRGAN: whole shots of up to 125 frames at up to 1632x928 (1.51 MP). Lanczos: up to 248 frames.
-  Longer clips are refused until they are tested; FILM at 2560x1456 spilled past 10 GB (12+ min per window).
+- RIFE, FILM and Real-ESRGAN: whole clips of up to 150 frames (5 s at 30 fps). RIFE and Real-ESRGAN up to 1080p
+  (1920x1080 30 fps uploads: RIFE 31 s / 2.5 GB, Real-ESRGAN 378 s / 6.1 GB, 2026-11-08). FILM stays at 1632x928:
+  at 1080p it peaked at 9.77 GB, the edge where this card spills. Lanczos: up to 300 frames (a 5 s 60 fps clip, 73 s).
+  Smoothing takes sources up to 30 fps. Longer clips are refused until they are tested; FILM at 2560x1456 spilled
+  past 10 GB (12+ min per window).
 """
 from __future__ import annotations
 
@@ -21,10 +24,11 @@ UPSCALE_MODELS = {"gan": "RealESRGAN_x2plus.pth"}
 METHODS = {"interpolate": ("rife", "film"), "upscale": ("lanczos", "gan")}
 METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2"}
 
-TESTED_MAX_PIXELS = 1632 * 928      # largest source measured for RIFE, FILM and Real-ESRGAN
-TESTED_MAX_FRAMES = 125             # one 5 s shot at 24 fps (124 frames), whole-shot jobs
-LANCZOS_MAX_FRAMES = 248            # Lanczos also ran on 247-frame 48 fps clips
-INTERPOLATE_MAX_FPS = 25.0          # sources were 24 fps; re-interpolating a 48 fps result is untested
+MAX_SOURCE = {"rife": (1920 * 1080, "1920x1080"), "gan": (1920 * 1080, "1920x1080"),
+              "film": (1632 * 928, "1632x928 (1.5 MP); at 1080p it nearly fills the 10 GB card, use RIFE")}
+TESTED_MAX_FRAMES = 150             # one 5 s clip at 30 fps, whole-clip jobs
+LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
+INTERPOLATE_MAX_FPS = 30.0          # 24 and 30 fps sources were tested; smoothing a 48/60 fps clip is not
 UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
 UPSCALE_MAX_PIXELS = 2560 * 1456
 # Near-16:9 and near-9:16 sources (the app's sizes are 1.75-1.83, not exactly 1.78) go to the standard delivery
@@ -75,19 +79,20 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         raise ValueError(f"{operation.capitalize()} supports: " + ", ".join(METHOD_LABELS[m] for m in METHODS[operation]))
     width, height, frames, fps = source["width"], source["height"], source["frames"], source["fps"]
     pixels = width * height
-    if method in ("rife", "film", "gan"):
-        if pixels > TESTED_MAX_PIXELS:
-            raise ValueError(f"{METHOD_LABELS[method]} was tested on sources up to 1632x928 (1.5 MP); this one is {width}x{height}")
+    if method in MAX_SOURCE:
+        max_pixels, max_label = MAX_SOURCE[method]
+        if pixels > max_pixels:
+            raise ValueError(f"{METHOD_LABELS[method]} was tested on sources up to {max_label}; this one is {width}x{height}")
         if frames > TESTED_MAX_FRAMES:
-            raise ValueError(f"{METHOD_LABELS[method]} was tested on single 5 s shots (up to 125 frames); this clip has {frames}")
+            raise ValueError(f"{METHOD_LABELS[method]} was tested on clips of up to 5 s (150 frames); this clip has {frames}")
     elif frames > LANCZOS_MAX_FRAMES:
-        raise ValueError(f"Lanczos was tested up to 248 frames; this clip has {frames}")
+        raise ValueError(f"Lanczos was tested up to 300 frames (5 s at 60 fps); this clip has {frames}")
     options = {"operation": operation, "method": method, "source_width": width, "source_height": height,
                "source_frames": frames, "source_fps": round(fps, 3), "source_duration": round(source["duration"], 3),
                "audio": bool(source["audio"])}
     if operation == "interpolate":
         if fps <= 0 or fps > INTERPOLATE_MAX_FPS:
-            raise ValueError(f"Interpolation was tested on 24 fps sources; this one is {fps:g} fps")
+            raise ValueError(f"Smoothing was tested on sources up to 30 fps; this one is {fps:g} fps")
         options.update(width=width, height=height, fps=round(fps * 2, 3), frames=frames * 2 - 1)
     else:
         if long_side not in UPSCALE_LONG_SIDES:
