@@ -27,6 +27,8 @@ METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan
 MAX_SOURCE = {"rife": (1920 * 1080, "1920x1080"), "gan": (1920 * 1080, "1920x1080"),
               "film": (1632 * 928, "1632x928 (1.5 MP); at 1080p it nearly fills the 10 GB card, use RIFE")}
 TESTED_MAX_FRAMES = 150             # one 5 s clip at 30 fps, whole-clip jobs
+GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,
+GAN_SMOOTHED_MAX_PIXELS = 1632 * 928  # 454 s, 6.8 GB VRAM, 31 GB ComfyUI RAM (3 lab windows of 83 frames: ~470 s)
 LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
 INTERPOLATE_MAX_FPS = 30.0          # 24 and 30 fps sources were tested; smoothing a 48/60 fps clip is not
 UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
@@ -83,8 +85,11 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         max_pixels, max_label = MAX_SOURCE[method]
         if pixels > max_pixels:
             raise ValueError(f"{METHOD_LABELS[method]} was tested on sources up to {max_label}; this one is {width}x{height}")
-        if frames > TESTED_MAX_FRAMES:
-            raise ValueError(f"{METHOD_LABELS[method]} was tested on clips of up to 5 s (150 frames); this clip has {frames}")
+        max_frames = (GAN_SMOOTHED_MAX_FRAMES if method == "gan" and pixels <= GAN_SMOOTHED_MAX_PIXELS
+                      else TESTED_MAX_FRAMES)
+        if frames > max_frames:
+            raise ValueError(f"{METHOD_LABELS[method]} was tested on clips of up to {max_frames} frames at this size "
+                             f"(5 s, or a smoothed 5 s shot for Real-ESRGAN up to 1632x928); this clip has {frames}")
     elif frames > LANCZOS_MAX_FRAMES:
         raise ValueError(f"Lanczos was tested up to 300 frames (5 s at 60 fps); this clip has {frames}")
     options = {"operation": operation, "method": method, "source_width": width, "source_height": height,

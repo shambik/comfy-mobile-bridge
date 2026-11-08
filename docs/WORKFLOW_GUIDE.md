@@ -466,21 +466,24 @@ with its sound:
 | Lanczos | resize to a 1920 or 2560 long side; adds no detail | 23 s to 1920×1080 · 1.5 GB | 42 s to 2560×1440 (also 1440×2560) |
 | Real-ESRGAN ×2 | sharpens edges and textures, then Lanczos to the target | 232 s to 2560×1456 · 4.7 GB | 378 s to 2560×1440 · 6.1 GB |
 | Lanczos on 299–300 frames | a smoothed clip or a 60 fps clip to 2560×1440 | 62 s (48 fps, 247 frames) | 73 s (60 fps, 300 frames) |
+| Real-ESRGAN on a smoothed shot | 247 frames, 48 fps, to 2560×1440 in one pass | 454 s · 6.8 GB VRAM · 31 GB ComfyUI RAM | not allowed (not tested) |
 
 Limits (the server refuses anything else and says why):
 
 - RIFE and Real-ESRGAN take sources up to 1920×1080 (either way round). FILM takes up to 1632×928.
   At 1080p FILM peaked at 9.77 GB, the edge where this card spills into shared memory.
 - RIFE, FILM and Real-ESRGAN take up to 150 frames (5 s at 30 fps). Lanczos takes up to 300 frames
-  (5 s at 60 fps, or a smoothed 30 fps clip).
+  (5 s at 60 fps, or a smoothed 30 fps clip). Real-ESRGAN also takes a smoothed 48 fps shot (up to 248
+  frames) when the shot is at most 1632×928. The Package lab ran this order in three 83-frame windows
+  (about 470 s); one pass took 454 s, so the app does not split the clip.
 - Smoothing takes sources up to 30 fps. A clip at 48 or 60 fps cannot be smoothed again.
 - Upscale targets have a 1920 or 2560 long side. Near-16:9 and near-9:16 sources get the standard sizes
   1920×1080 / 2560×1440 (or 1080×1920 / 1440×2560). The app's frame sizes are 1.75–1.83 wide, not
   exactly 1.78, so up to 2.6% is cut from the center to fit; 1632×928 loses 1.1%. Standard sizes keep
   every upscaled shot the same size, whatever engine made it, and match what video sites expect. Other
   shapes (1:1, 4:3) keep their own proportions.
-- To do both on one shot, smooth first, then upscale the result with Lanczos. In the lab, smoothing first
-  was about 10× faster than upscaling first.
+- To do both on one shot, smooth first, then upscale the result (Lanczos, or Real-ESRGAN up to 1632×928).
+  In the lab, smoothing first was about 10× faster than upscaling first.
 
 Why these limits: FILM at 2560×1456 spilled past 10 GB (12+ minutes per window), and longer clips need
 the lab's frame windows, which the app does not have. The models are in `models/frame_interpolation`

@@ -144,7 +144,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, onClo
           </button>
         })}
       </div>}
-      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות, עד 1080p ועד 30fps (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה ב־Lanczos.</p>
+      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות, עד 1080p ועד 30fps (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.</p>
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>
     </form>

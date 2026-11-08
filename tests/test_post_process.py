@@ -53,7 +53,7 @@ class PlanTests(unittest.TestCase):
 
     def test_models_only_on_tested_sizes_and_lengths(self):
         big = {**SHOT, "width": 1920, "height": 1088}
-        long = {**SHOT, "frames": 241, "duration": 10.04}
+        long = {**SHOT, "frames": 249, "duration": 10.4}
         for method, operation in (("rife", "interpolate"), ("film", "interpolate"), ("gan", "upscale")):
             with self.assertRaises(ValueError):
                 plan_post_process(big, operation, method, 2560)
@@ -78,6 +78,16 @@ class PlanTests(unittest.TestCase):
             plan_post_process(phone, "interpolate", "film")
         with self.assertRaises(ValueError):
             plan_post_process({**phone, "frames": 151}, "interpolate", "rife")
+
+    def test_gan_runs_on_a_smoothed_shot_up_to_1_5mp(self):
+        smoothed = {**SHOT, "fps": 48.0, "frames": 247}
+        self.assertEqual(plan_post_process(smoothed, "upscale", "gan", 2560)["frames"], 247)
+        portrait = {**smoothed, "width": 928, "height": 1632}
+        self.assertEqual(plan_post_process(portrait, "upscale", "gan", 2560)["height"], 2560)
+        with self.assertRaises(ValueError):   # 1080p only up to 150 frames
+            plan_post_process({**smoothed, "width": 1920, "height": 1080}, "upscale", "gan", 2560)
+        with self.assertRaises(ValueError):
+            plan_post_process({**smoothed, "frames": 249}, "upscale", "gan", 2560)
 
     def test_interpolating_a_48fps_clip_is_refused(self):
         with self.assertRaises(ValueError):
