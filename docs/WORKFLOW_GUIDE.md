@@ -68,6 +68,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, Omni (follows a song or a video's moves), or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
+| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos or Real-ESRGAN ×2 for 2560 px; clips of up to 5 s and 1080p, uploads too (see below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -444,6 +445,49 @@ decode. A frame-based review selected source frames 48-131 for the 3.5-second
 establishing cut. This is an environment-only shot: its moving camera and
 clouds establish no evidence about character animation. The complete new
 episode is still in production; no replacement master has been published.
+
+## Upscale and motion smoothing (finished or uploaded videos, 2026-11-08)
+
+Every finished video card has two buttons, **החלקת תנועה** (motion smoothing) and **הגדלה** (upscale).
+The **עיבוד וידאו חיצוני** button above the results does the same for an uploaded video (MP4, MOV, WebM
+or MKV, up to 500 MB and 60 s). Each request queues a new job (engine `post`). A job made from a card is
+filed in the same project folder as its source and never changes the source.
+
+Uploads are first re-encoded with FFmpeg (H.264 CRF 10, AAC). That applies a phone's rotation flag and
+turns a variable frame rate into a constant one.
+
+Measured through the lab bridge on the RTX 3080. Every output passed `ffprobe` and a full FFmpeg decode
+with its sound:
+
+| Method | Result | 5 s, 1632×928, 24 fps | 5 s, 1920×1080, 30 fps (upload) |
+| --- | --- | --- | --- |
+| RIFE 4.26 | 2× frames (24 → 48 or 30 → 60 fps), same size | 21 s · 2.1 GB | 31 s · 2.5 GB (also 1080×1920) |
+| FILM | the same, a little smoother on large motion | 78 s · 7.4 GB | 123 s · **9.77 GB**, so the app refuses it |
+| Lanczos | resize to a 1920 or 2560 long side; adds no detail | 23 s to 1920×1080 · 1.5 GB | 42 s to 2560×1440 (also 1440×2560) |
+| Real-ESRGAN ×2 | sharpens edges and textures, then Lanczos to the target | 232 s to 2560×1456 · 4.7 GB | 378 s to 2560×1440 · 6.1 GB |
+| Lanczos on 299–300 frames | a smoothed clip or a 60 fps clip to 2560×1440 | 62 s (48 fps, 247 frames) | 73 s (60 fps, 300 frames) |
+| Real-ESRGAN on a smoothed shot | 247 frames, 48 fps, to 2560×1440 in one pass | 454 s · 6.8 GB VRAM · 31 GB ComfyUI RAM | not allowed (not tested) |
+
+Limits (the server refuses anything else and says why):
+
+- RIFE and Real-ESRGAN take sources up to 1920×1080 (either way round). FILM takes up to 1632×928.
+  At 1080p FILM peaked at 9.77 GB, the edge where this card spills into shared memory.
+- RIFE, FILM and Real-ESRGAN take up to 150 frames (5 s at 30 fps). Lanczos takes up to 300 frames
+  (5 s at 60 fps, or a smoothed 30 fps clip). Real-ESRGAN also takes a smoothed 48 fps shot (up to 248
+  frames) when the shot is at most 1632×928. The Package lab ran this order in three 83-frame windows
+  (about 470 s); one pass took 454 s, so the app does not split the clip.
+- Smoothing takes sources up to 30 fps. A clip at 48 or 60 fps cannot be smoothed again.
+- Upscale targets have a 1920 or 2560 long side. Near-16:9 and near-9:16 sources get the standard sizes
+  1920×1080 / 2560×1440 (or 1080×1920 / 1440×2560). The app's frame sizes are 1.75–1.83 wide, not
+  exactly 1.78, so up to 2.6% is cut from the center to fit; 1632×928 loses 1.1%. Standard sizes keep
+  every upscaled shot the same size, whatever engine made it, and match what video sites expect. Other
+  shapes (1:1, 4:3) keep their own proportions.
+- To do both on one shot, smooth first, then upscale the result (Lanczos, or Real-ESRGAN up to 1632×928).
+  In the lab, smoothing first was about 10× faster than upscaling first.
+
+Why these limits: FILM at 2560×1456 spilled past 10 GB (12+ minutes per window), and longer clips need
+the lab's frame windows, which the app does not have. The models are in `models/frame_interpolation`
+and `models/upscale_models` of the app's ComfyUI.
 
 ## Singularity, Pika and the official LTX templates
 
