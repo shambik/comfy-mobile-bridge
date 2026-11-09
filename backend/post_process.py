@@ -33,8 +33,11 @@ METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan
 VISUAL_ENHANCER_METHODS = ("rtx", "fsr3")
 VISUAL_ENHANCER_TIMEOUT_SECONDS = 15 * 60  # the lab runs took 5-19 s; a hung run must not hold the queue
 
-MAX_SOURCE = {"rife": (1920 * 1080, "1920x1080"), "gan": (1920 * 1080, "1920x1080"),
-              "rtx": (1920 * 1080, "1920x1080"), "fsr3": (1920 * 1080, "1920x1080"),
+# RIFE and FSR 3 also smooth upscaled clips (issue #41): whole 2560x1440 shots in the lab took RIFE 37-47 s at 2.3 GB
+# and FSR 3 13-16 s at 1.5 GB. FILM stays at 1632x928 (at 2560x1456 it used 9.8 GB plus 4 GB of shared memory).
+SMOOTH_UPSCALED_MAX = (2560 * 1456, "2560x1456")
+MAX_SOURCE = {"rife": SMOOTH_UPSCALED_MAX, "gan": (1920 * 1080, "1920x1080"),
+              "rtx": (1920 * 1080, "1920x1080"), "fsr3": SMOOTH_UPSCALED_MAX,
               "film": (1632 * 928, "1632x928 (1.5 MP); at 1080p it nearly fills the 10 GB card, use RIFE")}
 TESTED_MAX_FRAMES = 150             # one 5 s clip at 30 fps, whole-clip jobs
 GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,

@@ -58,11 +58,24 @@ class PlanTests(unittest.TestCase):
     def test_models_only_on_tested_sizes_and_lengths(self):
         big = {**SHOT, "width": 1920, "height": 1088}
         long = {**SHOT, "frames": 249, "duration": 10.4}
-        for method, operation in (("rife", "interpolate"), ("film", "interpolate"), ("gan", "upscale")):
+        for method, operation in (("film", "interpolate"), ("gan", "upscale")):
             with self.assertRaises(ValueError):
                 plan_post_process(big, operation, method, 2560)
+        for method, operation in (("rife", "interpolate"), ("film", "interpolate"), ("gan", "upscale")):
             with self.assertRaises(ValueError):
                 plan_post_process(long, operation, method, 2560)
+
+    def test_rife_and_fsr3_smooth_upscaled_clips(self):
+        # issue #41: whole 2560x1440 shots were measured in the lab; FILM stays capped
+        for size in ((2560, 1440), (1440, 2560), (2560, 1456)):
+            upscaled = {**SHOT, "width": size[0], "height": size[1], "frames": 124}
+            for method in ("rife", "fsr3"):
+                options = plan_post_process(upscaled, "interpolate", method)
+                self.assertEqual((options["width"], options["height"], options["fps"]), (*size, 48.0))
+            with self.assertRaises(ValueError):
+                plan_post_process(upscaled, "interpolate", "film")
+        with self.assertRaises(ValueError):
+            plan_post_process({**SHOT, "width": 2560, "height": 1472}, "interpolate", "rife")
 
     def test_lanczos_runs_on_interpolated_clips_but_not_longer(self):
         doubled = {**SHOT, "fps": 48.0, "frames": 241}
@@ -124,8 +137,9 @@ class VisualEnhancerPlanTests(unittest.TestCase):
         self.assertEqual((land["width"], land["fps"], land["frames"]), (1920, 60.0, 300))
 
     def test_only_the_tested_sources(self):
-        for method, operation in (("rtx", "upscale"), ("fsr3", "interpolate")):
-            for source in ({**self.LAND, "height": 1088}, {**self.LAND, "frames": 151},
+        for method, operation, too_big in (("rtx", "upscale", {**self.LAND, "height": 1088}),
+                                           ("fsr3", "interpolate", {**self.LAND, "width": 2560, "height": 1472})):
+            for source in (too_big, {**self.LAND, "frames": 151},
                            {**SHOT, "fps": 48.0, "frames": 247}):
                 with self.assertRaises(ValueError, msg=(method, source)):
                     plan_post_process(source, operation, method, 2560)
