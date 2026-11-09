@@ -3,6 +3,7 @@
   "profile": "full",
   "projects_dir": "state/projects",
   "bot_image_workflows_dir": "workflows/bot_images",
+  "visual_enhancer_cli": "",
   "app": {
     "host": "127.0.0.1",
     "port": 8787

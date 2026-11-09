@@ -68,7 +68,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, Omni (follows a song or a video's moves), or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
-| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos or Real-ESRGAN ×2 for 2560 px; clips of up to 5 s and 1080p, uploads too (see below) |
+| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; clips of up to 5 s and 1080p, uploads too (see below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -488,6 +488,43 @@ Limits (the server refuses anything else and says why):
 Why these limits: FILM at 2560×1456 spilled past 10 GB (12+ minutes per window), and longer clips need
 the lab's frame windows, which the app does not have. The models are in `models/frame_interpolation`
 and `models/upscale_models` of the app's ComfyUI.
+
+### RTX VSR and FSR 3 through Visual Enhancer (issue #39, 2026-11-09)
+
+Two more choices appear in the same sheet when Visual Enhancer is set up: **RTX VSR** (upscale) and
+**FSR 3** (smoothing). They are not ComfyUI nodes. The worker runs the user's own `VE_CLI.exe` from
+[Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) v22.0 in the same job queue, after
+freeing ComfyUI's models, with a 15-minute limit; a cancel stops the process.
+
+Setup: Visual Enhancer's license forbids redistributing it, so the app never downloads or ships it.
+Download it yourself and set `visual_enhancer_cli` in the ignored `config.local.json` to the full path of
+`VE_CLI.exe`. Without it the choices are hidden and the server refuses them with that reason.
+
+Measured as app jobs on the RTX 3080 (uploads to an isolated test instance, 2026-11-09). Time is the
+whole job, VE plus the crop and encode; VRAM is the whole-GPU peak. Every output passed `ffprobe` and a
+full FFmpeg decode with the source's sound:
+
+| Method | 5 s, 1632×928, 24 fps | 5 s, 1920×1080, 30 fps (also 1080×1920) |
+| --- | --- | --- |
+| RTX VSR to 2560 wide | 16–18 s · 1.6 GB → 2560×1440 | 18 s · 1.7 GB → 2560×1440 / 1440×2560 |
+| RTX VSR to 1920 wide | 10 s · 1.5 GB → 1920×1080 | not offered (already that size) |
+| FSR 3 frame generation ×2 | 6–10 s · 0.9 GB → 48 fps, 248 frames | 13 s · 1.0 GB → 60 fps, 300 frames |
+
+For comparison on the same 1632×928 shots: Real-ESRGAN takes about 232 s and RIFE about 21 s.
+
+- RTX VSR kept natural skin where Real-ESRGAN retouched it, and it is about 20× faster. It is the
+  recommended upscaler when Visual Enhancer is installed.
+- FSR 3 is four times faster than RIFE, but on fast action (the Pika jump) the face smeared and edges
+  broke into blocks, and a slow face showed small specks. It looked good on the slow Missed Bus shot.
+  Check fast shots before using it; RIFE stays the default.
+- Limits: sources up to 1920×1080, 30 fps and 150 frames, the tested range. They do not run on a smoothed
+  clip (not tested); to do both, smooth with RIFE or FILM and upscale with Lanczos or Real-ESRGAN.
+- VE stretches to the size it is given, so the app renders RTX VSR at the source's own shape (for example
+  2560×1456) and then cuts the center to the standard size like the other upscalers. VE re-encodes the
+  sound at a lower bitrate, so the app copies the source's original track back. The final file is H.264
+  CRF 12 like the ComfyUI jobs.
+- Not offered: DLSS frame generation (refused on RTX 30 cards), PeakMagnetar (about 2.5 hours per shot),
+  DLSS Super Resolution (its modes fix the output at 2× or more, so it needs another resize).
 
 ## Singularity, Pika and the official LTX templates
 

@@ -35,7 +35,7 @@ from .config import (OMNI_FILES, PIKA_FILES, PIKA_TURBO4_FILES, PIKA_REF2VA_LORA
                      CODEX_DEFAULT_EFFORT, CODEX_DEFAULT_MODEL, CODEX_DEFAULT_RUNTIME,
                      AUDIOLOCK_NODE_DIR, MANAGED_SKILLS, PRODUCTIONS,
                      REF2VA_MODEL, REF2VA_TURBO_LORA, REFERENCE_10S_MARKER, ROOT, STATE,
-                     SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS)
+                     SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS, visual_enhancer_ready)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
 from .generation import (LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, OMNI_DURATION_RANGE, PIKA_TURBO4_MAX_DURATION, SKIN_DURATION_RANGE,
@@ -53,8 +53,8 @@ from .library import (assign_asset, create_folder, create_project, delete_folder
                       rename_asset, rename_folder, rename_project, resolve_asset_path,
                       validate_location)
 from .media import extract_last_frame
-from .post_process import (UPLOAD_MAX_BYTES, UPLOAD_TYPES, aspect_label, plan_post_process, post_title,
-                           prepare_upload, probe_video)
+from .post_process import (UPLOAD_MAX_BYTES, UPLOAD_TYPES, VISUAL_ENHANCER_METHODS, aspect_label, plan_post_process,
+                           post_title, prepare_upload, probe_video)
 from .security import COOKIE, new_token, require_csrf
 from .agents import agent_health, model_catalog, process_manager
 from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
@@ -649,6 +649,7 @@ def public_health():
         "clipproj_version": CLIPPROJ_NODE_COMMIT[:12],
         "audio_lock_ready": audio_lock_ready(),
         "turbo_v4_ready": (MODELS / "loras" / TURBO_LORAS["v4"]).exists(),
+        "visual_enhancer_ready": visual_enhancer_ready(),
         "reference_turbo_ready": (MODELS / "loras" / REF2VA_TURBO_LORA).exists(),
         "active_job": worker.current_job,
         "active_sequence": worker.current_sequence,
@@ -3181,6 +3182,13 @@ async def cancel_job(request: Request, job_id: str):
     return {"ok": True}
 
 
+def require_visual_enhancer(method: str):
+    """RTX VSR and FSR 3 run through the user's own VE_CLI.exe; refuse them clearly when it is not set up."""
+    if method in VISUAL_ENHANCER_METHODS and not visual_enhancer_ready():
+        raise HTTPException(400, "Visual Enhancer is not set up: point visual_enhancer_cli in config.local.json "
+                                 "at your VE_CLI.exe (it is not bundled with the app)")
+
+
 class PostProcessBody(BaseModel):
     operation: str
     method: str
@@ -3191,6 +3199,7 @@ class PostProcessBody(BaseModel):
 async def post_process_job(request: Request, job_id: str, body: PostProcessBody):
     """Queue an upscale or interpolation of a finished video as its own job, filed next to the source."""
     require_csrf(request)
+    require_visual_enhancer(body.method)
     source = get_job(job_id, public=False)
     if not source:
         raise HTTPException(404, "Job not found")
@@ -3217,6 +3226,7 @@ async def post_process_upload(request: Request, video: UploadFile = File(...), o
                               method: str = Form(...), long_side: int | None = Form(None)):
     """Queue an upscale or interpolation of an uploaded video (same tested limits as finished jobs)."""
     require_csrf(request)
+    require_visual_enhancer(method)
     if video.content_type not in UPLOAD_TYPES:
         raise HTTPException(400, "Only MP4, MOV, WebM or MKV videos are allowed")
     new_id = uuid.uuid4().hex

@@ -11,6 +11,11 @@ remake, The Last Fold, Pirate & Inventor) is allowed:
   at 1080p it peaked at 9.77 GB, the edge where this card spills. Lanczos: up to 300 frames (a 5 s 60 fps clip, 73 s).
   Smoothing takes sources up to 30 fps. Longer clips are refused until they are tested; FILM at 2560x1456 spilled
   past 10 GB (12+ min per window).
+- Visual Enhancer v22.0 (issue #39, lab 2026-11-08/09), run through the user's own VE_CLI.exe, not ComfyUI:
+  RTX Video Super Resolution upscale (11-13 s per shot to 2560 wide, ~1.5 GB; 1920 wide 7 s) and FSR 3 frame
+  generation x2 (5-7.5 s, <1 GB). Tested on 1632x928 24 fps (124 frames) and 1920x1080 / 1080x1920 30 fps
+  (150 frames); as app jobs, with the crop and encode, 6-18 s and 0.9-1.7 GB. Its
+  license forbids redistribution, so the app never ships it: `visual_enhancer_cli` in config.local.json points at it.
 """
 from __future__ import annotations
 
@@ -21,10 +26,15 @@ from pathlib import Path
 
 INTERPOLATION_MODELS = {"rife": "rife_v4.26.safetensors", "film": "film_net_fp16.safetensors"}
 UPSCALE_MODELS = {"gan": "RealESRGAN_x2plus.pth"}
-METHODS = {"interpolate": ("rife", "film"), "upscale": ("lanczos", "gan")}
-METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2"}
+METHODS = {"interpolate": ("rife", "film", "fsr3"), "upscale": ("lanczos", "gan", "rtx")}
+METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2",
+                 "rtx": "RTX Video Super Resolution", "fsr3": "FSR 3 frame generation"}
+# Methods the worker runs through Visual Enhancer's VE_CLI.exe instead of a ComfyUI graph.
+VISUAL_ENHANCER_METHODS = ("rtx", "fsr3")
+VISUAL_ENHANCER_TIMEOUT_SECONDS = 15 * 60  # the lab runs took 5-19 s; a hung run must not hold the queue
 
 MAX_SOURCE = {"rife": (1920 * 1080, "1920x1080"), "gan": (1920 * 1080, "1920x1080"),
+              "rtx": (1920 * 1080, "1920x1080"), "fsr3": (1920 * 1080, "1920x1080"),
               "film": (1632 * 928, "1632x928 (1.5 MP); at 1080p it nearly fills the 10 GB card, use RIFE")}
 TESTED_MAX_FRAMES = 150             # one 5 s clip at 30 fps, whole-clip jobs
 GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,
@@ -98,7 +108,9 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
     if operation == "interpolate":
         if fps <= 0 or fps > INTERPOLATE_MAX_FPS:
             raise ValueError(f"Smoothing was tested on sources up to 30 fps; this one is {fps:g} fps")
-        options.update(width=width, height=height, fps=round(fps * 2, 3), frames=frames * 2 - 1)
+        # FrameInterpolate adds a frame between each pair; FSR 3 also generates one after the last frame.
+        options.update(width=width, height=height, fps=round(fps * 2, 3),
+                       frames=frames * 2 if method == "fsr3" else frames * 2 - 1)
     else:
         if long_side not in UPSCALE_LONG_SIDES:
             raise ValueError("Upscale targets: long side 1920 or 2560")
@@ -110,6 +122,51 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         options.update(width=target[0], height=target[1], fps=round(fps, 3), frames=frames, long_side=long_side,
                        crop_percent=crop_percent(width, height, *target))
     return options
+
+
+def uses_visual_enhancer(options: dict) -> bool:
+    return options.get("method") in VISUAL_ENHANCER_METHODS
+
+
+def visual_enhancer_size(options: dict) -> tuple[int, int]:
+    """RTX VSR output size with the source's own shape.
+
+    VE stretches to whatever --size it gets, so it renders at the source's shape and the finishing FFmpeg pass
+    center-crops to the target, the same way the ComfyUI upscalers do (ImageScale crop=center).
+    """
+    width, height = options["source_width"], options["source_height"]
+    scale = max(options["width"] / width, options["height"] / height)
+    return (max(options["width"], round(width * scale / 2) * 2), max(options["height"], round(height * scale / 2) * 2))
+
+
+def visual_enhancer_command(cli: Path, options: dict, source: Path, output: Path) -> list[str]:
+    """VE_CLI arguments for one job (the lab runs used exactly these engines and flags)."""
+    if options["method"] == "rtx":
+        width, height = visual_enhancer_size(options)
+        action = ["upscale", str(source), "--engine", "rtx", "--size", f"{width}x{height}"]
+    elif options["method"] == "fsr3":
+        action = ["interpolate", str(source), "--interpolator", "fsr3", "--multiplier", "2"]
+    else:
+        raise ValueError(f"{options['method']} is not a Visual Enhancer method")
+    # "best" is visually lossless and a third of "max"; the finishing pass re-encodes at the app's CRF 12 anyway.
+    return [str(cli), *action, "-o", str(output), "--codec", "h264", "--container", "mp4", "--quality", "best",
+            "--json"]
+
+
+def visual_enhancer_finish_command(options: dict, rendered: Path, source: Path, output: Path) -> list[str]:
+    """Crop to the target size, encode like SaveVideo (H.264 CRF 12) and copy the source's original sound.
+
+    VE re-encodes the sound at a lower bitrate, so its audio track is dropped in favour of the source's.
+    """
+    width, height = options["width"], options["height"]
+    command = ["ffmpeg", "-v", "error", "-y", "-i", str(rendered)]
+    if options.get("audio"):
+        command += ["-i", str(source)]
+    command += ["-map", "0:v:0", "-vf", f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2,setsar=1",
+                "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    if options.get("audio"):
+        command += ["-map", "1:a:0", "-c:a", "copy", "-shortest"]
+    return [*command, "-movflags", "+faststart", str(output)]
 
 
 def post_node_classes(options: dict) -> set[str]:

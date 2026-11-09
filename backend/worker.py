@@ -1,6 +1,9 @@
 import asyncio
 import json
 import re
+import shutil
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -14,7 +17,7 @@ from .config import (AUDIOLOCK_NODE_DIR, AUDIO_VAE, CLIPPROJ_NODE_DIR, CLIPPROJ_
                      FUSED_SLA_MODEL, FUSED_SLA_NODE_DIR, FUSED_VIDEO_VAE,
                      FUSED_WORKFLOW_FILES, INPUT, LTX_MODEL_FILES, LTX_REFERENCE_FILES,
                      LOGS, MODELS, OMNI_FILES, PIKA_FILES, PIKA_TURBO4_FILES, REF2VA_MODEL, REF2VA_TURBO_LORA, SEQUENCES, SINGULARITY_FULL_MODEL,
-                     SKIN_FILES, SKIN_MODELS)
+                     SKIN_FILES, SKIN_MODELS, OUTPUT, TEMP, VISUAL_ENHANCER_CLI, visual_enhancer_ready)
 from .db import (connect, get_job, get_sequence, historical_generation_seconds,
                  now_iso, update_job, update_sequence)
 from .diagnostics import (JobTimeline, comfy_log_lines, host_snapshot, keep_samples,
@@ -23,7 +26,9 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
-from .post_process import post_model_files, post_node_classes, post_process_workflow
+from .post_process import (VISUAL_ENHANCER_TIMEOUT_SECONDS, post_model_files, post_node_classes,
+                           post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
+                           visual_enhancer_finish_command)
 from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         apply_int8_decode, int8_decode_needed,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
@@ -723,6 +728,12 @@ class QueueWorker:
         if estimated_total:
             update_job(job["id"], phase="starting", eta_seconds=round(estimated_total, 1))
             self._update_parent_progress(job, "starting", 0, estimated_total)
+        if job["engine"] == "post":
+            post_options = json.loads(job.get("post_options_json") or "null")
+            if post_options and uses_visual_enhancer(post_options):
+                # RTX VSR / FSR 3 are not ComfyUI nodes: the worker runs VE_CLI.exe itself, in the same queue.
+                await self._run_visual_enhancer_job(job, post_options, estimated_total)
+                return
         await self.comfy.ensure_started()
         runtime = await self.comfy.runtime_metadata()
         runtime["job"] = {
@@ -1453,6 +1464,115 @@ class QueueWorker:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 monitor_task.cancel()
                 await asyncio.gather(monitor_task, return_exceptions=True)
+
+    @staticmethod
+    def _kill_process_tree(process: subprocess.Popen):
+        if process.poll() is not None:
+            return
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=30)
+        else:
+            process.kill()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+
+    async def _run_visual_enhancer_job(self, job: dict, options: dict, estimated_total: float | None):
+        """Upscale (RTX VSR) or smooth (FSR 3) one video with the user's own Visual Enhancer VE_CLI.exe (issue #39).
+
+        VE shares the GPU with ComfyUI, so ComfyUI's models are freed first. It runs as an owned child process with a
+        time limit and stops on cancel; FFmpeg then crops to the target and copies the source's original sound.
+        """
+        if not visual_enhancer_ready():
+            raise RuntimeError("Visual Enhancer is not set up: point visual_enhancer_cli in config.local.json at "
+                               "your VE_CLI.exe")
+        source = INPUT / (job.get("input_name") or "")
+        if not job.get("input_name") or not source.is_file():
+            raise RuntimeError("The source video for this post-process job is missing")
+        if await self.comfy.ready():
+            await self._free_comfy_models()
+        else:
+            self.loaded_engine_family = None
+
+        prefix = f"h3_bridge_{job['id']}"
+        work = TEMP / f"{prefix}_visual_enhancer"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        rendered = work / "rendered.mp4"
+        output = OUTPUT / f"{prefix}_00001_.mp4"
+        command = visual_enhancer_command(VISUAL_ENHANCER_CLI, options, source, rendered)
+        runtime = {
+            "job": {"mode": job["mode"], "engine": job["engine"], "method": options["method"],
+                    "width": job["width"], "height": job["height"], "duration": job["duration"],
+                    "seed": job.get("seed"), "no_audio": bool(job.get("no_audio"))},
+            "visual_enhancer": {"cli": str(VISUAL_ENHANCER_CLI), "arguments": command[1:]},
+        }
+        update_job(job["id"], status="running", phase="sampling", progress=0, step=0, total_steps=0,
+                   runtime=runtime, eta_seconds=round(estimated_total, 1) if estimated_total else None)
+        started = time.monotonic()
+        peak: dict = {}
+        samples: list[dict] = []
+        stdout_path, stderr_path = work / "ve_stdout.txt", work / "ve_stderr.txt"
+        try:
+            with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                process = subprocess.Popen(
+                    command, stdout=stdout, stderr=stderr, cwd=str(work),
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                try:
+                    while process.poll() is None:
+                        elapsed = time.monotonic() - started
+                        if job["id"] in self.cancelled:
+                            raise RuntimeError("Generation canceled")
+                        if elapsed > VISUAL_ENHANCER_TIMEOUT_SECONDS:
+                            raise RuntimeError(f"Visual Enhancer did not finish within "
+                                               f"{VISUAL_ENHANCER_TIMEOUT_SECONDS // 60} minutes; it was stopped")
+                        sample = await asyncio.to_thread(gpu_sample, None)
+                        if sample:
+                            samples.append({"at_seconds": round(elapsed, 1), **sample})
+                            if (sample.get("vram_used_mib") or 0) > (peak.get("vram_used_mib") or 0):
+                                peak = sample
+                        if estimated_total:
+                            fraction = min(0.95, elapsed / estimated_total)
+                            update_job(job["id"], progress=round(fraction, 3),
+                                       eta_seconds=round(max(0.0, estimated_total - elapsed), 1))
+                        await asyncio.sleep(1)
+                finally:
+                    await asyncio.to_thread(self._kill_process_tree, process)
+            ve_seconds = round(time.monotonic() - started, 1)
+            report = stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+            errors = stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+            try:
+                result = json.loads(report.splitlines()[-1]) if report else {}
+            except json.JSONDecodeError:
+                result = {"raw": report[-2000:]}
+            runtime["visual_enhancer"].update(exit_code=process.returncode, seconds=ve_seconds, result=result)
+            update_job(job["id"], runtime=runtime)
+            if process.returncode != 0 or not rendered.is_file():
+                item_errors = [item.get("error") for item in result.get("items") or [] if item.get("error")]
+                stderr_lines = [line for line in errors.splitlines() if line.strip()]
+                detail = (item_errors or stderr_lines[-1:] or [f"exit code {process.returncode}"])[-1]
+                raise RuntimeError("Visual Enhancer failed: " + str(detail)[:2000])
+
+            update_job(job["id"], phase="processing", progress=0.97)
+            finish = await asyncio.to_thread(
+                subprocess.run, visual_enhancer_finish_command(options, rendered, source, output),
+                capture_output=True, text=True, timeout=600,
+            )
+            if finish.returncode:
+                output.unlink(missing_ok=True)
+                raise RuntimeError("Finishing the Visual Enhancer video failed: " + finish.stderr.strip()[-1500:])
+            update_job(job["id"], status="verifying", phase="verifying", progress=1, eta_seconds=0)
+            probe = await asyncio.to_thread(media_probe, output, require_audio=not bool(job.get("no_audio")))
+            metrics = {"generation_seconds": round(time.monotonic() - started, 1),
+                       "visual_enhancer_seconds": ve_seconds, "peak_gpu": peak,
+                       "samples": keep_samples(samples), "ffprobe": probe}
+            update_job(job["id"], status="completed", phase="completed", progress=1, eta_seconds=0,
+                       output_path=str(output), metrics=metrics, finished_at=now_iso(), error=None)
+            await asyncio.to_thread(finalize_completed_asset, "job", job["id"])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     async def assemble_sequence(self, sequence_id: str):
         sequence = get_sequence(sequence_id, public=False)

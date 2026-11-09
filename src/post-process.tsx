@@ -13,17 +13,21 @@ export type PostOptions = {
 type SourceJob = { id: string; width: number; height: number; duration: number }
 type SourceSize = { width: number; height: number; duration: number }
 
-const METHODS: Record<PostOperation, { id: string; label: string; detail: string }[]> = {
+// `visualEnhancer`: runs through the user's own Visual Enhancer VE_CLI.exe (issue #39), not ComfyUI; offered only
+// when the server reports it is set up (visual_enhancer_cli in config.local.json).
+const METHODS: Record<PostOperation, { id: string; label: string; detail: string; visualEnhancer?: boolean }[]> = {
   interpolate: [
     { id: 'rife', label: 'RIFE 4.26', detail: 'מהיר · כ־20 שניות לשוט של 5 שניות · זיכרון נמוך' },
     { id: 'film', label: 'FILM', detail: 'איטי יותר · כ־80 שניות לשוט של 5 שניות · עד 1.5MP' },
+    { id: 'fsr3', label: 'FSR 3', detail: 'הכי מהיר · כ־5 שניות לשוט · בתנועה מהירה עלול להיות שבור · Visual Enhancer', visualEnhancer: true },
   ],
   upscale: [
     { id: 'lanczos', label: 'Lanczos', detail: 'מהיר · כ־25 שניות לשוט · מגדיל בלי להמציא פרטים' },
     { id: 'gan', label: 'Real-ESRGAN ×2', detail: 'כ־4 דקות לשוט · מחדד קצוות ומרקמים' },
+    { id: 'rtx', label: 'RTX VSR', detail: 'הכי מהיר · כ־12 שניות לשוט · עור טבעי · Visual Enhancer', visualEnhancer: true },
   ],
 }
-export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2' }
+export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2', rtx: 'RTX VSR', fsr3: 'FSR 3' }
 const LONG_SIDES = [1920, 2560]
 const UPLOAD_ACCEPT = 'video/mp4,video/quicktime,video/webm,video/x-matroska'
 
@@ -45,8 +49,8 @@ export function cropPercent(width: number, height: number, target: { width: numb
 }
 
 // Pass `job` for a finished video card, or leave it out to upload an external video.
-export function PostProcessSheet({ job, operation: initialOperation, csrf, onClose, onQueued }: {
-  job?: SourceJob; operation: PostOperation; csrf: string; onClose: () => void; onQueued: () => void
+export function PostProcessSheet({ job, operation: initialOperation, csrf, visualEnhancer = false, onClose, onQueued }: {
+  job?: SourceJob; operation: PostOperation; csrf: string; visualEnhancer?: boolean; onClose: () => void; onQueued: () => void
 }) {
   const external = !job
   const [operation, setOperation] = useState<PostOperation>(initialOperation)
@@ -128,7 +132,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, onClo
       </div>}
       {source && <p dir="ltr" className="post-sheet-source">{source.width}×{source.height} · {source.duration.toFixed(2)} s</p>}
       <div className="post-sheet-options" role="radiogroup" aria-label="שיטה">
-        {METHODS[operation].map(item => <button key={item.id} type="button" role="radio" aria-checked={method === item.id}
+        {METHODS[operation].filter(item => visualEnhancer || !item.visualEnhancer).map(item => <button key={item.id} type="button" role="radio" aria-checked={method === item.id}
           className={method === item.id ? 'active' : ''} onClick={() => setMethod(item.id)}>
           <strong dir="ltr">{item.label}</strong><small>{item.detail}</small>
         </button>)}
@@ -144,7 +148,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, onClo
           </button>
         })}
       </div>}
-      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות, עד 1080p ועד 30fps (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.</p>
+      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות, עד 1080p ועד 30fps (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>
     </form>
