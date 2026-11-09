@@ -2449,7 +2449,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.status === 'queued' && <><button onClick={onUp} disabled={index === 0}><ArrowUp size={17} /></button><button onClick={onDown} disabled={index === (total || 0) - 1}><ArrowDown size={17} /></button></>}
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
-        {onPostProcess && engine !== 'post' && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
+        {onPostProcess && (engine !== 'post' || job.mode === 'upscale') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
         {onPostProcess && (engine !== 'post' || job.mode === 'interpolate') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}

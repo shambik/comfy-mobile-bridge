@@ -470,7 +470,8 @@ with its sound:
 
 Limits (the server refuses anything else and says why):
 
-- RIFE and Real-ESRGAN take sources up to 1920×1080 (either way round). FILM takes up to 1632×928.
+- Real-ESRGAN takes sources up to 1920×1080 (either way round). RIFE and FSR 3 take up to 2560×1456, so an
+  upscaled clip can be smoothed too (issue #41). FILM takes up to 1632×928.
   At 1080p FILM peaked at 9.77 GB, the edge where this card spills into shared memory.
 - RIFE, FILM and Real-ESRGAN take up to 150 frames (5 s at 30 fps). Lanczos takes up to 300 frames
   (5 s at 60 fps, or a smoothed 30 fps clip). Real-ESRGAN also takes a smoothed 48 fps shot (up to 248
@@ -482,7 +483,10 @@ Limits (the server refuses anything else and says why):
   exactly 1.78, so up to 2.6% is cut from the center to fit; 1632×928 loses 1.1%. Standard sizes keep
   every upscaled shot the same size, whatever engine made it, and match what video sites expect. Other
   shapes (1:1, 4:3) keep their own proportions.
-- To do both on one shot, smooth first, then upscale the result (Lanczos, or Real-ESRGAN up to 1632×928).
+- To do both on one shot, either order works with RIFE or FSR 3: smooth first, then upscale the result (Lanczos,
+  or Real-ESRGAN up to 1632×928), or upscale first and smooth the 2560 clip. Whole 2560×1440 shots, measured in the
+  lab on 2026-11-09: RIFE 37–47 s at 2.3 GB, FSR 3 13–16 s at 1.5 GB (124–141 frames, 24 → 48 fps). FILM at
+  2560×1456 used 9.8 GB plus 4 GB of shared memory (about 1 h 16 min per 15 s cut), so it is not offered there.
   In the lab, smoothing first was about 10× faster than upscaling first.
 
 Why these limits: FILM at 2560×1456 spilled past 10 GB (12+ minutes per window), and longer clips need
@@ -517,8 +521,9 @@ For comparison on the same 1632×928 shots: Real-ESRGAN takes about 232 s and RI
 - FSR 3 is four times faster than RIFE, but on fast action (the Pika jump) the face smeared and edges
   broke into blocks, and a slow face showed small specks. It looked good on the slow Missed Bus shot.
   Check fast shots before using it; RIFE stays the default.
-- Limits: sources up to 1920×1080, 30 fps and 150 frames, the tested range. They do not run on a smoothed
-  clip (not tested); to do both, smooth with RIFE or FILM and upscale with Lanczos or Real-ESRGAN.
+- Limits: RTX VSR takes sources up to 1920×1080, FSR 3 up to 2560×1456 (so it can smooth an upscaled clip,
+  issue #41); both up to 30 fps and 150 frames, the tested range. RTX VSR does not run on a smoothed clip (not
+  tested): upscale first with RTX VSR, then smooth the 2560 clip with RIFE or FSR 3.
 - VE stretches to the size it is given, so the app renders RTX VSR at the source's own shape (for example
   2560×1456) and then cuts the center to the standard size like the other upscalers. VE re-encodes the
   sound at a lower bitrate, so the app copies the source's original track back. The final file is H.264
