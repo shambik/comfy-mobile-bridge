@@ -30,12 +30,12 @@ def _create_jobs_table(db):
     CREATE TABLE jobs (
         id TEXT PRIMARY KEY,
         prompt TEXT NOT NULL,
-        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync','interpolate','upscale')),
+        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync','interpolate','upscale','swap')),
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         audio_start REAL NOT NULL DEFAULT 0,
         audio_duration REAL,
-        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni','post')),
-        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4','rife','film','lanczos','gan','rtx','fsr3')),
+        engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni','post','swap')),
+        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4','rife','film','lanczos','gan','rtx','fsr3','viggle','akatz','swap_join')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla','int8')),
         ltx_reference_model TEXT CHECK(ltx_reference_model IS NULL OR ltx_reference_model IN ('2.5','2.3')),
@@ -44,6 +44,7 @@ def _create_jobs_table(db):
         skin_options_json TEXT,
         ltx_recipe TEXT,
         post_options_json TEXT,
+        swap_options_json TEXT,
         encoder TEXT NOT NULL CHECK(encoder IN ('native','clipproj')),
         steps INTEGER NOT NULL,
         width INTEGER NOT NULL,
@@ -90,6 +91,7 @@ def _create_jobs_table(db):
               (engine='pika' AND steps IN (4,6)) OR
               (engine='omni' AND steps = 8) OR
               (engine='post' AND steps = 1) OR
+              (engine='swap' AND steps IN (1,6,8)) OR
               (engine IN ('standard','spectrum') AND steps BETWEEN 8 AND 30)),
         CHECK((engine='post' AND width BETWEEN 256 AND 4096 AND height BETWEEN 256 AND 4096 AND
                width % 2 = 0 AND height % 2 = 0 AND width * height <= 3800000) OR
@@ -198,7 +200,7 @@ def _rebuild_jobs_table(db):
 
     columns = [
         "id", "prompt", "mode", "duration", "audio_start", "audio_duration", "engine", "workflow_variant", "turbo_profile", "attention_mode",
-        "ltx_reference_model", "ltx_sharp_decode", "ltx_calm_sampler", "skin_options_json", "ltx_recipe", "post_options_json", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
+        "ltx_reference_model", "ltx_sharp_decode", "ltx_calm_sampler", "skin_options_json", "ltx_recipe", "post_options_json", "swap_options_json", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
         "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
@@ -288,7 +290,7 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "width % 2 = 0 AND height % 2 = 0" not in table_sql or "'rtx','fsr3'" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "width % 2 = 0 AND height % 2 = 0" not in table_sql or "'rtx','fsr3'" not in table_sql or "'swap_join'" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
@@ -389,6 +391,10 @@ def row_dict(row):
         item["post_options"] = json.loads(item.pop("post_options_json", None) or "null")
     except json.JSONDecodeError:
         item["post_options"] = None
+    try:
+        item["swap_options"] = json.loads(item.pop("swap_options_json", None) or "null")
+    except json.JSONDecodeError:
+        item["swap_options"] = None
     output_path = item.pop("output_path", None)
     for private_key in (
         "input_path", "input_name", "reference_images_json", "reference_videos_json",

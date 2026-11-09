@@ -1515,3 +1515,32 @@ def workflow_node_values(workflow: dict, text_limit: int = 240) -> list[dict]:
     return [{"id": str(node_id), "class_type": str(workflow[node_id].get("class_type")),
              "inputs": {key: value(entry) for key, entry in (workflow[node_id].get("inputs") or {}).items()}}
             for node_id in sorted(workflow, key=order)]
+
+
+def graph_spec_workflow(spec: dict, prefix: str) -> dict:
+    """A ComfyUI API graph from a graph spec (character swap, issue #46): a base graph ("base", a node dict, or "file",
+    an API graph on disk), then "add" nodes, "set" inputs ("node.input": value), "remove" nodes and "unset" inputs.
+    The graph must have exactly one SaveVideo, which gets the job's prefix."""
+    if "base" in spec:
+        nodes = json.loads(json.dumps(spec["base"]))
+    else:
+        nodes = json.loads(Path(spec["file"]).read_text(encoding="utf-8"))
+    for node_id, node in (spec.get("add") or {}).items():
+        if str(node_id) in nodes:
+            raise ValueError(f"Swap graph: node {node_id!r} already exists")
+        nodes[str(node_id)] = node
+    for key, value in (spec.get("set") or {}).items():
+        node_id, _, field = key.partition(".")
+        if node_id not in nodes or not field:
+            raise ValueError(f"Swap graph: no node {node_id!r} for {key!r}")
+        nodes[node_id]["inputs"][field] = value
+    for node_id in spec.get("remove") or []:
+        nodes.pop(str(node_id), None)
+    for key in spec.get("unset") or []:
+        node_id, _, field = key.partition(".")
+        nodes.get(node_id, {}).get("inputs", {}).pop(field, None)
+    saves = [node for node in nodes.values() if node["class_type"] == "SaveVideo"]
+    if len(saves) != 1:
+        raise ValueError(f"Swap graph: expected one SaveVideo, found {len(saves)}")
+    saves[0]["inputs"]["filename_prefix"] = prefix
+    return nodes

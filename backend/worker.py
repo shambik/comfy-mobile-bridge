@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import json
 import re
 import shutil
@@ -30,7 +31,7 @@ from .post_process import (VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, c
                            post_model_files, post_node_classes,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
                            visual_enhancer_finish_command)
-from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
+from .workflows import (graph_spec_workflow, official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         apply_int8_decode, int8_decode_needed,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
@@ -72,6 +73,7 @@ def history_retry_phase(sampling_started: float | None) -> dict:
 class QueueWorker:
     def __init__(self):
         self.comfy = ComfyClient()
+        self.after_swap_hooks: list = []   # backend.main registers character_swap.follow
         self.task: asyncio.Task | None = None
         self.wake = asyncio.Event()
         self.stopping = False
@@ -98,7 +100,7 @@ class QueueWorker:
         if job["engine"] == "fused_sla":
             return "fused_sla"
         # Their models are not the Turbo family's: unload when switching, as between LTX and H3.
-        if job["engine"] in ("singularity", "pika", "omni", "post"):
+        if job["engine"] in ("singularity", "pika", "omni", "post", "swap"):
             return job["engine"]
         return "h3"
 
@@ -516,6 +518,16 @@ class QueueWorker:
             self.cancelled.discard(job["id"])
             self.current_job = None
             self.current_sequence = None
+            if job.get("engine") == "swap":
+                await self.run_after_swap_hooks()
+
+    async def run_after_swap_hooks(self):
+        """Character swap: the next window job, the join job or the finished swap (backend.character_swap.follow)."""
+        for hook in self.after_swap_hooks:
+            try:
+                await asyncio.to_thread(hook)
+            except Exception:
+                logging.exception("Character swap follow-up failed")
 
     def _take_recovered(self):
         if not self.recovered_prompts:
@@ -772,7 +784,21 @@ class QueueWorker:
 
         ltx_workflow = None
         post_options = json.loads(job.get("post_options_json") or "null") if job["engine"] == "post" else None
-        if job["engine"] == "post":
+        swap_options = json.loads(job.get("swap_options_json") or "null") if job["engine"] == "swap" else None
+        if job["engine"] == "swap":
+            # Character swap (issue #46): its graph comes from the swap, with its own node classes and models.
+            if not swap_options or not swap_options.get("graph"):
+                raise RuntimeError("Swap job has no graph")
+            graph_file = swap_options["graph"].get("file")
+            if graph_file and not Path(graph_file).is_file():
+                raise RuntimeError("akatz's graph is missing: install the H3 Relay node pack in ComfyUI "
+                                   f"({graph_file})")
+            required = {node["class_type"] for node in graph_spec_workflow(swap_options["graph"], "check").values()}
+            missing_files = [str(MODELS / folder / name) for folder, name in swap_options.get("models") or []
+                             if not (MODELS / folder / name).exists()]
+            if missing_files:
+                raise RuntimeError("Character swap model is not installed: " + ", ".join(missing_files))
+        elif job["engine"] == "post":
             # Upscale / interpolation of a finished video: none of the diffusion node classes are involved.
             if not post_options:
                 raise RuntimeError("Post-process job has no options")
@@ -992,7 +1018,10 @@ class QueueWorker:
         prefix = f"h3_bridge_{job['id']}"
         image_name = job.get("input_name")
         workflow_builder = "unknown"
-        if job["engine"] == "post":
+        if job["engine"] == "swap":
+            workflow_builder = "graph_spec_workflow"
+            workflow = graph_spec_workflow(swap_options["graph"], prefix)
+        elif job["engine"] == "post":
             workflow_builder = "post_process_workflow"
             workflow = post_process_workflow(post_options, job["input_name"], prefix)
         elif ltx_workflow is not None:
@@ -1183,6 +1212,11 @@ class QueueWorker:
                 client_id = existing.get("client_id") or client_id
         started = time.monotonic()
         sampling_started: float | None = None
+        # A swap job samples one ~5 s window after another; count the sampler runs so the card can say
+        # "window k/N" (the swap options give N and the steps per window).
+        swap_meta = json.loads(job.get("swap_options_json") or "null") if job["engine"] == "swap" else None
+        swap_window_steps = int(swap_meta.get("steps") or 0) if swap_meta and int(swap_meta.get("windows") or 0) > 1 else 0
+        swap_window = {"index": 0, "last": float("inf")}
         ws_ready = asyncio.Event()
         ws_stop = asyncio.Event()
 
@@ -1225,6 +1259,12 @@ class QueueWorker:
                     return
                 if sampling_started is None:
                     sampling_started = time.monotonic()
+                if swap_window_steps and total == swap_window_steps:
+                    if value < swap_window["last"]:           # a new window's sampler started
+                        swap_window["index"] += 1
+                        runtime.setdefault("swap", {})["window_now"] = swap_window["index"]
+                        update_job(job["id"], runtime=runtime)
+                    swap_window["last"] = value
                 fraction = min(1.0, max(0.0, value / total))
                 step = min(total, max(0, int(round(value))))
                 sample_elapsed = max(0.0, time.monotonic() - sampling_started)
