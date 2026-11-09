@@ -68,7 +68,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Keep a character, outfit or place from reference images | **Reference** mode: H3 Ref2VA, Omni (follows a song or a video's moves), or LTX with one reference sheet | H3: Turbo Ref2VA + sparse, or Fused Ref2VA (multi-reference takes up to 9 images, 3 videos and audio). LTX: landscape only, up to 5 s. A reference video makes H3 much slower (see below) |
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
-| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; clips of up to 5 s and 1080p, uploads too (see below) |
+| A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; sources up to 1080p, any length (long clips run in chunks inside one job), uploads too (see below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -473,10 +473,14 @@ Limits (the server refuses anything else and says why):
 - Real-ESRGAN takes sources up to 1920×1080 (either way round). RIFE and FSR 3 take up to 2560×1456, so an
   upscaled clip can be smoothed too (issue #41). FILM takes up to 1632×928.
   At 1080p FILM peaked at 9.77 GB, the edge where this card spills into shared memory.
-- RIFE, FILM and Real-ESRGAN take up to 150 frames (5 s at 30 fps). Lanczos takes up to 300 frames
-  (5 s at 60 fps, or a smoothed 30 fps clip). Real-ESRGAN also takes a smoothed 48 fps shot (up to 248
-  frames) when the shot is at most 1632×928. The Package lab ran this order in three 83-frame windows
-  (about 470 s); one pass took 454 s, so the app does not split the clip.
+- Any length (issue #44). One pass of the 18 s character-swap clip (432 frames, 736×1280, 24 fps)
+  worked for every method on the 3080: RIFE 42 s / 1.5 GB, FILM 143 s / 4.7 GB, Lanczos 110 s / 1.1 GB,
+  Real-ESRGAN ×2 to 1472×2560 530 s / 6.8 GB, RTX VSR 48 s / 1.9 GB, FSR 3 14 s / 1.3 GB. RIFE, FILM,
+  Real-ESRGAN and Lanczos keep the whole clip in RAM, so one pass takes up to that many frame-pixels
+  (432 frames at 736×1280, about 270 at 1632×928, never fewer than 150); a longer clip is cut into chunks
+  inside one job, each processed like a short clip, and joined in order with the source's sound. Smoothing
+  chunks also read the next chunk's first frame, so the frame between two chunks is still made. RTX VSR and
+  FSR 3 stream frame by frame and never split. The job card shows the chunk count (for example 2/3).
 - Smoothing takes sources up to 30 fps. A clip at 48 or 60 fps cannot be smoothed again.
 - Upscale targets have a 1920 or 2560 long side. Near-16:9 and near-9:16 sources get the standard sizes
   1920×1080 / 2560×1440 (or 1080×1920 / 1440×2560). The app's frame sizes are 1.75–1.83 wide, not

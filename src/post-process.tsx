@@ -148,7 +148,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
           </button>
         })}
       </div>}
-      <p className="post-sheet-note">נבדק על קליפים של עד 5 שניות ועד 30fps: הגדלה עד 1080p, החלקה עם RIFE ו־FSR 3 גם על קליפים מוגדלים עד 2560 (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>
+      <p className="post-sheet-note">קליפים ארוכים עוברים בחלקים בתוך עבודה אחת ומחוברים בסוף (RTX VSR ו־FSR 3 בלי חלוקה). מקורות עד 30fps: הגדלה עד 1080p, החלקה עם RIFE ו־FSR 3 גם על קליפים מוגדלים עד 2560 (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>
     </form>
