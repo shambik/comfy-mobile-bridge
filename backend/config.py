@@ -49,6 +49,16 @@ BOT_IMAGE_WORKFLOWS_DIR = _as_path(
 )
 
 
+# Optional: the user's own Visual Enhancer VE_CLI.exe for the RTX VSR / FSR 3 post-process methods (issue #39).
+# Its license forbids redistribution, so the app never downloads or bundles it; empty means the methods are off.
+_visual_enhancer_value = str(LOCAL_CONFIG.get("visual_enhancer_cli") or "").strip()
+VISUAL_ENHANCER_CLI = _as_path(_visual_enhancer_value, ROOT) if _visual_enhancer_value else None
+
+
+def visual_enhancer_ready() -> bool:
+    return bool(VISUAL_ENHANCER_CLI and VISUAL_ENHANCER_CLI.is_file())
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)

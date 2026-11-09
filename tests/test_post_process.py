@@ -1,12 +1,15 @@
 """Upscale / interpolation jobs (issue #37): tested limits, graphs, the API and the jobs table."""
+import asyncio
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -15,7 +18,8 @@ import backend.library as library
 from backend.db import connect, now_iso
 from backend.main import app, worker
 from backend.post_process import (aspect_label, crop_percent, plan_post_process, post_model_files, post_node_classes,
-                                  post_process_workflow, post_title, probe_video, upscale_size)
+                                  post_process_workflow, post_title, probe_video, upscale_size, uses_visual_enhancer,
+                                  visual_enhancer_command, visual_enhancer_finish_command, visual_enhancer_size)
 from backend.worker import QueueWorker
 
 SHOT = {"width": 1632, "height": 928, "fps": 24.0, "frames": 121, "duration": 5.042, "audio": True}
@@ -99,6 +103,66 @@ class PlanTests(unittest.TestCase):
                 plan_post_process(SHOT, "upscale", "lanczos", long_side)
         with self.assertRaises(ValueError):
             plan_post_process({**SHOT, "width": 1920, "height": 1088}, "upscale", "lanczos", 1920)
+
+
+class VisualEnhancerPlanTests(unittest.TestCase):
+    """RTX VSR and FSR 3 (issue #39): the lab-tested sources were 1632x928 24 fps and 1920x1080 30 fps, 5 s."""
+    LAND = {"width": 1920, "height": 1080, "fps": 30.0, "frames": 150, "duration": 5.0, "audio": True}
+
+    def test_rtx_upscales_to_the_standard_sizes(self):
+        options = plan_post_process(SHOT, "upscale", "rtx", 2560)
+        self.assertEqual((options["width"], options["height"], options["frames"]), (2560, 1440, 121))
+        self.assertTrue(uses_visual_enhancer(options))
+        self.assertEqual(plan_post_process(self.LAND, "upscale", "rtx", 2560)["width"], 2560)
+        self.assertEqual(plan_post_process(SHOT, "upscale", "rtx", 1920)["height"], 1080)
+        self.assertFalse(uses_visual_enhancer(plan_post_process(SHOT, "upscale", "gan", 2560)))
+
+    def test_fsr3_doubles_fps_and_adds_a_frame_after_the_last(self):
+        options = plan_post_process(SHOT, "interpolate", "fsr3")
+        self.assertEqual((options["fps"], options["frames"]), (48.0, 242))
+        land = plan_post_process(self.LAND, "interpolate", "fsr3")
+        self.assertEqual((land["width"], land["fps"], land["frames"]), (1920, 60.0, 300))
+
+    def test_only_the_tested_sources(self):
+        for method, operation in (("rtx", "upscale"), ("fsr3", "interpolate")):
+            for source in ({**self.LAND, "height": 1088}, {**self.LAND, "frames": 151},
+                           {**SHOT, "fps": 48.0, "frames": 247}):
+                with self.assertRaises(ValueError, msg=(method, source)):
+                    plan_post_process(source, operation, method, 2560)
+
+    def test_rtx_renders_at_the_source_shape_then_crops(self):
+        # VE stretches to --size, so it gets the source's own shape; the finishing pass crops to the target
+        for source, long_side, render in (((1632, 928), 2560, (2560, 1456)), ((1632, 928), 1920, (1920, 1092)),
+                                          ((928, 1632), 2560, (1456, 2560)), ((1920, 1080), 2560, (2560, 1440)),
+                                          ((768, 1024), 1920, (1440, 1920))):
+            options = plan_post_process({**SHOT, "width": source[0], "height": source[1]}, "upscale", "rtx", long_side)
+            self.assertEqual(visual_enhancer_size(options), render, source)
+            self.assertGreaterEqual(render[0], options["width"])
+            self.assertGreaterEqual(render[1], options["height"])
+
+    def test_commands_use_the_lab_engines(self):
+        cli, src, out = Path("C:/VE/VE_CLI.exe"), Path("in.mp4"), Path("out.mp4")
+        rtx = visual_enhancer_command(cli, plan_post_process(SHOT, "upscale", "rtx", 2560), src, out)
+        self.assertEqual(rtx[:7], [str(cli), "upscale", "in.mp4", "--engine", "rtx", "--size", "2560x1456"])
+        fsr3 = visual_enhancer_command(cli, plan_post_process(SHOT, "interpolate", "fsr3"), src, out)
+        self.assertEqual(fsr3[1:7], ["interpolate", "in.mp4", "--interpolator", "fsr3", "--multiplier", "2"])
+        for command in (rtx, fsr3):
+            self.assertEqual(command[command.index("-o") + 1], "out.mp4")
+            self.assertIn("--json", command)
+        with self.assertRaises(ValueError):
+            visual_enhancer_command(cli, plan_post_process(SHOT, "upscale", "gan", 2560), src, out)
+
+    def test_finish_crops_and_keeps_the_source_sound(self):
+        options = plan_post_process(SHOT, "upscale", "rtx", 2560)
+        command = visual_enhancer_finish_command(options, Path("r.mp4"), Path("s.mp4"), Path("o.mp4"))
+        self.assertIn("crop=2560:1440:(iw-2560)/2:(ih-1440)/2,setsar=1", command)
+        self.assertEqual(command[command.index("-crf") + 1], "12")
+        self.assertIn("1:a:0", command)
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        silent = visual_enhancer_finish_command({**options, "audio": False}, Path("r.mp4"), Path("s.mp4"),
+                                                Path("o.mp4"))
+        self.assertNotIn("s.mp4", silent)
+        self.assertNotIn("-c:a", silent)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -220,6 +284,23 @@ class PostProcessApiTests(ApiBase):
         self.assertIn("150 frames", response.json()["detail"])
         self.assertEqual(list(self.input.iterdir()), [])
 
+    def test_visual_enhancer_methods_need_the_users_cli(self):
+        self.add_job("src")
+        with patch("backend.main.visual_enhancer_ready", return_value=False):
+            response = self.post("src", {"operation": "upscale", "method": "rtx", "long_side": 2560})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("visual_enhancer_cli", response.json()["detail"])
+            self.assertEqual(self.post("src", {"operation": "interpolate", "method": "fsr3"}).status_code, 400)
+            self.assertEqual(self.post("src", {"operation": "interpolate", "method": "rife"}).status_code, 200)
+            self.assertFalse(self.client.get("/api/health").json()["visual_enhancer_ready"])
+        with patch("backend.main.visual_enhancer_ready", return_value=True):
+            response = self.post("src", {"operation": "upscale", "method": "rtx", "long_side": 2560})
+        self.assertEqual(response.status_code, 200, response.text)
+        with connect() as db:
+            row = db.execute("SELECT workflow_variant, width, height FROM jobs WHERE id=?",
+                             (response.json()["created"][0],)).fetchone()
+        self.assertEqual(tuple(row), ("rtx", 2560, 1440))
+
     def test_csrf_is_required(self):
         self.add_job("src")
         response = self.client.post("/api/jobs/src/post-process", json={"operation": "interpolate", "method": "rife"})
@@ -288,6 +369,131 @@ class UploadTests(ApiBase):
                          ["16:9", "9:16", "1:1", "4:3"])
 
 
+FAKE_VE_CLI = r"""
+import json, os, subprocess, sys, time
+args = sys.argv[1:]
+mode = os.environ.get("FAKE_VE_MODE", "ok")
+if mode == "hang":
+    time.sleep(120)
+if mode == "fail":
+    print(json.dumps({"exit_code": 1, "items": [{"state": "failed", "error": "NGX feature unavailable"}]}))
+    sys.exit(1)
+src, out = args[1], args[args.index("-o") + 1]
+if args[0] == "upscale":
+    width, height = args[args.index("--size") + 1].split("x")
+    video = ["-vf", f"scale={width}:{height}"]
+else:
+    video = ["-vf", "fps=48"]
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, *video, "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "64k", out], check=True)
+print(json.dumps({"exit_code": 0, "items": [{"state": "completed", "output_path": out, "error": ""}]}))
+"""
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+class VisualEnhancerWorkerTests(unittest.TestCase):
+    """The worker runs VE_CLI itself (a stand-in script here), finishes with FFmpeg and verifies the result."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="h3-ve-worker-")
+        self.root = Path(self.temp.name)
+        self.original_db = db_module.DB_PATH
+        db_module.DB_PATH = self.root / "jobs.sqlite3"
+        self.input, self.output, self.work = self.root / "input", self.root / "output", self.root / "temp"
+        for folder in (self.input, self.output, self.work):
+            folder.mkdir()
+        self.fake = self.root / "fake_ve.py"
+        self.fake.write_text(FAKE_VE_CLI, encoding="utf-8")
+        self.worker = QueueWorker()
+        self.worker.comfy.ready = AsyncMock(return_value=False)
+        self.patches = [
+            patch("backend.worker.INPUT", self.input), patch("backend.worker.OUTPUT", self.output),
+            patch("backend.worker.TEMP", self.work), patch("backend.worker.visual_enhancer_ready", return_value=True),
+            patch("backend.worker.VISUAL_ENHANCER_CLI", self.fake),
+            patch("backend.worker.visual_enhancer_command",
+                  side_effect=lambda cli, options, src, out: [sys.executable, str(cli), *visual_enhancer_command(
+                      cli, options, src, out)[1:]]),
+            patch("backend.worker.gpu_sample", return_value={"vram_used_mib": 1500}),
+            patch("backend.worker.finalize_completed_asset", return_value=None),
+            patch("backend.worker.historical_generation_seconds", return_value=None),
+        ]
+        for item in self.patches:
+            item.start()
+        db_module.init_db()
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        db_module.DB_PATH = self.original_db
+        self.temp.cleanup()
+
+    def queue(self, operation: str, method: str, long_side: int | None = None) -> dict:
+        clip = self.input / "post_x_source.mp4"
+        make_clip(clip, 480, 272, 24, 1)
+        options = plan_post_process(probe_video(clip), operation, method, long_side)
+        now = now_iso()
+        with connect() as db:
+            db.execute(
+                """INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,
+                   height,seed,status,position,input_path,input_name,no_audio,post_options_json,created_at,updated_at)
+                   VALUES(?,?,?,?,'post',?,'v1','native',1,?,?,'1','running',1,?,?,0,?,?,?)""",
+                ("vejob", "p", operation, 1.0, method, options["width"], options["height"], str(clip), clip.name,
+                 json.dumps(options), now, now))
+        return db_module.get_job("vejob", public=False)
+
+    def run_job(self, job: dict):
+        asyncio.run(self.worker._execute_job(job))
+        return db_module.get_job("vejob", public=False)
+
+    def test_rtx_upscale_is_cropped_verified_and_keeps_the_source_sound(self):
+        job = self.run_job(self.queue("upscale", "rtx", 1920))
+        self.assertEqual(job["status"], "completed", job["error"])
+        output = Path(job["output_path"])
+        self.assertEqual(output.name, "h3_bridge_vejob_00001_.mp4")
+        probe = probe_video(output)
+        self.assertEqual((probe["width"], probe["height"], probe["audio"]), (1920, 1080, True))
+        audio = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=bit_rate",
+                                "-of", "csv=p=0", str(output)], capture_output=True, text=True).stdout.strip()
+        self.assertGreater(int(audio), 64000)   # the source's track, not the stand-in's 64 kb/s re-encode
+        metrics = json.loads(job["metrics_json"])
+        self.assertEqual(metrics["peak_gpu"]["vram_used_mib"], 1500)
+        runtime = json.loads(job["runtime_json"])
+        self.assertIn("--size", runtime["visual_enhancer"]["arguments"])
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_fsr3_doubles_the_frame_rate(self):
+        job = self.run_job(self.queue("interpolate", "fsr3"))
+        self.assertEqual(job["status"], "completed", job["error"])
+        self.assertEqual(probe_video(Path(job["output_path"]))["fps"], 48.0)
+
+    def test_a_failed_run_reports_visual_enhancers_reason(self):
+        with patch.dict(os.environ, {"FAKE_VE_MODE": "fail"}):
+            job = self.run_job(self.queue("upscale", "rtx", 1920))
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("NGX feature unavailable", job["error"])
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_cancel_stops_the_process(self):
+        job = self.queue("upscale", "rtx", 1920)
+
+        async def cancel_soon():
+            await asyncio.sleep(2)
+            self.worker.cancelled.add("vejob")
+
+        async def scenario():
+            await asyncio.gather(self.worker._execute_job(job), cancel_soon())
+
+        with patch.dict(os.environ, {"FAKE_VE_MODE": "hang"}):
+            asyncio.run(asyncio.wait_for(scenario(), timeout=60))
+        self.assertEqual(db_module.get_job("vejob", public=False)["status"], "canceled")
+
+    def test_a_missing_cli_fails_clearly(self):
+        with patch("backend.worker.visual_enhancer_ready", return_value=False):
+            job = self.run_job(self.queue("interpolate", "fsr3"))
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("visual_enhancer_cli", job["error"])
+
+
 class PostJobsTableTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="h3-post-db-")
@@ -334,6 +540,27 @@ class PostJobsTableTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT id FROM jobs").fetchall()[0][0], "turbo-1632x928-6")
             self.assertIn("post_options_json", [r[1] for r in db.execute("PRAGMA table_info(jobs)")])
         self.insert("post", 1920, 1080)
+
+    def test_a_table_from_before_issue_39_accepts_the_visual_enhancer_methods(self):
+        db_module.init_db()
+        self.insert("turbo", 1632, 928, 6)
+        with connect() as db:
+            sql = db.execute("SELECT sql FROM sqlite_master WHERE name='jobs'").fetchone()[0]
+            db.execute("ALTER TABLE jobs RENAME TO jobs_new_style")
+            db.execute(sql.replace(",'rtx','fsr3'", ""))
+            columns = [r[1] for r in db.execute("PRAGMA table_info(jobs)")]
+            db.execute(f"INSERT INTO jobs ({','.join(columns)}) SELECT {','.join(columns)} FROM jobs_new_style")
+            db.execute("DROP TABLE jobs_new_style")
+        db_module.init_db()
+        now = now_iso()
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+            for method in ("rtx", "fsr3"):
+                db.execute(
+                    """INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,
+                       width,height,seed,status,position,created_at,updated_at)
+                       VALUES(?,?,?,?,'post',?,'v1','native',1,2560,1440,'1','queued',1,?,?)""",
+                    (method, "p", "upscale", 5.0, method, now, now))
 
 
 if __name__ == "__main__":

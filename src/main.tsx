@@ -693,6 +693,7 @@ function App() {
   const [spectrumReady, setSpectrumReady] = useState(false)
   const [clipprojReady, setClipprojReady] = useState(false)
   const [turboV4Ready, setTurboV4Ready] = useState(false)
+  const [visualEnhancerReady, setVisualEnhancerReady] = useState(false)
   const [referenceTurboReady, setReferenceTurboReady] = useState(false)
   const [fusedSlaReady, setFusedSlaReady] = useState(false)
   const [singularityReady, setSingularityReady] = useState(false)
@@ -780,6 +781,7 @@ function App() {
       setSpectrumReady(data.spectrum_ready)
       setClipprojReady(data.clipproj_ready)
       setTurboV4Ready(data.turbo_v4_ready)
+      setVisualEnhancerReady(Boolean(data.visual_enhancer_ready))
       setReferenceTurboReady(data.reference_turbo_ready)
       setAudioLockReady(Boolean(data.audio_lock_ready))
       setGpuConflict(Boolean(data.gpu_conflict))
@@ -810,6 +812,7 @@ function App() {
     if ('spectrum_ready' in data) setSpectrumReady(Boolean(data.spectrum_ready))
     if ('clipproj_ready' in data) setClipprojReady(Boolean(data.clipproj_ready))
     if ('turbo_v4_ready' in data) setTurboV4Ready(Boolean(data.turbo_v4_ready))
+    if ('visual_enhancer_ready' in data) setVisualEnhancerReady(Boolean(data.visual_enhancer_ready))
     if ('reference_turbo_ready' in data) setReferenceTurboReady(Boolean(data.reference_turbo_ready))
     if ('audio_lock_ready' in data) setAudioLockReady(Boolean(data.audio_lock_ready))
     if ('gpu_conflict' in data) setGpuConflict(Boolean(data.gpu_conflict))
@@ -2299,7 +2302,7 @@ function App() {
     </>}
     <FeedbackToast feedback={feedback.feedback} onDismiss={feedback.dismiss} />
     <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
-    {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration }} operation={postSheet.operation} csrf={csrf}
+    {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration }} operation={postSheet.operation} csrf={csrf} visualEnhancer={visualEnhancerReady}
       onClose={() => setPostSheet(null)} onQueued={() => { setPostSheet(null); feedback.notify('success', 'נוספה עבודת עיבוד לתור'); void load(true) }} />}
   </main>
 }

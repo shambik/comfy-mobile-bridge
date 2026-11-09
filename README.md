@@ -115,6 +115,14 @@ npm run build
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
+## Visual Enhancer (optional)
+
+The upscale and motion-smoothing sheet can also offer RTX Video Super Resolution and FSR 3 frame
+generation from [Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer). Its license forbids
+redistribution, so it is not bundled: install it yourself and set `visual_enhancer_cli` in the ignored
+`config.local.json` to the full path of its `VE_CLI.exe`. See `docs/WORKFLOW_GUIDE.md` for results and
+limits.
+
 ## Image workflow lab
 
 The separate **Image lab** page can load API-format image workflows from an
