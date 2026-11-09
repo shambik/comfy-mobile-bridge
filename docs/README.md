@@ -8,6 +8,7 @@ Keep these in sync with the code when you change what they describe.
 | --- | --- |
 | [`WORKFLOW_GUIDE.md`](WORKFLOW_GUIDE.md) | Which workflow to use for what, measured settings and times, prompt tips, what is untested |
 | [`HARDWARE_AND_VRAM.md`](HARDWARE_AND_VRAM.md) | The RTX 3080 10 GB tuning, where each memory setting lives, and how to adapt the app to other GPUs |
+| [`CHARACTER_SWAP_GUIDE.md`](CHARACTER_SWAP_GUIDE.md) | Character swap: how it works, installation, the API step by step, painted frames with any image generator, checks and known problems (for people and agents) |
 | [`ltx-2.5-ia2v-workflow.md`](ltx-2.5-ia2v-workflow.md) | LTX recipes: lip-sync, text and image-to-video, reference sheets, decode and sampler options |
 | [`TAILSCALE.md`](TAILSCALE.md) | Private phone access over Tailscale Serve |
 | [`ASSET_LIBRARY.md`](ASSET_LIBRARY.md) | Studio projects and folders on disk |

@@ -22,3 +22,10 @@ that a user has accepted those terms.
 
 The Native AudioLock node under `custom_nodes/` is bridge code covered by the
 MIT license above. It is not copied from the optional upstream experiment.
+
+Character swap (issue #46) uses pieces the user installs into ComfyUI; none are stored in this repository:
+Viggle Remake (`Viggle/Viggle-Remake`: swap weights under Viggle's own terms, ComfyUI nodes under Apache-2.0),
+H3 Relay (`akatz-ai/h3-relay`, GPL-3.0: akatz's character-swap graph is read from its installed folder, not copied),
+the akatz character-swap LoRA (`akatz-ai/MiniMax-H3-Character-Swap-LoRA`), the lightx2v FL2V Turbo 8-step LoRA
+(`lightx2v/Minimax-h3-Turbo`) and SAM 3.1 (`Comfy-Org/sam3.1`). The Viggle swap graph is written in this
+repository's own code. Review each license and model card before installing.
