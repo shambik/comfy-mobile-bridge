@@ -3,7 +3,10 @@ param(
     [switch]$DryRun,
     [switch]$AcceptLicenses,
     [switch]$SkipTailscale,
-    [string]$RuntimeRoot
+    [string]$RuntimeRoot,
+    # Engine groups to install (manifests/models.json "groups"). Empty: every group marked default. The groups a
+    # chosen group needs are added; h3 is always installed.
+    [string[]]$Groups
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,10 +41,22 @@ try {
 
     $dependencies = Get-JsonFile -Path (Join-Path $repo 'manifests\dependencies.json')
     $models = Get-JsonFile -Path (Join-Path $repo 'manifests\models.json')
+    $selected = Resolve-ManifestGroups -Models $models -Requested $Groups
+    $chosenRepositories = @($dependencies.repositories | Where-Object { Test-ManifestItemSelected -Item $_ -Selected $selected })
+    $chosenFiles = @($dependencies.files | Where-Object { Test-ManifestItemSelected -Item $_ -Selected $selected })
+    $chosenModels = @($models.models | Where-Object { Test-ManifestItemSelected -Item $_ -Selected $selected })
     if ($DryRun) {
         Write-Host "Dry run for profile $Profile"
-        Write-Host ("Repositories: " + $dependencies.repositories.Count)
-        Write-Host ("Models: " + $models.models.Count)
+        Write-Host ("Groups: " + ($selected -join ', '))
+        foreach ($group in $selected) {
+            $groupModels = @($chosenModels | Where-Object { (Get-ManifestItemGroups -Item $_) -contains $group })
+            $bytes = ($groupModels | Measure-Object -Property bytes -Sum).Sum
+            $gated = if ($groupModels | Where-Object { $_.PSObject.Properties.Name -contains 'gated' -and $_.gated }) { ' (gated: needs HF_TOKEN)' } else { '' }
+            Write-Host ('  {0,-18} {1,3} models {2,8:N1} GiB{3}' -f $group, $groupModels.Count, ($bytes / 1GB), $gated)
+        }
+        Write-Host ("Repositories: " + $chosenRepositories.Count)
+        Write-Host ("Files: " + $chosenFiles.Count)
+        Write-Host ("Models: " + $chosenModels.Count + ('  ({0:N1} GiB)' -f (($chosenModels | Measure-Object -Property bytes -Sum).Sum / 1GB)))
         Write-Host 'No runtime, checkout, download, config, or Tailscale changes were made.'
         exit 0
     }
@@ -68,7 +83,7 @@ try {
         if (-not $hostname) { Write-Error 'Tailscale did not report a local DNS hostname.'; exit 3 }
     }
 
-    foreach ($item in $dependencies.repositories) {
+    foreach ($item in $chosenRepositories) {
         $target = Resolve-ManifestTarget -Target ([string]$item.target) -Config $config -RepoRoot $repo
         if (Test-Path -LiteralPath $target -PathType Container) {
             $head = (& git -C $target rev-parse HEAD 2>$null).Trim()
@@ -121,17 +136,13 @@ try {
     }
     & $config.Python -m pip install --disable-pip-version-check --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw 'pip bootstrap failed.' }
-    & $config.Python -m pip install --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu130 -r (Join-Path $repo 'manifests\python-lock.txt')
-    if ($LASTEXITCODE -ne 0) { throw 'Pinned Python dependency installation failed.' }
+    foreach ($lock in $dependencies.python_locks) {
+        & $config.Python -m pip install --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu130 -r (Join-Path $repo ([string]$lock.file))
+        if ($LASTEXITCODE -ne 0) { throw "Pinned Python dependency installation failed: $($lock.file)" }
+    }
 
-    foreach ($model in $models.models) {
-        if ([string]$model.source_repository -match '^https://huggingface\.co/([^/]+)/([^/]+)$') {
-            $url = "$($model.source_repository)/resolve/$($model.revision)/$($model.source_path)?download=true"
-        } elseif ([string]$model.source_repository -match '^https://github\.com/([^/]+)/([^/]+)$') {
-            $url = "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($model.revision)/$($model.source_path)"
-        } else {
-            throw "Unsupported model source: $($model.source_repository)"
-        }
+    foreach ($model in @($chosenFiles) + @($chosenModels)) {
+        $url = Get-ManifestDownloadUrl -Item $model
         $targetDirectory = Resolve-ModelTargetDirectory -Model $model -Config $config
         $destination = Join-Path $targetDirectory ([string]$model.filename)
         Install-VerifiedDownload -Url $url -Destination $destination -ExpectedBytes ([int64]$model.bytes) -ExpectedSha256 ([string]$model.sha256)

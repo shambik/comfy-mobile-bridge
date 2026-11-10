@@ -8,9 +8,10 @@ Code: `backend/character_swap.py` (flow), `backend/main.py` (`/api/swap…` rout
 
 ## Installation (models and nodes)
 
-The swap needs these in ComfyUI; the job card says "not installed" with the missing file when one is absent. They
-are not in `manifests/` yet (the manifests have no optional groups; adding them would download ~24 GB on every
-install), so install them by hand:
+The swap needs these in ComfyUI; the job card says "not installed" with the missing file when one is absent.
+Bootstrap installs them with the `swap_viggle` and `swap_akatz` groups (both on by default;
+`.\scripts\bootstrap.ps1 -Profile Full -AcceptLicenses -Groups swap_viggle,swap_akatz` adds just these), pinned with
+size and SHA-256 in `manifests/`; see `docs/MODELS_AND_NODES.md`:
 
 | Piece | Where it goes | Source | License |
 |---|---|---|---|
@@ -19,7 +20,7 @@ install), so install them by hand:
 | `sam3.1_multiplex_fp16.safetensors` (1.6 GB, akatz only) | `models/checkpoints` | `Comfy-Org/sam3.1`, `checkpoints/` | model card |
 | `h3_character_swap_v1.5.safetensors` (akatz only) | `models/loras/character_swap` | `akatz-ai/MiniMax-H3-Character-Swap-LoRA` | model card |
 | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` (akatz only) | `models/loras/character_swap` | `lightx2v/Minimax-h3-Turbo` | model card |
-| H3 Relay nodes (akatz only) | `custom_nodes/h3-relay` | `akatz-ai/h3-relay` (v2.0.1) | GPL-3.0 |
+| H3 Relay nodes (akatz only) | `custom_nodes/h3-relay` | `akatz-ai/h3-relay` (v2.0.1, commit `e2a7665b`) | GPL-3.0 |
 
 The H3 text encoder, VAEs and the Ref2VA int8 model are the app's own. akatz's graph is read from
 `custom_nodes/h3-relay/example_workflows/toolkit/H3-Character-Swap.api.json`, so no GPL file is copied into this

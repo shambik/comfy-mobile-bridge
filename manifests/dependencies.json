@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile": "full",
   "platform": {
     "os": "Windows 10/11",
@@ -15,37 +15,74 @@
       "name": "ComfyUI",
       "url": "https://github.com/Comfy-Org/ComfyUI.git",
       "revision": "56f179f6c50dad0c4c860ae4da427415c8e86415",
-      "target": ".runtime/comfyui"
+      "target": ".runtime/comfyui",
+      "group": "h3"
     },
     {
       "name": "MiniMax H3 Turbo node",
       "url": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git",
       "revision": "4274783a23afcfdbea3b4876cb79effd6c510785",
-      "target": ".runtime/comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo"
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo",
+      "group": "h3"
     },
     {
       "name": "Spectrum v0.2.5",
       "url": "https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3.git",
       "revision": "4b9a7d1163348c67e7e475423f24f8b7abb23565",
-      "target": ".runtime/comfyui/custom_nodes/ComfyUI-Spectrum-MiniMax-H3"
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-Spectrum-MiniMax-H3",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "ClipProj",
       "url": "https://github.com/nicolab28/ComfyUI-ClipProj.git",
       "revision": "ca9b325e83cb02cb5e652570569c6f3f20fee342",
-      "target": ".runtime/comfyui/custom_nodes/ComfyUI-ClipProj"
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-ClipProj",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "Official workflow templates",
       "url": "https://github.com/Comfy-Org/workflow_templates.git",
       "revision": "2b7f823136606344f0bccce249898d771b809aa1",
-      "target": ".runtime/workflow_templates"
+      "target": ".runtime/workflow_templates",
+      "group": "h3"
     },
     {
       "name": "MiniMax H3 audio T8 nodes",
       "url": "https://github.com/T8mars/comfyui-minimax-h3-audio-T8.git",
       "revision": "3a23f333537d9a715aad7ce79af8d9ec891d9ad8",
-      "target": ".runtime/comfyui/custom_nodes/comfyui-minimax-h3-audio-T8"
+      "target": ".runtime/comfyui/custom_nodes/comfyui-minimax-h3-audio-T8",
+      "group": "h3"
+    },
+    {
+      "name": "MAINodes",
+      "group": "fused_sla",
+      "url": "https://github.com/matlowai/ComfyUI-MAINodes.git",
+      "revision": "f4868b4a08e8a504ce86db54a17961d399ffa2bc",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-MAINodes"
+    },
+    {
+      "name": "PlagueKind sparse attention nodes",
+      "group": "fused_sla",
+      "url": "https://github.com/ethanfel/ComfyUI-PlagueKind-Nodes-only-sparse.git",
+      "revision": "fd26ffb89dee294ca740a59632e5b3423b9a9d2a",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-PlagueKind-Nodes-only-sparse"
+    },
+    {
+      "name": "ComfyUI-LTXVideo",
+      "groups": [
+        "ltx25_reference",
+        "ltx23_reference"
+      ],
+      "url": "https://github.com/Lightricks/ComfyUI-LTXVideo.git",
+      "revision": "220e1d45aa0469f518e982102fca4dca92a61862",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-LTXVideo"
+    },
+    {
+      "name": "h3-relay (GPL-3.0, akatz character swap)",
+      "group": "swap_akatz",
+      "url": "https://github.com/akatz-ai/h3-relay.git",
+      "revision": "e2a7665b6eb8ea37a88c0de2c9c6b69a8f7c9220",
+      "target": ".runtime/comfyui/custom_nodes/h3-relay"
     }
   ],
   "tools": {
@@ -58,7 +95,10 @@
       "docs": "https://nodejs.org/en/download"
     },
     "ffmpeg": {
-      "required_commands": ["ffmpeg", "ffprobe"],
+      "required_commands": [
+        "ffmpeg",
+        "ffprobe"
+      ],
       "docs": "https://ffmpeg.org/download.html"
     },
     "tailscale": {
@@ -72,5 +112,161 @@
     "funnel": false,
     "sage_attention": false,
     "paid_api_nodes": false
-  }
+  },
+  "files": [
+    {
+      "name": "Viggle-Remake: comfyui/ComfyUI-Viggle-Remake/__init__.py",
+      "group": "swap_viggle",
+      "source_repository": "https://huggingface.co/Viggle/Viggle-Remake",
+      "revision": "7e5be143702dd53b9154482de673b8519ed2d4d6",
+      "source_path": "comfyui/ComfyUI-Viggle-Remake/__init__.py",
+      "filename": "__init__.py",
+      "target_root": "runtime",
+      "target_directory": "comfyui/custom_nodes/ComfyUI-Viggle-Remake",
+      "bytes": 132,
+      "sha256": "4c0f96b0f0006df5a559d09d44b8d521a32d7992383223310b5ba2a3f88e3e42",
+      "license_reference": "https://huggingface.co/Viggle/Viggle-Remake"
+    },
+    {
+      "name": "Viggle-Remake: comfyui/ComfyUI-Viggle-Remake/nodes.py",
+      "group": "swap_viggle",
+      "source_repository": "https://huggingface.co/Viggle/Viggle-Remake",
+      "revision": "7e5be143702dd53b9154482de673b8519ed2d4d6",
+      "source_path": "comfyui/ComfyUI-Viggle-Remake/nodes.py",
+      "filename": "nodes.py",
+      "target_root": "runtime",
+      "target_directory": "comfyui/custom_nodes/ComfyUI-Viggle-Remake",
+      "bytes": 13736,
+      "sha256": "13de28936065112503bc30abefefb356bfb3d51709a51ce28993e8b42001645c",
+      "license_reference": "https://huggingface.co/Viggle/Viggle-Remake"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/lowvram/01_reference_4step_sla_lowvram.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/lowvram/01_reference_4step_sla_lowvram.api.json",
+      "filename": "01_reference_4step_sla_lowvram.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 4139,
+      "sha256": "f622f57e30056f45355079203e7d3fc6ea4db60451686293d1eda47c9f471487",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/02_derope_4plus4_sla.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/02_derope_4plus4_sla.api.json",
+      "filename": "02_derope_4plus4_sla.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 8694,
+      "sha256": "d6c3fc28df2225c4c9ef1da86ddd26c4401f241e938b0e49f4184b0a53596c4f",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/lowvram/02_derope_4plus4_sla_lowvram.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/lowvram/02_derope_4plus4_sla_lowvram.api.json",
+      "filename": "02_derope_4plus4_sla_lowvram.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 8989,
+      "sha256": "6ddbb8d3d0696bcc9c9552daa59951d7741aaa9e1cc38083ab4157dd6f9488f4",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/03_derope_dyrope_pb3049_warm375.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/03_derope_dyrope_pb3049_warm375.api.json",
+      "filename": "03_derope_dyrope_pb3049_warm375.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 9409,
+      "sha256": "a6bc276264696436d2d6e74127290a5316546e7478fd29b91041a96bd2277988",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/lowvram/03_derope_dyrope_pb3049_warm375_lowvram.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/lowvram/03_derope_dyrope_pb3049_warm375_lowvram.api.json",
+      "filename": "03_derope_dyrope_pb3049_warm375_lowvram.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 9704,
+      "sha256": "a11b04f52a715f227e6e5e6b706121cfe1be71c9a343561cc48afe3e6da6992c",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/04_i2v_fl2v_4step_sla.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/04_i2v_fl2v_4step_sla.api.json",
+      "filename": "04_i2v_fl2v_4step_sla.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 4066,
+      "sha256": "90feface210a93aa73e6528a251414af511bc71b2212f6997bfcb548f0ac51b7",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/lowvram/04_i2v_fl2v_4step_sla_lowvram.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/lowvram/04_i2v_fl2v_4step_sla_lowvram.api.json",
+      "filename": "04_i2v_fl2v_4step_sla_lowvram.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 4327,
+      "sha256": "5993d7f12f7cb43cb446d8c71c1a6c56d0c35dfc49cf6998db64979de70f6f4d",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/05_ref2va_4step_sla.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/05_ref2va_4step_sla.api.json",
+      "filename": "05_ref2va_4step_sla.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 4476,
+      "sha256": "4dd888fbfe67a855def258091a2d123cacca561d3da9715e8f8186b6879bc5a7",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "minimax-h3-fused-turbo-int8-convrot: workflows/lowvram/05_ref2va_4step_sla_lowvram.api.json",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "workflows/lowvram/05_ref2va_4step_sla_lowvram.api.json",
+      "filename": "05_ref2va_4step_sla_lowvram.api.json",
+      "target_root": "state",
+      "target_directory": "h3-new-flow/official",
+      "bytes": 4737,
+      "sha256": "c3bf8dc9bb5d8265648f5a49d31c4323a1f132206ddc3a4230c4e5e07bd979c4",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    }
+  ],
+  "python_locks": [
+    {
+      "file": "manifests/python-lock.txt",
+      "group": "h3"
+    },
+    {
+      "file": "manifests/python-lock-engines.txt",
+      "group": "h3",
+      "for": "Sage and sparse attention (sageattention, triton-windows), ComfyUI-LTXVideo"
+    }
+  ]
 }

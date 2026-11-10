@@ -24,6 +24,12 @@ machine.
 4. Run .\scripts\start.ps1.
 5. Run .\scripts\doctor.ps1 -Deep, then check http://127.0.0.1:8787/api/health.
 
+Models are installed in engine groups (docs/MODELS_AND_NODES.md): every
+default group, or h3 plus the ones named with -Groups (for example
+-Groups pika,swap_viggle); -DryRun prints each group's size. The LTX-2.5
+groups are gated: the user accepts Lightricks' terms on Hugging Face and sets
+HF_TOKEN for the run; never ask for, print or store the token.
+
 Use .\scripts\bootstrap.ps1 -DryRun in CI or before a real install. Never
 download a model by hand into Git. The installer writes a .part file,
 supports resume, checks exact bytes and SHA-256, and moves it only after a

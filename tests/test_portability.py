@@ -132,14 +132,50 @@ class PortabilityTests(unittest.TestCase):
     def test_manifests_are_complete_and_pinned(self):
         dependencies = json.loads((ROOT / "manifests" / "dependencies.json").read_text(encoding="utf-8"))
         models = json.loads((ROOT / "manifests" / "models.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(dependencies["repositories"]), 6)
-        self.assertEqual(len(models["models"]), 13)
+        groups = models["groups"]
+        self.assertEqual(sum(1 for m in models["models"] if m["group"] == "h3"), 9)
+        for name, group in groups.items():
+            for need in group["needs"]:
+                self.assertIn(need, groups, name)
         for item in dependencies["repositories"]:
             self.assertRegex(item["revision"], r"^[0-9a-f]{40}$")
-        for item in models["models"]:
+            for group in item.get("groups") or [item["group"]]:
+                self.assertIn(group, groups, item["name"])
+        targets = set()
+        for item in models["models"] + dependencies["files"]:
             self.assertRegex(item["revision"], r"^[0-9a-f]{40}$")
             self.assertRegex(item["sha256"], r"^[0-9a-f]{64}$")
             self.assertGreater(item["bytes"], 0)
+            self.assertIn(item["group"], groups, item["name"])
+            target = (item.get("target_root", "models"), item["target_directory"], item["filename"])
+            self.assertNotIn(target, targets)
+            targets.add(target)
+        for lock in dependencies["python_locks"]:
+            self.assertTrue((ROOT / lock["file"]).is_file(), lock["file"])
+
+    def test_manifest_lists_every_model_the_app_loads(self):
+        # Each model file an engine checks before it runs must have a pinned download in models.json.
+        from backend import character_swap, config, post_process
+        listed = {(m["target_directory"], m["filename"]) for m in json.loads(
+            (ROOT / "manifests" / "models.json").read_text(encoding="utf-8"))["models"]}
+        needed = set()
+        for _, folder, name in config.SKIN_FILES + config.PIKA_TURBO4_FILES + config.OMNI_FILES:
+            needed.add((folder, name))
+        for files in (config.LTX_MODEL_FILES, *config.LTX_REFERENCE_FILES.values(), character_swap.VIGGLE_MODELS,
+                      character_swap.AKATZ_MODELS):
+            needed.update(files)
+        needed.update(("frame_interpolation", name) for name in post_process.INTERPOLATION_MODELS.values())
+        needed.update(("upscale_models", name) for name in post_process.UPSCALE_MODELS.values())
+        needed.update(("loras", name) for name in config.TURBO_LORAS.values())
+        needed.update({("diffusion_models", config.FL2VA_MODEL), ("diffusion_models", config.REF2VA_MODEL),
+                       ("diffusion_models", config.FUSED_SLA_MODEL), ("loras", config.FUSED_MOTION_ADAPTER),
+                       ("loras", config.REF2VA_TURBO_LORA), ("text_encoders", config.TEXT_ENCODER),
+                       ("vae", config.VIDEO_VAE), ("vae", config.FUSED_VIDEO_VAE), ("vae", config.AUDIO_VAE)})
+        normalized = set()
+        for folder, name in needed:
+            path = Path(folder, name.replace("\\", "/"))
+            normalized.add((path.parent.as_posix(), path.name))
+        self.assertEqual(sorted(normalized - listed), [])
 
     def test_required_agent_instruction_layout_exists(self):
         self.assertLessEqual(len((ROOT / "AGENTS.md").read_text(encoding="utf-8").splitlines()), 40)
@@ -214,7 +250,8 @@ class PortabilityTests(unittest.TestCase):
     def test_verified_download_pattern_is_present(self):
         source = (ROOT / "scripts" / "common.ps1").read_text(encoding="utf-8")
         self.assertIn("$Destination.part", source)
-        self.assertIn("--continue-at -", source)
+        self.assertIn("'--continue-at', '-'", source)
+        self.assertIn("'--header', \"@$headerFile\"", source)
         self.assertIn("Get-FileHash", source)
         self.assertIn("Move-Item -LiteralPath $partial", source)
 

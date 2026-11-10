@@ -13,10 +13,14 @@ terms before downloading them.
 | Spectrum node | `xmarre/ComfyUI-Spectrum-MiniMax-H3` | [Upstream repository](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3) |
 | ClipProj node and weights | `nicolab28/ComfyUI-ClipProj` and linked model sources | [Upstream repository](https://github.com/nicolab28/ComfyUI-ClipProj) |
 | Official workflows | `Comfy-Org/workflow_templates` | [ComfyUI repository terms](https://github.com/comfyanonymous/ComfyUI/blob/master/LICENSE) |
-| PyTorch and CUDA wheels | PyTorch package index, versions in `manifests/python-lock.txt` | [PyTorch terms](https://github.com/pytorch/pytorch/blob/main/LICENSE) and NVIDIA CUDA terms |
+| Engine models (Fused SLA, Singularity, Pika, FastH3 Omni, LTX-2.5 and 2.3, character swap, RIFE, FILM, Real-ESRGAN) | Each repository and revision in `manifests/models.json`, listed in `docs/MODELS_AND_NODES.md` | Each model card; LTX-2.5 is gated behind Lightricks' terms; Real-ESRGAN is BSD-3-Clause |
+| Engine node packs | MAINodes, PlagueKind sparse nodes, ComfyUI-LTXVideo, h3-relay (GPL-3.0), Viggle Remake nodes (Apache-2.0), pinned in `manifests/dependencies.json` | Each upstream repository |
+| Fused SLA workflows | `MATLOWAI/minimax-h3-fused-turbo-int8-convrot`, `workflows/` | The model card |
+| PyTorch and CUDA wheels | PyTorch package index, versions in `manifests/python-lock.txt` and `manifests/python-lock-engines.txt` | [PyTorch terms](https://github.com/pytorch/pytorch/blob/main/LICENSE) and NVIDIA CUDA terms |
 | React, Vite, TypeScript, and dependencies | `package-lock.json` | Each package license is recorded by npm metadata |
 
-The bridge does not enable paid API nodes, SageAttention, or Funnel. Model
+The bridge does not enable paid API nodes or Funnel. SageAttention is installed for the per-job Sage and sparse
+options and is never on by default. Model
 licenses may have extra usage limits; a successful SHA-256 check does not mean
 that a user has accepted those terms.
 
