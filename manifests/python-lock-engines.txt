@@ -1,0 +1,16 @@
+# Extra packages the engine node packs need on top of python-lock.txt, pinned to the versions in the tested
+# ComfyUI 0.44 environment (2026-11-10). Installed by bootstrap after python-lock.txt.
+#   sageattention, triton-windows: Sage and sparse (SLA) attention (MAINodes, PlagueKind, h3-relay, T8 nodes)
+#   colour-science, OpenImageIO, diffusers, ninja: ComfyUI-LTXVideo (LTX reference)
+colour-science==0.4.7
+diffusers==0.42.1
+httpcore2==2.16.0
+httpx2==2.16.0
+importlib_metadata==10.1.0
+ninja==1.11.1.4
+OpenImageIO==3.2.2.0
+sageattention==1.0.6
+tomli==2.5.0
+triton-windows==3.6.0.post26
+truststore==0.10.5
+zipp==4.1.2

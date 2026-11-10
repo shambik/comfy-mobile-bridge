@@ -43,6 +43,13 @@ The bootstrap downloads pinned ComfyUI, custom nodes, Python packages, FFmpeg
 checks, Tailscale checks, and external model files. It never stores models,
 runtime files, state, logs, or local configuration in Git.
 
+Models come in engine groups (H3, Fused SLA, Singularity, Pika, FastH3 Omni,
+LTX, character swap, post-process). All default groups together are about
+237 GB; `-Groups pika,swap_viggle` installs H3 plus the named groups, and
+`-DryRun` prints each group's size. The LTX-2.5 files are gated on Hugging Face:
+accept Lightricks' terms there and set `HF_TOKEN` for the run. Every file, its
+source and licence: [`docs/MODELS_AND_NODES.md`](docs/MODELS_AND_NODES.md).
+
 ## GPU conflict warning
 
 The app checks for `FortniteClient-Win64-Shipping.exe` and displays a warning
@@ -68,7 +75,8 @@ switching them to the portable layout.
 ## Requirements
 
 - Windows 10/11 x64.
-- NVIDIA GPU with at least 8 GiB VRAM, 32 GiB RAM, and 100 GB free disk.
+- NVIDIA GPU with at least 8 GiB VRAM, 32 GiB RAM, and 100 GB free disk
+  (about 260 GB for every default model group; fewer with `-Groups`).
   Only an RTX 3080 10 GB with 64 GB of RAM has been tested; LTX 2.3 reference
   mode needs about 43 GB of free RAM.
 - Git, Python 3.12, Node.js 22 or newer, FFmpeg/ffprobe, and Tailscale.

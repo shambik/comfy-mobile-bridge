@@ -1,6 +1,8 @@
 param(
     [switch]$Deep,
-    [switch]$Json
+    [switch]$Json,
+    # The engine groups to check, as in bootstrap.ps1 -Groups. Empty: every default group.
+    [string[]]$Groups
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +24,8 @@ try {
     Add-DoctorCheck 'comfy_listener_local' (Test-LocalOnlyListener -Port $config.ComfyPort) "127.0.0.1:$($config.ComfyPort)"
 
     $deps = Get-JsonFile -Path (Join-Path $repo 'manifests\dependencies.json')
+    $models = Get-JsonFile -Path (Join-Path $repo 'manifests\models.json')
+    $selected = Resolve-ManifestGroups -Models $models -Requested $Groups
     $templateTarget = $deps.repositories | Where-Object { $_.name -eq 'Official workflow templates' }
     if ($templateTarget) {
         $templatePath = Resolve-ManifestTarget -Target ([string]$templateTarget.target) -Config $config -RepoRoot $repo
@@ -29,7 +33,7 @@ try {
             Write-Verbose "Official workflow templates are optional for the bridge health check: $templatePath"
         }
     }
-    foreach ($item in $deps.repositories) {
+    foreach ($item in @($deps.repositories | Where-Object { Test-ManifestItemSelected -Item $_ -Selected $selected })) {
         $target = Resolve-ManifestTarget -Target ([string]$item.target) -Config $config -RepoRoot $repo
         $head = if (Test-Path -LiteralPath $target) { (& git -C $target rev-parse HEAD 2>$null).Trim() } else { '' }
         $optionalTemplate = $item.name -eq 'Official workflow templates'
@@ -38,8 +42,8 @@ try {
         Add-DoctorCheck "pin_$($item.name)" $passed $detail 4
     }
 
-    $models = Get-JsonFile -Path (Join-Path $repo 'manifests\models.json')
-    foreach ($model in $models.models) {
+    $chosen = @($deps.files) + @($models.models) | Where-Object { Test-ManifestItemSelected -Item $_ -Selected $selected }
+    foreach ($model in $chosen) {
         $path = Resolve-ModelTargetDirectory -Model $model -Config $config
         $path = Join-Path $path ([string]$model.filename)
         if ($Deep) {

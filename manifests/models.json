@@ -1,6 +1,145 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_revision": "Pinned revisions are immutable download inputs; verify every file before use.",
+  "groups": {
+    "h3": {
+      "label": "MiniMax H3 base",
+      "default": true,
+      "needs": [],
+      "engines": [
+        "H3 standard and Turbo (opening frame, first + last frame, reference, lip-sync)",
+        "H3 stills",
+        "Native AudioLock"
+      ]
+    },
+    "h3_int8_vae": {
+      "label": "H3 int8 video decoder",
+      "default": true,
+      "needs": [
+        "h3"
+      ],
+      "engines": [
+        "Singularity",
+        "Pika",
+        "FastH3 Omni",
+        "int8 VAE option"
+      ]
+    },
+    "fused_sla": {
+      "label": "H3 Fused SLA",
+      "default": true,
+      "needs": [
+        "h3"
+      ],
+      "engines": [
+        "Fused SLA direct, I2V/FL2V, Ref2VA, DeRoPE, DyRoPE"
+      ]
+    },
+    "singularity": {
+      "label": "Singularity realistic skin",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae"
+      ],
+      "engines": [
+        "Singularity reference"
+      ]
+    },
+    "pika": {
+      "label": "Pika H3 Flex",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae"
+      ],
+      "engines": [
+        "Pika",
+        "Pika Turbo 4-step"
+      ]
+    },
+    "omni": {
+      "label": "FastH3 OmniRef",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae"
+      ],
+      "engines": [
+        "FastH3 Omni"
+      ]
+    },
+    "ltx25": {
+      "label": "LTX-2.5",
+      "default": true,
+      "needs": [],
+      "gated": true,
+      "engines": [
+        "LTX lip-sync",
+        "LTX opening frame and first + last frame (official templates)"
+      ]
+    },
+    "ltx25_reference": {
+      "label": "LTX-2.5 reference",
+      "default": true,
+      "needs": [
+        "ltx25"
+      ],
+      "gated": true,
+      "engines": [
+        "LTX reference 2.5"
+      ]
+    },
+    "ltx23_reference": {
+      "label": "LTX-2.3 reference",
+      "default": true,
+      "needs": [],
+      "gated": false,
+      "engines": [
+        "LTX reference 2.3"
+      ]
+    },
+    "swap_viggle": {
+      "label": "Character swap: Viggle Remake",
+      "default": true,
+      "needs": [
+        "h3"
+      ],
+      "engines": [
+        "Character swap (Viggle Remake)"
+      ]
+    },
+    "swap_akatz": {
+      "label": "Character swap: akatz",
+      "default": true,
+      "needs": [
+        "h3"
+      ],
+      "engines": [
+        "Character swap (akatz V1.5)"
+      ]
+    },
+    "post_process": {
+      "label": "Upscale and smoothing",
+      "default": true,
+      "needs": [],
+      "engines": [
+        "RIFE and FILM smoothing",
+        "Real-ESRGAN upscale"
+      ]
+    },
+    "clipproj_spectrum": {
+      "label": "ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default)",
+      "default": false,
+      "needs": [
+        "h3"
+      ],
+      "engines": [
+        "Spectrum speed-up",
+        "ClipProj text encoder"
+      ]
+    }
+  },
   "models": [
     {
       "name": "H3 FL2VA diffusion",
@@ -11,7 +150,8 @@
       "target_directory": "diffusion_models",
       "bytes": 20970379616,
       "sha256": "e889202c41dafb67b10d67b97f0d8541508036a6090af23425a5c2615d03c47a",
-      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3"
     },
     {
       "name": "H3 REF2VA diffusion",
@@ -22,7 +162,8 @@
       "target_directory": "diffusion_models",
       "bytes": 20970379616,
       "sha256": "9255f52b6677845ad238f20dfaafa94727053694127ab7f255c048f0f9365779",
-      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3"
     },
     {
       "name": "H3 32B text encoder",
@@ -33,7 +174,8 @@
       "target_directory": "text_encoders",
       "bytes": 15687142551,
       "sha256": "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6",
-      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3"
     },
     {
       "name": "H3 4B ClipProj text encoder",
@@ -44,7 +186,8 @@
       "target_directory": "text_encoders",
       "bytes": 5242467968,
       "sha256": "54bd5144df0bbc25dd6ccadfcb826b521445a1b06ae5a42570bdd2974ca87094",
-      "license_reference": "https://huggingface.co/Comfy-Org/Krea-2"
+      "license_reference": "https://huggingface.co/Comfy-Org/Krea-2",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "H3 video VAE",
@@ -55,7 +198,8 @@
       "target_directory": "vae",
       "bytes": 5207808496,
       "sha256": "7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522",
-      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3"
     },
     {
       "name": "H3 audio VAE",
@@ -66,7 +210,8 @@
       "target_directory": "vae",
       "bytes": 605254808,
       "sha256": "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48",
-      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3"
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3"
     },
     {
       "name": "Turbo v1 LoRA",
@@ -77,7 +222,8 @@
       "target_directory": "loras",
       "bytes": 779849816,
       "sha256": "5a6eeba171cf183020a4ad48774bb2968f29f8168afd6ec17a04987f3528b4ea",
-      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
+      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora",
+      "group": "h3"
     },
     {
       "name": "Turbo v4 LoRA",
@@ -88,7 +234,8 @@
       "target_directory": "loras",
       "bytes": 779849816,
       "sha256": "5f3a626cd72c93a8b9318d6760c510bc5092d2ab13aaba1f932c5bab07a416d3",
-      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora"
+      "license_reference": "https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora",
+      "group": "h3"
     },
     {
       "name": "Ref2VA Turbo 4-step LoRA",
@@ -99,7 +246,8 @@
       "target_directory": "loras",
       "bytes": 1956193000,
       "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
-      "license_reference": "https://huggingface.co/lightx2v/Minimax-h3-Turbo"
+      "license_reference": "https://huggingface.co/lightx2v/Minimax-h3-Turbo",
+      "group": "h3"
     },
     {
       "name": "ClipProj learned projection",
@@ -110,7 +258,8 @@
       "target_directory": "clip_projections",
       "bytes": 52511480,
       "sha256": "f0f7ecaf4f431f62055888cbd214c607bf4215feb002ef4aa43a3ba6205ac325",
-      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "ClipProj identity control",
@@ -121,7 +270,8 @@
       "target_directory": "clip_projections",
       "bytes": 52511408,
       "sha256": "6bd90824280210c53a5a2de4ddfb6c61a6f921ea3ab5c45fbb55e977629947b9",
-      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "ClipProj zero control",
@@ -132,7 +282,8 @@
       "target_directory": "clip_projections",
       "bytes": 52511400,
       "sha256": "73842bed5a64979e639cff06e0e9fab00e124f908b8a19b85b83130ffa54e3cb",
-      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3"
+      "license_reference": "https://huggingface.co/NicoLab28/ClipProj-MiniMax-H3",
+      "group": "clipproj_spectrum"
     },
     {
       "name": "Turbo node SiLU timestep grid",
@@ -144,7 +295,351 @@
       "target_directory": "comfyui/custom_nodes/ComfyUI-MiniMax-H3-Turbo",
       "bytes": 5510600,
       "sha256": "30eb3c2cc7fb6b470d9717ff840d359313ac27cd64b705e32da1baa10f72d6a8",
-      "license_reference": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo"
+      "license_reference": "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo",
+      "group": "h3"
+    },
+    {
+      "name": "H3 int8 video VAE",
+      "group": "h3_int8_vae",
+      "source_repository": "https://huggingface.co/Kijai/MiniMax-H3-experimental",
+      "revision": "c2e7b89b1800123c49a0f620a1932c01d8952256",
+      "source_path": "minimax_h3_video_vae_int8_convrot.safetensors",
+      "filename": "minimax_h3_video_vae_int8_convrot.safetensors",
+      "target_directory": "vae",
+      "bytes": 3171670912,
+      "sha256": "9bb2d96f218c76babd85e0611b85ca8fb330a90546c01a0005e8a58a59593410",
+      "license_reference": "https://huggingface.co/Kijai/MiniMax-H3-experimental"
+    },
+    {
+      "name": "Fused ref-delta Turbo 8 int8",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot",
+      "revision": "8a8dffaa0cd99c6184833ae0a3b4e9b0089c17b3",
+      "source_path": "diffusion_models/minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors",
+      "filename": "minimax_h3_fused_refdelta_r1024_turbo8_mystic07_int8_convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 20980178976,
+      "sha256": "4262e4e9963c553fa00016bbe83961407a4fc0a888be95fd836c8d4f2304e48b",
+      "license_reference": "https://huggingface.co/MATLOWAI/minimax-h3-fused-turbo-int8-convrot"
+    },
+    {
+      "name": "Temporal expansion adapter (DyRoPE)",
+      "group": "fused_sla",
+      "source_repository": "https://huggingface.co/MATLOWAI/MiniMax-H3-Motion-Adapter",
+      "revision": "42cbd13e6e976fd31355cc8481798017bcba33cf",
+      "source_path": "temporal_expansion/minimax_h3_temporal_expansion_step375_r16.safetensors",
+      "filename": "minimax_h3_temporal_expansion_step375_r16.safetensors",
+      "target_directory": "loras/minimax_h3",
+      "bytes": 63103776,
+      "sha256": "28f3d41d1905f57bb64ac72e7b2d92d5d86cb8e333ac9243923bdd65486ec41e",
+      "license_reference": "https://huggingface.co/MATLOWAI/MiniMax-H3-Motion-Adapter"
+    },
+    {
+      "name": "Singularity Ref2VA pruned v1.3 int8",
+      "group": "singularity",
+      "source_repository": "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity",
+      "revision": "1259cf16cd0b655ba691a32fb46a409142762972",
+      "source_path": "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
+      "filename": "Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 20967647456,
+      "sha256": "412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce",
+      "license_reference": "https://huggingface.co/WarmBloodAban/Minimax-h3_Singularity"
+    },
+    {
+      "name": "Realism people LoRA",
+      "group": "singularity",
+      "source_repository": "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA",
+      "revision": "039cc8579d7aa357a882d7f4111b25da4f72dccc",
+      "source_path": "h3-realism-people-t2v-i2v-r2v.safetensors",
+      "filename": "h3-realism-people-t2v-i2v-r2v.safetensors",
+      "target_directory": "loras",
+      "bytes": 131229656,
+      "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+      "license_reference": "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA"
+    },
+    {
+      "name": "Ref2V Turbo 8-step LoRA",
+      "group": "singularity",
+      "source_repository": "https://huggingface.co/lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source_path": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "filename": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "target_directory": "loras",
+      "bytes": 1956193000,
+      "sha256": "6a56f41ab4229c9dd845b9501bbd475ee57e112d846cf2e819d534a1ae928c5a",
+      "license_reference": "https://huggingface.co/lightx2v/Minimax-h3-Turbo"
+    },
+    {
+      "name": "Pika H3 Flex Ref2VA LoRA",
+      "group": "pika",
+      "source_repository": "https://huggingface.co/Pika-Labs/Pika-H3-Flex",
+      "revision": "ca45d99f9b1d1859ffb9dc1cd6bfaaa994257f56",
+      "source_path": "comfy/loras/pika_h3_flex_ref2va_comfy_bf16.safetensors",
+      "filename": "pika_h3_flex_ref2va_comfy_bf16.safetensors",
+      "target_directory": "loras",
+      "bytes": 1956172176,
+      "sha256": "e4d058fbd027377b925a0ee607b514ddd9037873fee3afa05d73b302e6f7f8e1",
+      "license_reference": "https://huggingface.co/Pika-Labs/Pika-H3-Flex"
+    },
+    {
+      "name": "Pika H3 Flex FL2VA LoRA",
+      "group": "pika",
+      "source_repository": "https://huggingface.co/Pika-Labs/Pika-H3-Flex",
+      "revision": "ca45d99f9b1d1859ffb9dc1cd6bfaaa994257f56",
+      "source_path": "comfy/loras/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+      "filename": "pika_h3_flex_fl2va_comfy_bf16.safetensors",
+      "target_directory": "loras",
+      "bytes": 1956172176,
+      "sha256": "68783e6447696ec365d13c0554941e070bee4cfea13c37da52498ec4f9a53f89",
+      "license_reference": "https://huggingface.co/Pika-Labs/Pika-H3-Flex"
+    },
+    {
+      "name": "Pika H3 Flex Turbo 4-step FL2VA LoRA",
+      "group": "pika",
+      "source_repository": "https://huggingface.co/Pika-Labs/Pika-H3-Flex-Turbo-LoRA",
+      "revision": "dcacd93a50f714ba1cd61c7ca2cc5f65e9a1ec60",
+      "source_path": "pika_h3_flex_turbo_4step_fl2va.safetensors",
+      "filename": "pika_h3_flex_turbo_4step_fl2va.safetensors",
+      "target_directory": "loras",
+      "bytes": 3912311400,
+      "sha256": "8b0b5d2c53e435e637ed80afeff540135b90603ae53906f6aa8e66066776179d",
+      "license_reference": "https://huggingface.co/Pika-Labs/Pika-H3-Flex-Turbo-LoRA"
+    },
+    {
+      "name": "FastH3 OmniRef 8-step int8",
+      "group": "omni",
+      "source_repository": "https://huggingface.co/FastVideo/FastH3-Omni-Comfy",
+      "revision": "82eff2a6eee6c962846879f4bab52610a4df24d3",
+      "source_path": "diffusion_models/fasth3_omniref_8step_pruned_int8_convrot.safetensors",
+      "filename": "fasth3_omniref_8step_pruned_int8_convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 22213723064,
+      "sha256": "851b2dc9670ed864b7f1e951ac9da047d83b1c04ded9bfcc1a9e5bba0ee33f80",
+      "license_reference": "https://huggingface.co/FastVideo/FastH3-Omni-Comfy"
+    },
+    {
+      "name": "LTX-2.5 distilled transformer int8",
+      "group": "ltx25",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "e8dc69fd26150afbfa20351f6bc9ac384257f9fd",
+      "source_path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      "filename": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 21504034224,
+      "sha256": "c4279eeff115cbeaca494bd2183e7d768c38fe85a184dc6afbb7159157c44334",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.5 Gemma 4 text encoder int8",
+      "group": "ltx25",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "7597fb305b4cab9e7ff2c1d1e9551279c2932f0f",
+      "source_path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "filename": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "target_directory": "text_encoders",
+      "bytes": 15372969374,
+      "sha256": "6ce688a0aa98a5fa36a9f1e6c3f42152a498cc2b53ee8c15674c64244f91487f",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.5 video VAE",
+      "group": "ltx25",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "e8dc69fd26150afbfa20351f6bc9ac384257f9fd",
+      "source_path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+      "filename": "ltx-2.5-video-vae-bf16.safetensors",
+      "target_directory": "vae",
+      "bytes": 1472223346,
+      "sha256": "847e14ca7f3355debca0cea4eaa24ac0fbcdf0061da054ac89ca638a869ddba3",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.5 audio VAE",
+      "group": "ltx25",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "e8dc69fd26150afbfa20351f6bc9ac384257f9fd",
+      "source_path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+      "filename": "ltx-2.5-audio-vae-bf16.safetensors",
+      "target_directory": "vae",
+      "bytes": 364866540,
+      "sha256": "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.5 x2 latent upscaler",
+      "group": "ltx25",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5",
+      "revision": "e8dc69fd26150afbfa20351f6bc9ac384257f9fd",
+      "source_path": "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+      "filename": "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+      "target_directory": "latent_upscale_models",
+      "bytes": 995778752,
+      "sha256": "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.5 Ingredients IC-LoRA",
+      "group": "ltx25_reference",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients",
+      "revision": "12040e4091ac2008d3906a594e31a7fb1ab9d546",
+      "source_path": "ltx-2.5-22b-ic-lora-ingredients-0.9.safetensors",
+      "filename": "ltx-2.5-22b-ic-lora-ingredients-0.9.safetensors",
+      "target_directory": "loras",
+      "bytes": 1308787472,
+      "sha256": "ff873a5beada3c579a8137c7c53343916f78bcc9a529ba910143073fe8715e95",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Ingredients",
+      "gated": true
+    },
+    {
+      "name": "LTX-2.3 dev fp8 checkpoint",
+      "group": "ltx23_reference",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.3-fp8",
+      "revision": "91eda216f820e5ecb3d17dc9fe3b7cdaf56b587d",
+      "source_path": "ltx-2.3-22b-dev-fp8.safetensors",
+      "filename": "ltx-2.3-22b-dev-fp8.safetensors",
+      "target_directory": "checkpoints",
+      "bytes": 29145431166,
+      "sha256": "28606c5b5a06ce56f896d4dfcb20f212739e07a68fbe48e53638188449d26450",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.3-fp8"
+    },
+    {
+      "name": "LTX-2.3 distilled LoRA",
+      "group": "ltx23_reference",
+      "source_repository": "https://huggingface.co/Comfy-Org/ltx-2.3",
+      "revision": "f20f3a54378001e5e6d642acc84719cc78addf4b",
+      "source_path": "split_files/loras/ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors",
+      "filename": "ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_rank_111_bf16.safetensors",
+      "target_directory": "loras",
+      "bytes": 2741024390,
+      "sha256": "31e0c0195fb841bf31af78e8b60858f489e87ddcea4a5239abc80943da65e3ac",
+      "license_reference": "https://huggingface.co/Comfy-Org/ltx-2.3"
+    },
+    {
+      "name": "LTX-2.3 Ingredients IC-LoRA",
+      "group": "ltx23_reference",
+      "source_repository": "https://huggingface.co/Comfy-Org/ltx-2.3",
+      "revision": "f20f3a54378001e5e6d642acc84719cc78addf4b",
+      "source_path": "split_files/loras/ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "filename": "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors",
+      "target_directory": "loras",
+      "bytes": 1308778338,
+      "sha256": "515e4e139001ac6282357a5b35372e42e98b3affd5fcc886a52242abeed19559",
+      "license_reference": "https://huggingface.co/Comfy-Org/ltx-2.3"
+    },
+    {
+      "name": "Gemma 3 12B fp4 text encoder",
+      "group": "ltx23_reference",
+      "source_repository": "https://huggingface.co/Comfy-Org/ltx-2",
+      "revision": "ccde4ba417d7900669fd56dd292a883cee11ff37",
+      "source_path": "split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors",
+      "filename": "gemma_3_12B_it_fp4_mixed.safetensors",
+      "target_directory": "text_encoders",
+      "bytes": 9447702218,
+      "sha256": "aaca463d11e6d8d2a4bdb0d6299214c15ef78a3f73e0ef8113d5a9d0219b3f6d",
+      "license_reference": "https://huggingface.co/Comfy-Org/ltx-2"
+    },
+    {
+      "name": "LTX-2.3 x2 spatial upscaler",
+      "group": "ltx23_reference",
+      "source_repository": "https://huggingface.co/Lightricks/LTX-2.3",
+      "revision": "c1521179de480464f366a98a9d9b2acc4cc097b9",
+      "source_path": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "filename": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+      "target_directory": "latent_upscale_models",
+      "bytes": 995743560,
+      "sha256": "5f416311fa8172b65af67530758964708d29a317b830d689a51143b7f91913ed",
+      "license_reference": "https://huggingface.co/Lightricks/LTX-2.3"
+    },
+    {
+      "name": "Viggle Remake swap int8",
+      "group": "swap_viggle",
+      "source_repository": "https://huggingface.co/Viggle/Viggle-Remake",
+      "revision": "7e5be143702dd53b9154482de673b8519ed2d4d6",
+      "source_path": "int8/viggle_remake_swap_pruned_int8_convrot.safetensors",
+      "filename": "viggle_remake_swap_pruned_int8_convrot.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 20970379616,
+      "sha256": "7ba8cf79f8f09944f743f99b69d85300a70a4bc9493156cb1fff3a68a9716a47",
+      "license_reference": "https://huggingface.co/Viggle/Viggle-Remake"
+    },
+    {
+      "name": "FL2V Turbo 8-step LoRA",
+      "group": "swap_akatz",
+      "source_repository": "https://huggingface.co/lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source_path": "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "filename": "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "target_directory": "loras/character_swap",
+      "bytes": 1956193000,
+      "sha256": "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980",
+      "license_reference": "https://huggingface.co/lightx2v/Minimax-h3-Turbo"
+    },
+    {
+      "name": "akatz Character Swap v1.5 LoRA",
+      "group": "swap_akatz",
+      "source_repository": "https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+      "revision": "96ea3407b230b6f7df71c58c70e31df96bd7e533",
+      "source_path": "h3_character_swap_v1.5.safetensors",
+      "filename": "h3_character_swap_v1.5.safetensors",
+      "target_directory": "loras/character_swap",
+      "bytes": 155110792,
+      "sha256": "8f2c3c3eba161df8d0c6099598b4730f641f5ce01e04cd16d2427cff8a35218f",
+      "license_reference": "https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA"
+    },
+    {
+      "name": "SAM 3.1 multiplex (person masks)",
+      "group": "swap_akatz",
+      "source_repository": "https://huggingface.co/Comfy-Org/sam3.1",
+      "revision": "7bb8374780a725b4353ed31f3a9395c9742b5621",
+      "source_path": "checkpoints/sam3.1_multiplex_fp16.safetensors",
+      "filename": "sam3.1_multiplex_fp16.safetensors",
+      "target_directory": "checkpoints",
+      "bytes": 1745546848,
+      "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03",
+      "license_reference": "https://huggingface.co/Comfy-Org/sam3.1"
+    },
+    {
+      "name": "RIFE 4.26",
+      "group": "post_process",
+      "source_repository": "https://huggingface.co/Comfy-Org/Frame-Interpolation",
+      "revision": "aa7009be4d1471ea0bac91d6fe4d7e4b637cbbfc",
+      "source_path": "frame_interpolation/rife_v4.26.safetensors",
+      "filename": "rife_v4.26.safetensors",
+      "target_directory": "frame_interpolation",
+      "bytes": 22674688,
+      "sha256": "151874592c877740e5db11522f4514df569eeafb0a0fcb2696f16e9e8d317c94",
+      "license_reference": "https://huggingface.co/Comfy-Org/Frame-Interpolation"
+    },
+    {
+      "name": "FILM",
+      "group": "post_process",
+      "source_repository": "https://huggingface.co/Comfy-Org/Frame-Interpolation",
+      "revision": "aa7009be4d1471ea0bac91d6fe4d7e4b637cbbfc",
+      "source_path": "frame_interpolation/film_net_fp16.safetensors",
+      "filename": "film_net_fp16.safetensors",
+      "target_directory": "frame_interpolation",
+      "bytes": 68882302,
+      "sha256": "f226e51375dc839d4b40e5c3d63da560dd1ea1c962364ec78f5adf2d05db05c0",
+      "license_reference": "https://huggingface.co/Comfy-Org/Frame-Interpolation"
+    },
+    {
+      "name": "Real-ESRGAN x2plus",
+      "group": "post_process",
+      "source_repository": "https://github.com/xinntao/Real-ESRGAN",
+      "revision": "64ad194ddaf9c4d8c4b0d1b98cac6d89d3ea0d11",
+      "release_tag": "v0.2.1",
+      "source_path": "RealESRGAN_x2plus.pth",
+      "filename": "RealESRGAN_x2plus.pth",
+      "target_directory": "upscale_models",
+      "bytes": 67061725,
+      "sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+      "license_reference": "https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE"
     }
   ]
 }
