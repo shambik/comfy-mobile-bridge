@@ -1,5 +1,6 @@
 """Character swap flow (backend/character_swap.py) - what Viggle receives in both modes."""
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -246,6 +247,7 @@ class CharacterSwapTests(unittest.TestCase):
         self.assertTrue(all(k >= cs.LOCK for k in local_keys[1:]))
         self.assertIn(f"matching <Picture 1> at {cs.ts(local_keys[1])}", specs[1]["prompt"])
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_a_part_can_be_split_where_people_change(self):
         swap = self._parts_swap([{"start": 0, "end": 432}], 432)
         marks = [{"shot": 0, "x": 0.7, "y": 0.2, "character_id": self.suit["id"], "description": "the white-haired man"},
@@ -339,6 +341,7 @@ class CharacterSwapTests(unittest.TestCase):
         self.assertEqual(swap["segments"][0]["keep"], [124, 231])
         self.assertEqual(swap["tail"]["from"], 231)
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_cut_keeps_exactly_the_frames_at_24_fps(self):
         source = self.root / "src.mp4"
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=18", "-f", "lavfi", "-i",

@@ -1,5 +1,6 @@
 """Character swap through the app API (issue #46): a finished job -> parts -> marks -> a queued swap job."""
 import json
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -68,6 +69,7 @@ class SwapApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         return r.json()["id"]
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_a_finished_job_becomes_a_queued_swap_job_with_its_real_graph(self):
         self.add_job()
         swap = self.client.post("/api/swap", data={"job_id": "src"}, headers=self.headers).json()
@@ -97,6 +99,7 @@ class SwapApiTests(unittest.TestCase):
         cs.follow(db_module.get_job)
         self.assertEqual(cs.get_swap(swap["id"])["status"], "done")
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_akatz_queues_one_job_with_its_own_graph_and_models(self):
         self.add_job()
         swap = self.client.post("/api/swap", data={"job_id": "src"}, headers=self.headers).json()
