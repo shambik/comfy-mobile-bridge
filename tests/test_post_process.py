@@ -96,6 +96,7 @@ class PlanTests(unittest.TestCase):
             else:
                 self.assertFalse(any(c["borrow"] for c in chunks))
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_joining_chunks_gives_one_run_s_frame_count_with_the_sound(self):
         import subprocess, tempfile
         from backend.post_process import chunk_join_command
@@ -121,6 +122,7 @@ class PlanTests(unittest.TestCase):
         self.assertIn("video,863", probe)                     # = one RIFE run over 432 frames
         self.assertTrue(any(line.startswith("audio") for line in probe))
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_chunk_cuts_keep_the_exact_frames_and_rate(self):
         import subprocess, tempfile
         from backend.post_process import chunk_cut_command
