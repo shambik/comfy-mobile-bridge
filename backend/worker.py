@@ -26,7 +26,8 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
-from .post_process import (VISUAL_ENHANCER_TIMEOUT_SECONDS, post_model_files, post_node_classes,
+from .post_process import (VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command, chunk_keep,
+                           post_model_files, post_node_classes,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
                            visual_enhancer_finish_command)
 from .workflows import (official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
@@ -730,6 +731,10 @@ class QueueWorker:
             self._update_parent_progress(job, "starting", 0, estimated_total)
         if job["engine"] == "post":
             post_options = json.loads(job.get("post_options_json") or "null")
+            if post_options and post_options.get("chunks"):
+                # A clip longer than one tested run: chunk by chunk, then joined (post_process.chunk_plan, issue #44).
+                await self._run_chunked_post_job(job, post_options, estimated_total)
+                return
             if post_options and uses_visual_enhancer(post_options):
                 # RTX VSR / FSR 3 are not ComfyUI nodes: the worker runs VE_CLI.exe itself, in the same queue.
                 await self._run_visual_enhancer_job(job, post_options, estimated_total)
@@ -1477,6 +1482,128 @@ class QueueWorker:
             process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             pass
+
+    async def _run_chunked_post_job(self, job: dict, options: dict, estimated_total: float | None):
+        """Upscale or smooth a long clip chunk by chunk in one job (issue #44): each chunk is cut from the source, processed
+        exactly like a short clip (VE_CLI, or the ComfyUI post graph), and the kept frames of every chunk are joined in
+        order at the target frame rate with the source's own sound (post_process.chunk_plan / chunk_keep)."""
+        source = INPUT / (job.get("input_name") or "")
+        if not job.get("input_name") or not source.is_file():
+            raise RuntimeError("The source video for this post-process job is missing")
+        ve = uses_visual_enhancer(options)
+        if ve and not visual_enhancer_ready():
+            raise RuntimeError("Visual Enhancer is not set up: point visual_enhancer_cli in config.local.json at "
+                               "your VE_CLI.exe")
+        if ve:
+            if await self.comfy.ready():
+                await self._free_comfy_models()
+            else:
+                self.loaded_engine_family = None
+        else:
+            missing = [str(MODELS / folder / name) for folder, name in post_model_files(options)
+                       if not (MODELS / folder / name).exists()]
+            if missing:
+                raise RuntimeError("Post-process model is not installed: " + ", ".join(missing))
+            await self.comfy.ensure_started()
+        chunks = options["chunks"]
+        prefix = f"h3_bridge_{job['id']}"
+        work = TEMP / f"{prefix}_chunks"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        output = OUTPUT / f"{prefix}_00001_.mp4"
+        runtime = {"job": {"mode": job["mode"], "engine": job["engine"], "method": options["method"],
+                           "width": job["width"], "height": job["height"], "duration": job["duration"],
+                           "seed": job.get("seed"), "no_audio": bool(job.get("no_audio"))},
+                   "chunks": {"count": len(chunks), "frames": [c["count"] for c in chunks],
+                              "borrowed_next_frame": any(c["borrow"] for c in chunks)}}
+        update_job(job["id"], status="running", phase="sampling", progress=0, step=0, total_steps=len(chunks),
+                   runtime=runtime, eta_seconds=round(estimated_total, 1) if estimated_total else None)
+        started = time.monotonic()
+        chunk_options = {k: v for k, v in options.items() if k != "chunks"}
+        chunk_options["audio"] = False
+        parts: list[Path] = []
+        leftovers: list[Path] = []
+        try:
+            for index, chunk in enumerate(chunks):
+                if job["id"] in self.cancelled:
+                    raise RuntimeError("Generation canceled")
+                update_job(job["id"], phase="sampling", step=index + 1, total_steps=len(chunks),
+                           progress=round(index / len(chunks), 3))
+                piece = work / f"chunk{index}.mp4"
+                frames_in = chunk["count"] + int(chunk["borrow"])
+                cut = await asyncio.to_thread(subprocess.run, chunk_cut_command(options, chunk, source, piece),
+                                              capture_output=True, text=True, timeout=900)
+                if cut.returncode:
+                    raise RuntimeError(f"Cutting chunk {index + 1} failed: " + cut.stderr.strip()[-800:])
+                piece_options = {**chunk_options, "source_frames": frames_in}
+                if ve:
+                    rendered = work / f"chunk{index}_out.mp4"
+                    command = visual_enhancer_command(VISUAL_ENHANCER_CLI, piece_options, piece, rendered)
+                    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=str(work),
+                                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    chunk_started = time.monotonic()
+                    try:
+                        while process.poll() is None:
+                            if job["id"] in self.cancelled:
+                                raise RuntimeError("Generation canceled")
+                            if time.monotonic() - chunk_started > VISUAL_ENHANCER_TIMEOUT_SECONDS:
+                                raise RuntimeError(f"Visual Enhancer did not finish chunk {index + 1} in time")
+                            await asyncio.sleep(1)
+                    finally:
+                        await asyncio.to_thread(self._kill_process_tree, process)
+                    if process.returncode != 0 or not rendered.is_file():
+                        raise RuntimeError(f"Visual Enhancer failed on chunk {index + 1} (exit {process.returncode})")
+                    parts.append(rendered)
+                else:
+                    name = f"{prefix}_chunk{index}.mp4"
+                    shutil.copyfile(piece, INPUT / name)
+                    leftovers.append(INPUT / name)
+                    chunk_prefix = f"{prefix}_chunk{index}"
+                    prompt_id = await self.comfy.submit(post_process_workflow(piece_options, name, chunk_prefix),
+                                                        str(uuid.uuid4()))
+                    runtime.setdefault("comfy", {}).setdefault("prompt_ids", []).append(prompt_id)
+                    update_job(job["id"], prompt_id=prompt_id, runtime=runtime)
+                    while True:
+                        if job["id"] in self.cancelled:
+                            raise RuntimeError("Generation canceled")
+                        history, _ = await self._read_comfy_history(prompt_id)
+                        status = (history or {}).get("status", {})
+                        errors = [m for m in status.get("messages", []) if m and m[0] == "execution_error"]
+                        if errors:
+                            raise RuntimeError(f"ComfyUI failed on chunk {index + 1}: "
+                                               + json.dumps(errors[-1][1], ensure_ascii=False)[:3000])
+                        if status.get("completed"):
+                            break
+                        await asyncio.sleep(3)
+                    video = None
+                    for _ in range(12):
+                        video = find_video(chunk_prefix)
+                        if video:
+                            break
+                        await asyncio.sleep(5)
+                    if not video:
+                        raise RuntimeError(f"Chunk {index + 1} finished but no MP4 was found")
+                    parts.append(Path(video))
+                    leftovers.append(Path(video))
+
+            update_job(job["id"], phase="processing", progress=0.97)
+            keeps = [chunk_keep(options, chunk) for chunk in chunks]
+            command = chunk_join_command(options, parts, source, output)
+            joined = await asyncio.to_thread(subprocess.run, command, capture_output=True, text=True, timeout=1800)
+            if joined.returncode:
+                output.unlink(missing_ok=True)
+                raise RuntimeError("Joining the chunks failed: " + joined.stderr.strip()[-1500:])
+            update_job(job["id"], status="verifying", phase="verifying", progress=1, eta_seconds=0)
+            probe = await asyncio.to_thread(media_probe, output, require_audio=not bool(job.get("no_audio")))
+            metrics = {"generation_seconds": round(time.monotonic() - started, 1), "ffprobe": probe,
+                       "chunks": {"count": len(chunks), "kept_frames": keeps, "expected_frames": options["frames"]}}
+            update_job(job["id"], status="completed", phase="completed", progress=1, eta_seconds=0,
+                       output_path=str(output), metrics=metrics, finished_at=now_iso(), error=None)
+            await asyncio.to_thread(finalize_completed_asset, "job", job["id"])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            for path in leftovers:
+                path.unlink(missing_ok=True)
 
     async def _run_visual_enhancer_job(self, job: dict, options: dict, estimated_total: float | None):
         """Upscale (RTX VSR) or smooth (FSR 3) one video with the user's own Visual Enhancer VE_CLI.exe (issue #39).

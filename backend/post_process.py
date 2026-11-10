@@ -9,8 +9,9 @@ remake, The Last Fold, Pirate & Inventor) is allowed:
 - RIFE, FILM and Real-ESRGAN: whole clips of up to 150 frames (5 s at 30 fps). RIFE and Real-ESRGAN up to 1080p
   (1920x1080 30 fps uploads: RIFE 31 s / 2.5 GB, Real-ESRGAN 378 s / 6.1 GB, 2026-11-08). FILM stays at 1632x928:
   at 1080p it peaked at 9.77 GB, the edge where this card spills. Lanczos: up to 300 frames (a 5 s 60 fps clip, 73 s).
-  Smoothing takes sources up to 30 fps. Longer clips are refused until they are tested; FILM at 2560x1456 spilled
-  past 10 GB (12+ min per window).
+  Smoothing takes sources up to 30 fps. FILM at 2560x1456 spilled past 10 GB (12+ min per window).
+- Longer clips (issue #44): one run of the 18 s, 432-frame 736x1280 clip worked for every method; longer or bigger
+  clips are processed in chunks inside one job (see CHUNKED_METHODS); Visual Enhancer is never chunked.
 - Visual Enhancer v22.0 (issue #39, lab 2026-11-08/09), run through the user's own VE_CLI.exe, not ComfyUI:
   RTX Video Super Resolution upscale (11-13 s per shot to 2560 wide, ~1.5 GB; 1920 wide 7 s) and FSR 3 frame
   generation x2 (5-7.5 s, <1 GB). Tested on 1632x928 24 fps (124 frames) and 1920x1080 / 1080x1920 30 fps
@@ -40,6 +41,63 @@ MAX_SOURCE = {"rife": SMOOTH_UPSCALED_MAX, "gan": (1920 * 1080, "1920x1080"),
               "rtx": (1920 * 1080, "1920x1080"), "fsr3": SMOOTH_UPSCALED_MAX,
               "film": (1632 * 928, "1632x928 (1.5 MP); at 1080p it nearly fills the 10 GB card, use RIFE")}
 TESTED_MAX_FRAMES = 150             # one 5 s clip at 30 fps, whole-clip jobs
+GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,
+GAN_SMOOTHED_MAX_PIXELS = 1632 * 928  # 454 s, 6.8 GB VRAM, 31 GB ComfyUI RAM (3 lab windows of 83 frames: ~470 s)
+LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
+INTERPOLATE_MAX_FPS = 30.0          # 24 and 30 fps sources were tested; smoothing a 48/60 fps clip is not
+UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
+UPSCALE_MAX_PIXELS = 2560 * 1456
+# Near-16:9 and near-9:16 sources (the app's sizes are 1.75-1.83, not exactly 1.78) go to the standard delivery
+# sizes, 1920x1080 / 2560x1440 and the portrait pair, with a small center crop. Other shapes keep their own.
+STANDARD_RATIO_TOLERANCE = 0.04
+
+
+# Long clips (issue #44): # a clip longer than the flow was tested on in ONE run is cut into chunks inside one job, each chunk is processed like
+# a short clip, and the results are joined in order with the source's sound. Smoothing chunks borrow the next chunk's
+# first frame so the midpoint at every seam is still made. Whole-clip test on the 18 s swap clip (432 frames, 736x1280,
+# tests/post_full_clip): RIFE 42 s / 1.5 GB, FILM 143 s / 4.7 GB, Lanczos 110 s / 1.1 GB, Real-ESRGAN x2 to 1472x2560
+# 530 s / 6.8 GB, all in one run. The ComfyUI methods hold the whole clip in RAM, so their single-run limit is that
+# many frame-pixels (bigger frames: fewer frames per run). Visual Enhancer (RTX VSR 48 s, FSR 3 14 s on the same clip)
+# streams frame by frame and is never chunked.
+WHOLE_RUN_PIXEL_FRAMES = 432 * 736 * 1280
+CHUNKED_METHODS = ("rife", "film", "gan", "lanczos")
+
+
+def single_run_frames(method: str, width: int, height: int) -> int | None:
+    """The most frames one run of this method was tested on at this frame size (None: no limit, never chunked)."""
+    if method not in CHUNKED_METHODS:
+        return None
+    return max(TESTED_MAX_FRAMES, WHOLE_RUN_PIXEL_FRAMES // (width * height))
+
+
+def chunk_plan(method: str, operation: str, frames: int, width: int = 736, height: int = 1280) -> list[dict]:
+    """The chunks of a long clip ({start, count, borrow}); empty when one run covers it."""
+    size = single_run_frames(method, width, height)
+    if size is None or frames <= size:
+        return []
+    if operation == "interpolate":
+        size -= 1                                   # a chunk also reads the next chunk's first frame
+    pieces = -(-frames // size)                     # as few chunks as possible, of even length
+    even = -(-frames // pieces)
+    chunks, start = [], 0
+    while start < frames:
+        count = min(even, frames - start)
+        chunks.append({"start": start, "count": count,
+                       "borrow": operation == "interpolate" and start + count < frames})
+        start += count
+    return chunks
+
+
+def chunk_keep(options: dict, chunk: dict) -> int:
+    """How many output frames of a chunk go into the joined clip.
+
+    Upscale: one per input frame. RIFE/FILM give 2n-1 frames for n inputs: a chunk that borrowed the next frame keeps
+    2n (through the seam midpoint), the last chunk keeps all 2n-1. FSR 3 gives 2n (it also adds one after the last
+    frame): keep 2n, so the whole clip ends like a single FSR 3 run."""
+    n = chunk["count"]
+    if options["operation"] == "upscale" or options["method"] == "fsr3":
+        return n if options["operation"] == "upscale" else 2 * n
+    return 2 * n if chunk["borrow"] else 2 * n - 1
 GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,
 GAN_SMOOTHED_MAX_PIXELS = 1632 * 928  # 454 s, 6.8 GB VRAM, 31 GB ComfyUI RAM (3 lab windows of 83 frames: ~470 s)
 LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
@@ -98,16 +156,15 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         max_pixels, max_label = MAX_SOURCE[method]
         if pixels > max_pixels:
             raise ValueError(f"{METHOD_LABELS[method]} was tested on sources up to {max_label}; this one is {width}x{height}")
-        max_frames = (GAN_SMOOTHED_MAX_FRAMES if method == "gan" and pixels <= GAN_SMOOTHED_MAX_PIXELS
-                      else TESTED_MAX_FRAMES)
-        if frames > max_frames:
-            raise ValueError(f"{METHOD_LABELS[method]} was tested on clips of up to {max_frames} frames at this size "
-                             f"(5 s, or a smoothed 5 s shot for Real-ESRGAN up to 1632x928); this clip has {frames}")
-    elif frames > LANCZOS_MAX_FRAMES:
-        raise ValueError(f"Lanczos was tested up to 300 frames (5 s at 60 fps); this clip has {frames}")
+        if method == "rtx" and fps > INTERPOLATE_MAX_FPS:   # tested on 24 and 30 fps originals, never after smoothing
+            raise ValueError(f"RTX Video Super Resolution runs on original clips (24 or 30 fps), not on smoothed ones; "
+                             f"this one is {fps:g} fps")
     options = {"operation": operation, "method": method, "source_width": width, "source_height": height,
                "source_frames": frames, "source_fps": round(fps, 3), "source_duration": round(source["duration"], 3),
                "audio": bool(source["audio"])}
+    chunks = chunk_plan(method, operation, frames, width, height)
+    if chunks:
+        options["chunks"] = chunks
     if operation == "interpolate":
         if fps <= 0 or fps > INTERPOLATE_MAX_FPS:
             raise ValueError(f"Smoothing was tested on sources up to 30 fps; this one is {fps:g} fps")
@@ -125,6 +182,42 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         options.update(width=target[0], height=target[1], fps=round(fps, 3), frames=frames, long_side=long_side,
                        crop_percent=crop_percent(width, height, *target))
     return options
+
+
+def chunk_cut_command(options: dict, chunk: dict, source: Path, out: Path) -> list[str]:
+    """FFmpeg command for one chunk's frames (plus the next chunk's first frame when it borrows one), at the source's
+    own frame rate. Without the explicit rate FFmpeg fell back to 25 fps and duplicated frames (145 -> 150), so the
+    smoothed chunks drifted away from the source (2026-11-09)."""
+    fps = f"{float(options['source_fps']):g}"
+    end = chunk["start"] + chunk["count"] + int(chunk["borrow"])
+    return ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-an", "-vf",
+            f"trim=start_frame={chunk['start']}:end_frame={end},setpts=N/({fps})/TB", "-r", fps,
+            "-fps_mode", "cfr", "-c:v", "libx264", "-crf", "10", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            str(out)]
+
+
+def chunk_join_command(options: dict, parts: list[Path], source: Path, output: Path) -> list[str]:
+    """FFmpeg command that joins processed chunks: each chunk's kept frames in order, at the target frame rate,
+    cropped to the target for RTX VSR (VE renders at the source's shape), with the source's own sound."""
+    fps = float(options["fps"])
+    keeps = [chunk_keep(options, chunk) for chunk in options["chunks"]]
+    crop = ""
+    if options["method"] == "rtx":
+        width, height = options["width"], options["height"]
+        crop = f",crop={width}:{height}:(iw-{width})/2:(ih-{height})/2,setsar=1"
+    graph = [f"[{i}:v]trim=start_frame=0:end_frame={keep},setpts=PTS-STARTPTS[v{i}]" for i, keep in enumerate(keeps)]
+    graph.append("".join(f"[v{i}]" for i in range(len(parts)))
+                 + f"concat=n={len(parts)}:v=1:a=0,setpts=N/({fps})/TB{crop}[v]")
+    command = ["ffmpeg", "-v", "error", "-y"]
+    for part in parts:
+        command += ["-i", str(part)]
+    if options.get("audio"):
+        command += ["-i", str(source)]
+    command += ["-filter_complex", ";".join(graph), "-map", "[v]", "-r", f"{fps:g}", "-fps_mode", "cfr",
+                "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    if options.get("audio"):
+        command += ["-map", f"{len(parts)}:a:0", "-c:a", "copy", "-t", f"{sum(keeps) / fps:.4f}"]
+    return [*command, "-movflags", "+faststart", str(output)]
 
 
 def uses_visual_enhancer(options: dict) -> bool:

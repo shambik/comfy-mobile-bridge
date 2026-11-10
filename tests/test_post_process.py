@@ -55,15 +55,21 @@ class PlanTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 plan_post_process(SHOT, operation, method, 2560)
 
-    def test_models_only_on_tested_sizes_and_lengths(self):
+    def test_models_only_on_tested_sizes_and_long_clips_in_chunks(self):
         big = {**SHOT, "width": 1920, "height": 1088}
-        long = {**SHOT, "frames": 249, "duration": 10.4}
+        long = {**SHOT, "frames": 600, "duration": 25.0}      # 1632x928: one run holds 268 frames
         for method, operation in (("film", "interpolate"), ("gan", "upscale")):
             with self.assertRaises(ValueError):
                 plan_post_process(big, operation, method, 2560)
-        for method, operation in (("rife", "interpolate"), ("film", "interpolate"), ("gan", "upscale")):
-            with self.assertRaises(ValueError):
-                plan_post_process(long, operation, method, 2560)
+            chunks = plan_post_process(long, operation, method, 2560)["chunks"]   # issue #44: chunked, not refused
+            self.assertEqual(len(chunks), 3)
+            self.assertLessEqual(max(c["count"] + c["borrow"] for c in chunks), 268)
+        swap = {**SHOT, "width": 736, "height": 1280, "frames": 432}  # the whole-clip test: one run, no chunks
+        for method, operation in (("rife", "interpolate"), ("film", "interpolate"), ("gan", "upscale"),
+                                  ("lanczos", "upscale")):
+            self.assertNotIn("chunks", plan_post_process(swap, operation, method, 2560), method)
+        self.assertNotIn("chunks", plan_post_process(SHOT, "interpolate", "rife"))   # one run covers a 5 s shot
+
 
     def test_rife_and_fsr3_smooth_upscaled_clips(self):
         # issue #41: whole 2560x1440 shots were measured in the lab; FILM stays capped
@@ -77,11 +83,73 @@ class PlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_post_process({**SHOT, "width": 2560, "height": 1472}, "interpolate", "rife")
 
-    def test_lanczos_runs_on_interpolated_clips_but_not_longer(self):
+    def test_chunks_join_to_the_same_frame_count_as_one_run(self):
+        from backend.post_process import chunk_keep
+        for method, operation, frames in (("rife", "interpolate", 900), ("film", "interpolate", 601),
+                                          ("gan", "upscale", 700), ("lanczos", "upscale", 1200)):
+            options = plan_post_process({**SHOT, "frames": frames}, operation, method, 2560)
+            chunks = options["chunks"]
+            self.assertEqual(sum(chunk_keep(options, c) for c in chunks), options["frames"], method)
+            self.assertEqual(sum(c["count"] for c in chunks), frames)
+            if operation == "interpolate":                       # every chunk but the last borrows the next frame
+                self.assertEqual([c["borrow"] for c in chunks], [True] * (len(chunks) - 1) + [False])
+            else:
+                self.assertFalse(any(c["borrow"] for c in chunks))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+    def test_joining_chunks_gives_one_run_s_frame_count_with_the_sound(self):
+        import subprocess, tempfile
+        from backend.post_process import chunk_join_command
+        options = plan_post_process({**SHOT, "width": 1440, "height": 2560, "frames": 432, "duration": 18.0},
+                                    "interpolate", "rife")
+        self.assertEqual([c["count"] for c in options["chunks"]], [144, 144, 144])
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            source = folder / "source.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=64x112:r=24:d=18", "-f", "lavfi",
+                            "-i", "sine=d=18", "-shortest", "-pix_fmt", "yuv420p", str(source)], check=True)
+            parts = []
+            for i, chunk in enumerate(options["chunks"]):     # what RIFE returns for each chunk: 2n-1 frames at 48 fps
+                frames = 2 * (chunk["count"] + chunk["borrow"]) - 1
+                parts.append(folder / f"c{i}.mp4")
+                subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc=s=64x112:r=48",
+                                "-frames:v", str(frames), "-pix_fmt", "yuv420p", str(parts[-1])], check=True)
+            out = folder / "out.mp4"
+            subprocess.run(chunk_join_command(options, parts, source, out), check=True)
+            probe = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                    "stream=codec_type,nb_read_frames", "-of", "csv=p=0", str(out)],
+                                   capture_output=True, text=True).stdout.split()
+        self.assertIn("video,863", probe)                     # = one RIFE run over 432 frames
+        self.assertTrue(any(line.startswith("audio") for line in probe))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+    def test_chunk_cuts_keep_the_exact_frames_and_rate(self):
+        import subprocess, tempfile
+        from backend.post_process import chunk_cut_command
+        options = plan_post_process({**SHOT, "width": 1440, "height": 2560, "frames": 432, "duration": 18.0},
+                                    "interpolate", "rife")
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.mp4"            # sound first, as in the bridge's own outputs
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=d=18", "-f", "lavfi", "-i",
+                            "testsrc=s=64x112:r=24:d=18", "-map", "0:a", "-map", "1:v", "-pix_fmt", "yuv420p",
+                            "-video_track_timescale", "12288", str(source)], check=True)
+            for chunk in options["chunks"]:
+                out = Path(folder) / f"c{chunk['start']}.mp4"
+                subprocess.run(chunk_cut_command(options, chunk, source, out), check=True)
+                probe = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                        "stream=r_frame_rate,nb_read_frames", "-of", "csv=p=0", str(out)],
+                                       capture_output=True, text=True).stdout.split()
+                self.assertEqual(probe, [f"24/1,{chunk['count'] + chunk['borrow']}"])
+
+    def test_visual_enhancer_is_never_chunked(self):
+        land = {"width": 1280, "height": 720, "fps": 24.0, "frames": 432, "duration": 18.0, "audio": True}
+        self.assertNotIn("chunks", plan_post_process(land, "upscale", "rtx", 2560))
+        self.assertNotIn("chunks", plan_post_process(land, "interpolate", "fsr3"))
+
+    def test_lanczos_runs_on_interpolated_clips_and_longer_ones_in_chunks(self):
         doubled = {**SHOT, "fps": 48.0, "frames": 241}
         self.assertEqual(plan_post_process(doubled, "upscale", "lanczos", 2560)["frames"], 241)
-        with self.assertRaises(ValueError):
-            plan_post_process({**SHOT, "frames": 301}, "upscale", "lanczos", 2560)
+        self.assertEqual(len(plan_post_process({**SHOT, "frames": 301}, "upscale", "lanczos", 2560)["chunks"]), 2)  # 268 per run
         self.assertEqual(plan_post_process({**SHOT, "fps": 60.0, "frames": 300}, "upscale", "lanczos", 2560)["frames"], 300)
 
     def test_1080p_30fps_uploads_follow_the_lab_results(self):
@@ -93,18 +161,16 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan_post_process(phone, "upscale", "gan", 2560)["width"], 2560)
         with self.assertRaisesRegex(ValueError, "use RIFE"):
             plan_post_process(phone, "interpolate", "film")
-        with self.assertRaises(ValueError):
-            plan_post_process({**phone, "frames": 151}, "interpolate", "rife")
+        self.assertNotIn("chunks", plan_post_process({**phone, "frames": 151}, "interpolate", "rife"))  # 1080p: 196 per run
+        self.assertEqual(len(plan_post_process({**phone, "frames": 400}, "interpolate", "rife")["chunks"]), 3)
 
     def test_gan_runs_on_a_smoothed_shot_up_to_1_5mp(self):
         smoothed = {**SHOT, "fps": 48.0, "frames": 247}
         self.assertEqual(plan_post_process(smoothed, "upscale", "gan", 2560)["frames"], 247)
         portrait = {**smoothed, "width": 928, "height": 1632}
         self.assertEqual(plan_post_process(portrait, "upscale", "gan", 2560)["height"], 2560)
-        with self.assertRaises(ValueError):   # 1080p only up to 150 frames
-            plan_post_process({**smoothed, "width": 1920, "height": 1080}, "upscale", "gan", 2560)
-        with self.assertRaises(ValueError):
-            plan_post_process({**smoothed, "frames": 249}, "upscale", "gan", 2560)
+        self.assertIn("chunks", plan_post_process({**smoothed, "width": 1920, "height": 1080}, "upscale", "gan", 2560))
+        self.assertNotIn("chunks", plan_post_process({**smoothed, "frames": 249}, "upscale", "gan", 2560))
 
     def test_interpolating_a_48fps_clip_is_refused(self):
         with self.assertRaises(ValueError):
@@ -138,11 +204,11 @@ class VisualEnhancerPlanTests(unittest.TestCase):
 
     def test_only_the_tested_sources(self):
         for method, operation, too_big in (("rtx", "upscale", {**self.LAND, "height": 1088}),
-                                           ("fsr3", "interpolate", {**self.LAND, "width": 2560, "height": 1472})):
-            for source in (too_big, {**self.LAND, "frames": 151},
-                           {**SHOT, "fps": 48.0, "frames": 247}):
+                                           ("fsr3", "interpolate", {**self.LAND, "width": 2560, "height": 1488})):
+            for source in (too_big, {**SHOT, "fps": 48.0, "frames": 247}):
                 with self.assertRaises(ValueError, msg=(method, source)):
                     plan_post_process(source, operation, method, 2560)
+            plan_post_process({**self.LAND, "frames": 432}, operation, method, 2560)   # long clips: one VE run
 
     def test_rtx_renders_at_the_source_shape_then_crops(self):
         # VE stretches to --size, so it gets the source's own shape; the finishing pass crops to the target
@@ -292,10 +358,10 @@ class PostProcessApiTests(ApiBase):
         self.add_job("src")
         response = self.post("src", {"operation": "upscale", "method": "seedvr2", "long_side": 2560})
         self.assertEqual(response.status_code, 400)
-        with patch("backend.main.probe_video", return_value={**SHOT, "frames": 241}):
+        with patch("backend.main.probe_video", return_value={**SHOT, "width": 1920, "height": 1080}):
             response = self.post("src", {"operation": "interpolate", "method": "film"})
         self.assertEqual(response.status_code, 400)
-        self.assertIn("150 frames", response.json()["detail"])
+        self.assertIn("use RIFE", response.json()["detail"])
         self.assertEqual(list(self.input.iterdir()), [])
 
     def test_visual_enhancer_methods_need_the_users_cli(self):
