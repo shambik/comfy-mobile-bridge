@@ -377,7 +377,9 @@ async def lifespan(app: FastAPI):
     if reconciled:
         update_agent_settings(**reconciled)
     discover_skills()
+    worker.after_swap_hooks.append(lambda: swap_lab.follow(get_job))
     worker.start()
+    await worker.run_after_swap_hooks()   # character swap: chains whose job ended while the bridge was down
     production_orchestrator.bind_queue(worker)
     council_controller.bind_queue(worker)
     production_orchestrator.start()
@@ -3179,6 +3181,9 @@ async def cancel_job(request: Request, job_id: str):
     require_csrf(request)
     if not await worker.cancel(job_id):
         raise HTTPException(409, "Job cannot be canceled")
+    job = get_job(job_id, public=False)
+    if job and job["engine"] == "swap" and job["status"] == "canceled":
+        await worker.run_after_swap_hooks()   # a queued swap job canceled: its swap shows it at once
     return {"ok": True}
 
 
@@ -3220,6 +3225,302 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
     return _queue_post_job(new_id, input_name, options, source["prompt"],
                            source.get("aspect_ratio") or aspect_label(probe["width"], probe["height"]), job_id)
 
+
+from . import character_swap as swap_lab  # noqa: E402
+
+
+def _swap_public(swap: dict) -> dict:
+    """Image URLs for the sheet (the worker follows the render jobs: swap_lab.follow after each swap job)."""
+    swap = {k: v for k, v in swap.items() if k != "built"}
+    version = int(float(swap.get("painted_version") or 0))
+    for shot in swap.get("shots", []):
+        base = f"/api/swap/{swap['id']}/image"
+        shot["frame_url"] = f"{base}/{shot['frame']}"
+        if shot.get("painted"):
+            shot["painted_url"] = f"{base}/{shot['painted']}?v={version}"
+    return swap
+
+
+@app.get("/api/swap/characters")
+async def swap_characters():
+    return {"characters": [{**c, "image_url": f"/api/swap/characters/{c['id']}/image"}
+                           for c in swap_lab.list_characters()]}
+
+
+@app.post("/api/swap/characters")
+async def swap_add_character(request: Request, image: UploadFile = File(...), name: str = Form(...),
+                             look: str = Form("")):
+    require_csrf(request)
+    raw = await image.read()
+    if len(raw) > 60 * 1024 * 1024:   # big character sheets are fine: they are shrunk to 2048 px
+        raise HTTPException(400, "The image is larger than 60 MB")
+    try:
+        return await asyncio.to_thread(swap_lab.add_character, name, raw, look)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/swap/characters/{char_id}/image")
+async def swap_character_image(char_id: str):
+    item = next((c for c in swap_lab.list_characters() if c["id"] == char_id), None)
+    if not item:
+        raise HTTPException(404, "Character not found")
+    return FileResponse(swap_lab.CHARACTERS / item["image"])
+
+
+class SwapCharacterBody(BaseModel):
+    name: str | None = None
+    look: str | None = None
+
+
+@app.patch("/api/swap/characters/{char_id}")
+async def swap_edit_character(request: Request, char_id: str, body: SwapCharacterBody):
+    require_csrf(request)
+    try:
+        return swap_lab.update_character(char_id, body.name, body.look)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/swap/characters/{char_id}")
+async def swap_delete_character(request: Request, char_id: str):
+    require_csrf(request)
+    try:
+        swap_lab.delete_character(char_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"deleted": True}
+
+
+@app.get("/api/swaps")
+async def swap_list():
+    return {"swaps": [_swap_public(s) for s in swap_lab.list_swaps()]}
+
+
+@app.post("/api/swap")
+async def swap_create(request: Request, job_id: str | None = Form(None), video: UploadFile | None = File(None)):
+    """Start a swap from a finished job (job_id) or an uploaded video; returns the shots to mark."""
+    require_csrf(request)
+    if job_id:
+        job = get_job(job_id, public=False)
+        if not job or job["status"] != "completed":
+            raise HTTPException(404, "Pick a finished video")
+        path = resolve_asset_path("job", job_id)
+        if not path or not Path(path).is_file():
+            raise HTTPException(409, "The video file is missing")
+        with connect() as db:
+            place = db.execute("SELECT p.name, f.name FROM asset_assignments a JOIN asset_projects p ON p.id=a.project_id "
+                               "LEFT JOIN asset_folders f ON f.id=a.folder_id WHERE a.source_type='job' AND a.source_id=?",
+                               (job_id,)).fetchone()
+        where = " / ".join(x for x in (place or ()) if x) or "Studio"
+        title, source = f"{where} · job {job_id[:8]}", Path(path)
+    elif video is not None:
+        if video.content_type not in UPLOAD_TYPES:
+            raise HTTPException(400, "Only MP4, MOV, WebM or MKV videos are allowed")
+        raw = swap_lab.SWAPS / f".upload_{uuid.uuid4().hex}{UPLOAD_TYPES[video.content_type]}"
+        swap_lab.SWAPS.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with raw.open("wb") as handle:
+            while chunk := await video.read(4 * 1024 * 1024):
+                size += len(chunk)
+                if size > UPLOAD_MAX_BYTES:
+                    raw.unlink(missing_ok=True)
+                    raise HTTPException(400, "The video is larger than 500 MB")
+                handle.write(chunk)
+        title, source = f"Upload: {Path(video.filename or 'video').name[:100]}", raw
+    else:
+        raise HTTPException(400, "Pick a finished video or upload one")
+    try:
+        swap = await asyncio.to_thread(swap_lab.create_swap, source, title, job_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        if not job_id:
+            source.unlink(missing_ok=True)
+    return _swap_public(swap)
+
+
+@app.get("/api/swap/{swap_id}")
+async def swap_get(swap_id: str):
+    try:
+        return _swap_public(swap_lab.get_swap(swap_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/swap/{swap_id}")
+async def swap_delete(request: Request, swap_id: str):
+    require_csrf(request)
+    try:
+        swap_lab.delete_swap(swap_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"deleted": True}
+
+
+@app.get("/api/swap/{swap_id}/image/{name}")
+async def swap_image(swap_id: str, name: str):
+    try:
+        folder = swap_lab._swap_dir(swap_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if not re.fullmatch(r"shot\d+_(frame|painted|marked)\.png", name) or not (folder / name).is_file():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(folder / name)
+
+
+class SwapMarksBody(BaseModel):
+    marks: list[dict]
+    mode: str = "reference"
+    notes: str = ""
+    engine: str = "viggle"
+    empty: list[int] = []
+
+
+@app.put("/api/swap/{swap_id}/marks")
+async def swap_marks(request: Request, swap_id: str, body: SwapMarksBody):
+    require_csrf(request)
+    try:
+        return _swap_public(swap_lab.set_marks(swap_id, body.marks, body.mode, body.notes, body.engine, body.empty))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/swap/{swap_id}/prepare")
+async def swap_prepare(request: Request, swap_id: str):
+    require_csrf(request)
+    try:
+        return _swap_public(swap_lab.start_prepare(swap_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/swap/{swap_id}/shots/{shot}/repaint")
+async def swap_repaint(request: Request, swap_id: str, shot: int):
+    require_csrf(request)
+    try:
+        return _swap_public(swap_lab.start_repaint(swap_id, shot))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/swap/{swap_id}/shots/{shot}/painted")
+async def swap_upload_painted(request: Request, swap_id: str, shot: int, image: UploadFile = File(...)):
+    """Your own painted frame for a shot (painted-keyframes mode): made in any image tool, then uploaded."""
+    require_csrf(request)
+    raw = await image.read()
+    if len(raw) > 25 * 1024 * 1024:
+        raise HTTPException(400, "The image is larger than 25 MB")
+    try:
+        return _swap_public(await asyncio.to_thread(swap_lab.set_painted, swap_id, shot, raw))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class SwapSplitBody(BaseModel):
+    frame: int
+
+
+@app.post("/api/swap/{swap_id}/parts/{index}/split")
+async def swap_split_part(request: Request, swap_id: str, index: int, body: SwapSplitBody):
+    require_csrf(request)
+    try:
+        return _swap_public(await asyncio.to_thread(swap_lab.split_part, swap_id, index, body.frame))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+class SwapRerenderBody(BaseModel):
+    from_part: int
+    only: bool = False
+
+
+@app.post("/api/swap/{swap_id}/rerender")
+async def swap_rerender(request: Request, swap_id: str, body: SwapRerenderBody):
+    """Re-render from one part onward, keeping the finished video before that part's window."""
+    require_csrf(request)
+    try:
+        return _swap_public(await asyncio.to_thread(swap_lab.rerender_from, swap_id, body.from_part, None, body.only))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/swap/{swap_id}/render")
+async def swap_render(request: Request, swap_id: str):
+    require_csrf(request)
+    try:
+        swap = swap_lab.get_swap(swap_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    location = None
+    if swap.get("source_job_id"):
+        with connect() as db:
+            row = db.execute("SELECT project_id, folder_id FROM asset_assignments WHERE source_type='job' AND "
+                             "source_id=?", (swap["source_job_id"],)).fetchone()
+        location = (row[0], row[1]) if row else None
+    if not location:
+        library = list_library()
+        project = next((p for p in library["projects"] if p["name"] == "Character swap"), None)
+        if not project:
+            project = create_project("Character swap")
+        folder = next((f for f in project.get("folders", []) if f["name"] == "From the swap sheet"), None)
+        if not folder:
+            folder = create_folder(project["id"], "From the swap sheet")
+        location = (project["id"], folder["id"])
+    try:
+        return _swap_public(await asyncio.to_thread(swap_lab.render, swap_id, location))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+
+
+def _queue_swap_job(*, title: str, variant: str, steps: int, width: int, height: int, duration: float,
+                    portrait: bool, seed: str, options: dict, folder_ref, source_job_id: str | None) -> str:
+    """Insert one character-swap job (a window chain, an akatz run, or the join of a long clip) into the queue,
+    filed in the swap's folder (issue #46)."""
+    new_id = uuid.uuid4().hex
+    now = now_iso()
+    with connect() as db:
+        position = next_position(db)
+        db.execute(
+            """INSERT INTO jobs
+               (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,attention_mode,encoder,steps,width,height,
+                megapixels,aspect_ratio,seed,status,position,no_audio,swap_options_json,created_at,updated_at)
+               VALUES(?,?,'swap',?,'swap',?,'v1',?,'native',?,?,?,?,?,?,'queued',?,0,?,?,?)""",
+            (new_id, title, max(0.5, min(60.0, duration)), variant,
+             "standard", steps, width, height,
+             round(width * height / 1_000_000, 2), "9:16" if portrait else "16:9", str(int(seed) % 2 ** 63), position,
+             json.dumps(options), now, now),
+        )
+    if folder_ref:
+        try:
+            assign_asset("job", new_id, folder_ref[0], folder_ref[1])
+        except Exception:
+            logging.exception("Could not file swap job %s", new_id)
+    worker.notify()
+    return new_id
+
+
+swap_lab.set_job_queue(_queue_swap_job)
 
 @app.post("/api/post-process")
 async def post_process_upload(request: Request, video: UploadFile = File(...), operation: str = Form(...),

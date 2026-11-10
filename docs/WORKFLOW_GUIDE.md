@@ -535,6 +535,22 @@ For comparison on the same 1632×928 shots: Real-ESRGAN takes about 232 s and RI
 - Not offered: DLSS frame generation (refused on RTX 30 cards), PeakMagnetar (about 2.5 hours per shot),
   DLSS Super Resolution (its modes fix the output at 2× or more, so it needs another resize).
 
+## Character swap (2026-11-09/10, issue #46)
+
+Swap people in a finished job (its card's **החלפת דמות** button) or an uploaded video (the button in the results
+header) with characters from a library. How it works, the API and how to make painted frames:
+[`CHARACTER_SWAP_GUIDE.md`](CHARACTER_SWAP_GUIDE.md).
+
+| Flow | Result on the 3080 (10 GB) | Time per ~5 s | Notes |
+|---|---|---|---|
+| Viggle, painted frames per part | best: 2 people on an 18 s stage clip right in every part, helpers untouched, window joins seamless | ~9 min (+ painting) | 1280×736 / 736×1280, int8 attention, 9.5 GB; up to 4 windows per job, longer clips chain jobs and join them. App run: 18 s (432 frames, 4 windows) in 2067 s; re-rendering one window 519 s plus a few seconds to stitch, every frame on time |
+| Viggle, character picture only | good for one person close to the camera; with two look-alike people the characters blended, a far person kept the original face | ~8-9 min | the app run on a 5 s shot: 491 s, 9.5 GB |
+| akatz V1.5 | one person; follows them through cuts and camera swings, but swaps whoever matches the description when they leave the shot | ~6 min | 512×928 at its "480" setting; the app run on a 5 s shot: 351 s, 9.5 GB; up to 149 s |
+
+Painted frames: Codex refuses frames it classifies as showing a public figure; use another image editor or a frame
+from another render of the same clip (an akatz run) for those parts. Paint each later part from the first painted
+frame of the same character, or he changes look at the window join.
+
 ## Singularity, Pika and the official LTX templates
 
 Ported from the H3 skin lab (October 2026). Each job is a single shot; none of these work in connected jobs.

@@ -12,6 +12,7 @@ private HTTPS access only to devices allowed in the current user's tailnet.
 | Install or repair it | Quick start below, then `.agents/skills/h3-environment-bootstrap/SKILL.md` |
 | Understand the hardware limits, or run it on a bigger GPU | [`docs/HARDWARE_AND_VRAM.md`](docs/HARDWARE_AND_VRAM.md) |
 | Use LTX (lip-sync, reference sheets, the optional fixes) | [`docs/ltx-2.5-ia2v-workflow.md`](docs/ltx-2.5-ia2v-workflow.md) |
+| Swap people in a video with your own characters | [`docs/CHARACTER_SWAP_GUIDE.md`](docs/CHARACTER_SWAP_GUIDE.md) |
 | Reach it from a phone | [`docs/TAILSCALE.md`](docs/TAILSCALE.md) |
 | Change the code (people and agents) | [`AGENTS.md`](AGENTS.md), then `.agents/skills/h3-mobile-bridge-codebase/SKILL.md` |
 | Commit or release | `.agents/skills/git-standards/SKILL.md`, `.agents/skills/release-process/SKILL.md` |
@@ -155,6 +156,7 @@ audio track. Engines:
 | Singularity | Realistic-skin H3 model, 8 steps, tiers with People and speed LoRAs; see the workflow guide |
 | Pika | H3 + Pika H3 Flex LoRA, fixed 6 steps at 1.5 MP, best for action; Turbo 4-step (opening frame, first + last, lip-sync, Sage, up to 5 s) is about 25-30% faster; see the workflow guide |
 | Omni | Comfy-Org's FastH3 OmniRef 8-step, reference mode only: images, a song or a reference video (copies its moves); see the workflow guide |
+| Character swap | Replace people in a finished job or an uploaded video with characters from a library: Viggle Remake (up to 4 people, any length, painted frames for the best result) or akatz V1.5 (one person); see [`docs/CHARACTER_SWAP_GUIDE.md`](docs/CHARACTER_SWAP_GUIDE.md) |
 
 Per-job options include Sage and sparse (SLA) attention speed-ups where the
 engine supports them, the ClipProj 4B text encoder as a memory saver, and for
