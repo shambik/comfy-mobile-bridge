@@ -50,7 +50,8 @@ try {
         Write-Host ("Groups: " + ($selected -join ', '))
         foreach ($group in $selected) {
             $groupModels = @($chosenModels | Where-Object { (Get-ManifestItemGroups -Item $_) -contains $group })
-            $bytes = ($groupModels | Measure-Object -Property bytes -Sum).Sum
+            # A group may hold only node packs (h3_detail): Measure-Object has no Sum for an empty list.
+            $bytes = if ($groupModels.Count) { ($groupModels | Measure-Object -Property bytes -Sum).Sum } else { 0 }
             $gated = if ($groupModels | Where-Object { $_.PSObject.Properties.Name -contains 'gated' -and $_.gated }) { ' (gated: needs HF_TOKEN)' } else { '' }
             Write-Host ('  {0,-18} {1,3} models {2,8:N1} GiB{3}' -f $group, $groupModels.Count, ($bytes / 1GB), $gated)
         }

@@ -643,5 +643,193 @@ class PostJobsTableTests(unittest.TestCase):
                     (method, "p", "upscale", 5.0, method, now, now))
 
 
+# --- RTX VSR + H3 detail (issue #50) -----------------------------------------------------------------------------
+from backend.post_process import (H3_DETAIL, H3_DETAIL_LEVELS, h3_detail_chain, h3_detail_frames,  # noqa: E402
+                                  h3_detail_input_command, h3_detail_workflow, plan_h3_detail, post_required_files)
+
+RTX_1920 = {"width": 1920, "height": 1080, "fps": 24.0, "frames": 124, "duration": 5.167, "audio": True}
+PIKA_OPENING = {"id": "orig", "engine": "pika", "workflow_variant": "direct", "mode": "opening",
+                "prompt": "r34l1sm\n\nA courier jumps a gap between rooftops."}
+SKIN_PIKA = json.dumps({"model": "base", "speed_lora": "pika", "flow": "pika"})
+
+
+class H3DetailPlanTests(unittest.TestCase):
+    def test_only_the_tested_sources(self):
+        cases = [
+            (PIKA_OPENING, "pika"),
+            ({"engine": "singularity", "mode": "opening", "skin_options_json": SKIN_PIKA}, "pika"),
+            ({"engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync"}, "turbo_v4"),
+            ({"engine": "pika", "workflow_variant": "turbo4", "mode": "opening"}, None),        # Pika Turbo 4-step
+            ({"engine": "pika", "workflow_variant": "direct", "mode": "reference"}, None),
+            ({"engine": "singularity", "mode": "opening",
+              "skin_options_json": json.dumps({"model": "pruned", "speed_lora": "tier"})}, None),
+            ({"engine": "turbo", "turbo_profile": "v4", "mode": "opening"}, None),
+            ({"engine": "turbo", "turbo_profile": "v1", "mode": "lip_sync"}, None),
+            ({"engine": "ltx", "mode": "opening"}, None),
+        ]
+        for source, chain in cases:
+            self.assertEqual(h3_detail_chain(source)[0], chain, source)
+        self.assertIn("tested", h3_detail_chain({"engine": "ltx", "mode": "opening"})[1])
+
+    def test_frames_snap_down_to_17n_plus_5(self):
+        for frames, keep in ((124, 124), (362, 362), (360, 345), (117, 107), (243, 243), (4, 0)):
+            self.assertEqual(h3_detail_frames(frames), keep)
+
+    def test_plan_keeps_the_tested_limits(self):
+        options = plan_h3_detail({**RTX_1920, "frames": 360, "duration": 15.0}, PIKA_OPENING, "s45")
+        self.assertEqual((options["method"], options["chain"], options["frames"], options["trimmed_frames"],
+                          options["sigmas"], options["width"], options["height"]),
+                         (H3_DETAIL, "pika", 345, 15, "0.45, 0.2, 0.0", 1920, 1080))
+        self.assertEqual(options["original_job_id"], "orig")
+        portrait = plan_h3_detail({**RTX_1920, "width": 1080, "height": 1920, "frames": 117},
+                                  {"id": "o", "engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync"}, "s75x3")
+        self.assertEqual((portrait["frames"], portrait["chain"], portrait["sigmas"]),
+                         (107, "turbo_v4", "0.75, 0.5, 0.25, 0.0"))
+        refused = [
+            ({**RTX_1920}, PIKA_OPENING, "s90"),                                     # untested strength
+            ({**RTX_1920, "width": 2560, "height": 1440}, PIKA_OPENING, "s45"),      # 2560 needs tiles: not tested
+            ({**RTX_1920, "fps": 48.0}, PIKA_OPENING, "s45"),                        # smoothed clip
+            ({**RTX_1920, "frames": 100}, PIKA_OPENING, "s45"),                      # shorter than tested
+            ({**RTX_1920, "frames": 400}, PIKA_OPENING, "s45"),                      # longer than The Last Fold
+            ({**RTX_1920}, {"id": "x", "engine": "ltx", "mode": "opening"}, "s45"),  # untested engine
+        ]
+        for rtx, original, level in refused:
+            with self.assertRaises(ValueError):
+                plan_h3_detail(rtx, original, level)
+        self.assertEqual(set(H3_DETAIL_LEVELS), {"s30", "s45", "s60", "s60x3", "s75x3"})
+
+    def test_input_is_trimmed_with_its_sound(self):
+        options = plan_h3_detail({**RTX_1920, "frames": 360}, PIKA_OPENING, "s30")
+        command = h3_detail_input_command(options, Path("in.mp4"), Path("out.mp4"))
+        self.assertEqual(command[command.index("-frames:v") + 1], "345")
+        self.assertEqual(command[command.index("-t") + 1], f"{345 / 24:.6f}")
+        self.assertIn("aac", command)
+
+
+class H3DetailWorkflowTests(unittest.TestCase):
+    def test_pika_graph_is_the_lab_graph(self):
+        options = plan_h3_detail(dict(RTX_1920), PIKA_OPENING, "s60x3")
+        g = h3_detail_workflow(options, "post_x_source.mp4", "h3_bridge_x", seed=2 ** 60 + 7)
+        by_class = {node["class_type"]: node["inputs"] for node in g.values()}
+        self.assertEqual((by_class["MiniMaxH3ImageToVideo"]["width"], by_class["MiniMaxH3ImageToVideo"]["height"],
+                          by_class["MiniMaxH3ImageToVideo"]["length"]), (1920, 1088, 124))
+        self.assertEqual(by_class["MiniMaxH3ImageToVideo"]["prompt"], "A courier jumps a gap between rooftops.")
+        self.assertEqual(by_class["LoraLoaderModelOnly"]["lora_name"], "pika_h3_flex_fl2va_comfy_bf16.safetensors")
+        self.assertNotIn("MiniMaxH3TurboLoRA", by_class)
+        self.assertEqual(by_class["ModelAttentionBackend"]["attention"], "comfy kitchen attention")
+        self.assertEqual(by_class["ManualSigmas"]["sigmas"], "0.6, 0.4, 0.2, 0.0")
+        self.assertEqual(by_class["KSamplerSelect"]["sampler_name"], "er_sde")
+        self.assertEqual((by_class["MMH3TemporalSplitParams"]["chunk_length"],
+                          by_class["MMH3TemporalSplitParams"]["temporal_overlap"]), (68, 17))
+        self.assertEqual(by_class["RandomNoise"]["noise_seed"], (2 ** 60 + 7) % 2 ** 50)
+        self.assertEqual((by_class["ImageScale"]["width"], by_class["ImageScale"]["height"]), (1920, 1080))  # back
+        self.assertEqual(by_class["CreateVideo"]["audio"], ["2", 1])
+        self.assertEqual(by_class["SaveVideo"]["filename_prefix"], "h3_bridge_x")
+        self.assertEqual(by_class["SaveVideo"]["format.codec.encoding.crf"], 12.0)
+        self.assertEqual(classes(g), post_node_classes(options))
+
+    def test_turbo_graph_uses_the_v4_lora(self):
+        options = plan_h3_detail({**RTX_1920, "width": 1080, "height": 1920, "frames": 107},
+                                 {"id": "o", "engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync",
+                                  "prompt": "He sings."}, "s45")
+        g = h3_detail_workflow(options, "v.mp4", "p", seed=1)
+        by_class = {node["class_type"]: node["inputs"] for node in g.values()}
+        self.assertEqual(by_class["MiniMaxH3TurboLoRA"]["lora_name"], "minimax_h3_turbo_v4_step600_ema.safetensors")
+        self.assertEqual((by_class["MiniMaxH3ImageToVideo"]["width"], by_class["MiniMaxH3ImageToVideo"]["height"]),
+                         (1088, 1920))
+        files = [path.name for path in post_required_files(options)]
+        self.assertIn("minimax_h3_turbo_v4_step600_ema.safetensors", files)
+        self.assertIn("minimax_h3_fl2va_pruned_int8_convrot.safetensors", files)
+
+
+class H3DetailApiTests(ApiBase):
+    def add_rtx(self, rtx_id: str, original_id: str | None, long_side: int = 1920, method: str = "rtx") -> Path:
+        video = self.output / f"{rtx_id}.mp4"
+        video.write_bytes(b"video")
+        now = now_iso()
+        options = {"operation": "upscale", "method": method, "long_side": long_side, "source_job_id": original_id}
+        with connect() as db:
+            db.execute(
+                """INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,
+                   height,megapixels,aspect_ratio,seed,status,position,output_path,post_options_json,created_at,updated_at)
+                   VALUES(?,?,?,?,'post',?,'v1','native',1,1920,1080,2.07,'16:9','7','completed',2,?,?,?,?)""",
+                (rtx_id, "RTX VSR upscale", "upscale", 15, method, str(video), json.dumps(options), now, now))
+        return video
+
+    def add_original(self, job_id: str, engine: str = "pika", mode: str = "opening"):
+        self.add_job(job_id)
+        with connect() as db:
+            db.execute("UPDATE jobs SET engine=?, mode=?, workflow_variant='direct', steps=?, prompt=? WHERE id=?",
+                       (engine, mode, 8 if engine == "ltx" else 6, "A laundromat, two friends fold clothes.", job_id))
+
+    def fake_ffmpeg(self, command, **_):
+        Path(command[-1]).write_bytes(b"trimmed")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def test_queues_from_an_rtx_card_with_the_original_prompt(self):
+        self.add_original("orig")
+        self.add_rtx("rtx", "orig")
+        with patch("backend.main.probe_video", return_value={**RTX_1920, "frames": 360, "duration": 15.0}), \
+                patch("backend.main.subprocess.run", side_effect=self.fake_ffmpeg):
+            response = self.post("rtx", {"operation": "upscale", "method": "h3detail", "detail": "s45"})
+        self.assertEqual(response.status_code, 200, response.text)
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (response.json()["created"][0],)).fetchone())
+        options = json.loads(row["post_options_json"])
+        self.assertEqual((row["engine"], row["workflow_variant"], row["width"], row["height"]),
+                         ("post", "h3detail", 1920, 1080))
+        self.assertEqual((options["frames"], options["trimmed_frames"], options["source_job_id"],
+                          options["original_job_id"], options["chain"]), (345, 15, "rtx", "orig", "pika"))
+        self.assertEqual(options["prompt"], "A laundromat, two friends fold clothes.")
+        self.assertTrue((self.input / row["input_name"]).is_file())
+
+    def test_refusals_say_why(self):
+        self.add_original("orig")
+        self.add_original("ltx_orig", engine="ltx")
+        self.add_rtx("rtx2560", "orig", long_side=2560)
+        self.add_rtx("gan", "orig", method="gan")
+        self.add_rtx("rtx_ltx", "ltx_orig")
+        self.add_rtx("rtx_gone", "deleted")
+        body = {"operation": "upscale", "method": "h3detail", "detail": "s45"}
+        with patch("backend.main.probe_video", return_value=dict(RTX_1920)):
+            self.assertEqual(self.post("orig", body).status_code, 400)       # not an RTX VSR clip
+            self.assertEqual(self.post("rtx2560", body).status_code, 400)
+            self.assertEqual(self.post("gan", body).status_code, 400)
+            response = self.post("rtx_ltx", body)
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("tested", response.json()["detail"])
+            self.assertEqual(self.post("rtx_gone", body).status_code, 409)
+        self.add_rtx("rtx", "orig")
+        with patch("backend.main.probe_video", return_value=dict(RTX_1920)):
+            self.assertEqual(self.post("rtx", {**body, "detail": None}).status_code, 400)
+        self.assertEqual(list(self.input.iterdir()), [])
+
+
+class H3DetailMigrationTests(unittest.TestCase):
+    def test_existing_job_tables_take_the_new_variant_and_keep_every_row(self):
+        temp = tempfile.TemporaryDirectory(prefix="h3-detail-db-")
+        self.addCleanup(temp.cleanup)
+        original = db_module.DB_PATH
+        self.addCleanup(setattr, db_module, "DB_PATH", original)
+        db_module.DB_PATH = Path(temp.name) / "old.sqlite3"
+        source = Path(db_module.__file__).read_text(encoding="utf-8")
+        start = source.index("    CREATE TABLE jobs (")
+        sql = source[start:source.index("    CREATE INDEX idx_jobs_queue", start)].replace(",'h3detail'", "")
+        old = sqlite3.connect(db_module.DB_PATH)
+        old.executescript(sql)
+        now = now_iso()
+        old.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,
+                       height,seed,status,position,created_at,updated_at) VALUES('keep','RTX','upscale',5,'post','rtx',
+                       'v1','native',1,1920,1080,'1','completed',1,?,?)""", (now, now))
+        old.commit()
+        old.close()
+        db_module.init_db()
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT workflow_variant FROM jobs WHERE id='keep'").fetchone()[0], "rtx")
+            db.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,
+                          width,height,seed,status,position,created_at,updated_at) VALUES('d','Detail','upscale',5,'post',
+                          'h3detail','v1','native',1,1920,1080,'1','queued',2,?,?)""", (now, now))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,11 +25,14 @@ import subprocess
 from fractions import Fraction
 from pathlib import Path
 
+from .config import AUDIO_VAE, FL2VA_MODEL, FUSED_VIDEO_VAE, MODELS, PIKA_FL2VA_LORA, SKIN_MODELS, TEXT_ENCODER, TURBO_LORAS
+
 INTERPOLATION_MODELS = {"rife": "rife_v4.26.safetensors", "film": "film_net_fp16.safetensors"}
 UPSCALE_MODELS = {"gan": "RealESRGAN_x2plus.pth"}
 METHODS = {"interpolate": ("rife", "film", "fsr3"), "upscale": ("lanczos", "gan", "rtx")}
 METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2",
-                 "rtx": "RTX Video Super Resolution", "fsr3": "FSR 3 frame generation"}
+                 "rtx": "RTX Video Super Resolution", "fsr3": "FSR 3 frame generation",
+                 "h3detail": "RTX VSR + H3 detail"}
 # Methods the worker runs through Visual Enhancer's VE_CLI.exe instead of a ComfyUI graph.
 VISUAL_ENHANCER_METHODS = ("rtx", "fsr3")
 VISUAL_ENHANCER_TIMEOUT_SECONDS = 15 * 60  # the lab runs took 5-19 s; a hung run must not hold the queue
@@ -98,15 +101,6 @@ def chunk_keep(options: dict, chunk: dict) -> int:
     if options["operation"] == "upscale" or options["method"] == "fsr3":
         return n if options["operation"] == "upscale" else 2 * n
     return 2 * n if chunk["borrow"] else 2 * n - 1
-GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up to 1632x928: 247 frames in one pass,
-GAN_SMOOTHED_MAX_PIXELS = 1632 * 928  # 454 s, 6.8 GB VRAM, 31 GB ComfyUI RAM (3 lab windows of 83 frames: ~470 s)
-LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
-INTERPOLATE_MAX_FPS = 30.0          # 24 and 30 fps sources were tested; smoothing a 48/60 fps clip is not
-UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
-UPSCALE_MAX_PIXELS = 2560 * 1456
-# Near-16:9 and near-9:16 sources (the app's sizes are 1.75-1.83, not exactly 1.78) go to the standard delivery
-# sizes, 1920x1080 / 2560x1440 and the portrait pair, with a small center crop. Other shapes keep their own.
-STANDARD_RATIO_TOLERANCE = 0.04
 
 
 def probe_video(path: Path) -> dict:
@@ -266,6 +260,9 @@ def visual_enhancer_finish_command(options: dict, rendered: Path, source: Path, 
 
 
 def post_node_classes(options: dict) -> set[str]:
+    if options["method"] == H3_DETAIL:
+        lora_node = "LoraLoaderModelOnly" if options["chain"] == "pika" else "MiniMaxH3TurboLoRA"
+        return H3_DETAIL_NODE_CLASSES | {lora_node}
     classes = {"LoadVideo", "GetVideoComponents", "CreateVideo", "SaveVideo"}
     if options["method"] in INTERPOLATION_MODELS:
         classes |= {"FrameInterpolationModelLoader", "FrameInterpolate"}
@@ -313,8 +310,179 @@ def post_process_workflow(options: dict, video_name: str, prefix: str) -> dict:
     return g
 
 
+# --- RTX VSR + H3 detail (issue #50) -----------------------------------------------------------------------------
+# A short second H3 pass over an RTX VSR 1920 clip redraws real detail (fabric, skin, eyes, hair, background) with the
+# source clip's own prompt and model, through bbaudio-2025/Comfyui-MMH3-UltimateUpscale (time chunks, audio carried
+# through). Lab A/B on the RTX 3080 10 GB, 2026-11-10 (D:/h3-omnilab/tests/h3_detail_pass/RESULTS.md); the user rated
+# every one of these good: Missed Bus face and The Package rooftop jump (Singularity Pika flow, 1632x928, 124 frames,
+# ~332 s), The Last Fold (Pika flow, 1024x576 -> 1920x1080, two hard cuts, 345 frames, ~900 s, peak RAM 61 GB) and a
+# Turbo v4 lip-sync clip (928x1632 -> 1080x1920, 107 frames, ~275 s). Peak VRAM 9.5-9.7 GB in every run.
+H3_DETAIL = "h3detail"
+# Explicit sigmas (er_sde): a BasicScheduler "denoise" at shift 6 starts much higher (0.40 -> 0.774), which redrew mouths.
+H3_DETAIL_LEVELS = {
+    "s30": ("0.3, 0.15, 0.0", "light, 0.30"),
+    "s45": ("0.45, 0.2, 0.0", "medium, 0.45"),
+    "s60": ("0.6, 0.3, 0.0", "strong, 0.60"),
+    "s60x3": ("0.6, 0.4, 0.2, 0.0", "strong, 0.60, 3 steps"),
+    "s75x3": ("0.75, 0.5, 0.25, 0.0", "strongest, 0.75, 3 steps"),   # painted patterns start to change
+}
+H3_DETAIL_SIZES = ((1920, 1080), (1080, 1920))   # the RTX VSR 1920 outputs that were tested
+H3_DETAIL_FPS = 24.0
+H3_DETAIL_MIN_FRAMES = 107                       # the shortest tested clip (4.5 s)
+H3_DETAIL_MAX_FRAMES = 362                       # The Last Fold, 15 s (peak RAM 61 GB of 64)
+H3_DETAIL_CHUNK = (68, 17, 0.99)                 # time chunk, overlap (frames), frame-0 anchor strength
+H3_DETAIL_SEED_MOD = 2 ** 50
+
+
+def h3_detail_chain(source: dict) -> tuple[str | None, str]:
+    """The model chain the H3 detail pass uses for this source clip, or None and why it is not offered.
+
+    Only what the lab ran: the Pika flow (FL2VA int8 + Pika Flex LoRA: the Pika engine, or Singularity with the Pika
+    speed LoRA on the base model) on opening-frame clips, and Turbo v4 on lip-sync clips."""
+    engine, mode = source.get("engine"), source.get("mode")
+    try:
+        skin = json.loads(source.get("skin_options_json") or "{}")
+    except json.JSONDecodeError:
+        skin = {}
+    pika = (engine == "pika" and source.get("workflow_variant") != "turbo4") or (
+        engine == "singularity" and skin.get("speed_lora") == "pika" and skin.get("model") == "base")
+    if pika:
+        if mode == "opening":
+            return "pika", ""
+        return None, "H3 detail was tested on Pika-flow opening-frame clips only"
+    if engine == "turbo" and (source.get("turbo_profile") or "v1") == "v4":
+        if mode == "lip_sync":
+            return "turbo_v4", ""
+        return None, "H3 detail was tested on Turbo v4 lip-sync clips only"
+    return None, ("H3 detail was tested on Pika-flow opening-frame clips and Turbo v4 lip-sync clips; "
+                  "this clip comes from another engine")
+
+
+def h3_detail_frames(frames: int) -> int:
+    """H3 needs 17n+5 frames: the most such frames that fit (the end of the clip is trimmed)."""
+    return (frames - 5) // 17 * 17 + 5 if frames >= 5 else 0
+
+
+def plan_h3_detail(rtx: dict, original: dict, level: str | None) -> dict:
+    """Check an RTX VSR clip and its original H3 clip against the tested limits; return the stored options.
+
+    `rtx` is the probe of the RTX VSR output, `original` the job row the RTX VSR job was made from (raises ValueError).
+    """
+    if level not in H3_DETAIL_LEVELS:
+        raise ValueError("Choose a detail strength: " + ", ".join(label for _, label in H3_DETAIL_LEVELS.values()))
+    chain, why = h3_detail_chain(original)
+    if not chain:
+        raise ValueError(why)
+    width, height, fps, frames = rtx["width"], rtx["height"], rtx["fps"], rtx["frames"]
+    if (width, height) not in H3_DETAIL_SIZES:
+        raise ValueError(f"H3 detail runs on RTX VSR 1920 clips (1920x1080 or 1080x1920); this one is {width}x{height}")
+    if abs(fps - H3_DETAIL_FPS) > 0.01:
+        raise ValueError(f"H3 detail was tested on 24 fps clips; this one is {fps:g} fps")
+    keep = h3_detail_frames(frames)
+    if keep < H3_DETAIL_MIN_FRAMES:
+        raise ValueError(f"H3 detail was tested on clips of {H3_DETAIL_MIN_FRAMES} frames or more; this one has {frames}")
+    if keep > H3_DETAIL_MAX_FRAMES:
+        raise ValueError(f"H3 detail was tested on clips of up to {H3_DETAIL_MAX_FRAMES} frames (15 s); "
+                         f"this one has {frames}")
+    sigmas, label = H3_DETAIL_LEVELS[level]
+    return {"operation": "upscale", "method": H3_DETAIL, "detail": level, "detail_label": label, "sigmas": sigmas,
+            "chain": chain, "prompt": original.get("prompt") or "", "original_job_id": original["id"],
+            "source_width": width, "source_height": height, "source_frames": frames, "source_fps": round(fps, 3),
+            "source_duration": round(rtx["duration"], 3), "audio": bool(rtx["audio"]),
+            "width": width, "height": height, "fps": round(fps, 3), "frames": keep, "trimmed_frames": frames - keep,
+            "long_side": max(width, height), "crop_percent": 0.0}
+
+
+def h3_detail_input_command(options: dict, source: Path, out: Path) -> list[str]:
+    """Copy the RTX VSR clip for the job, trimmed to the 17n+5 frames H3 takes (sound cut to the same length)."""
+    frames, fps = options["frames"], float(options["fps"])
+    command = ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-frames:v", str(frames), "-t", f"{frames / fps:.6f}",
+               "-c:v", "libx264", "-crf", "8", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    command += ["-c:a", "aac", "-b:a", "320k"] if options.get("audio") else ["-an"]
+    return [*command, "-movflags", "+faststart", str(out)]
+
+
+def h3_detail_prompt(options: dict) -> str:
+    """The source prompt, without the People LoRA trigger line (that LoRA is not part of the pass)."""
+    lines = (options.get("prompt") or "").strip().splitlines()
+    while lines and lines[0].strip().lower() == "r34l1sm":
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def h3_detail_workflow(options: dict, video_name: str, prefix: str, seed: int) -> dict:
+    """The lab graph: RTX clip -> 32-px grid -> H3 video/audio encode -> MMH3 Ultimate Upscale with the source's prompt
+    and model (int8 kitchen attention, frame 0 as the first frame, er_sde, explicit sigmas, time chunks) -> tiled
+    decode -> back to the RTX size, with the clip's own sound, CRF 12."""
+    out_w, out_h, frames = options["width"], options["height"], options["frames"]
+    w, h = -(-out_w // 32) * 32, -(-out_h // 32) * 32
+    chunk, overlap, anchor = H3_DETAIL_CHUNK
+    g = {"1": {"class_type": "LoadVideo", "inputs": {"file": video_name}},
+         "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+         "3": {"class_type": "ImageScale", "inputs": {"image": ["2", 0], "upscale_method": "lanczos", "width": w,
+                                                      "height": h, "crop": "disabled"}},
+         "4": {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}},
+         "5": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+         "6": {"class_type": "VAEEncode", "inputs": {"pixels": ["3", 0], "vae": ["4", 0]}},
+         "7": {"class_type": "VAEEncodeAudio", "inputs": {"audio": ["2", 1], "vae": ["5", 0]}},
+         "8": {"class_type": "LTXVConcatAVLatent", "inputs": {"video_latent": ["6", 0], "audio_latent": ["7", 0]}},
+         "9": {"class_type": "ImageFromBatch", "inputs": {"image": ["3", 0], "batch_index": 0, "length": 1}},
+         "10": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax", "device": "default"}},
+         "11": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+             "clip": ["10", 0], "vae": ["4", 0], "prompt": h3_detail_prompt(options), "width": w, "height": h,
+             "length": frames, "first_frame": ["9", 0]}},
+         "20": {"class_type": "UNETLoader", "inputs": {"unet_name": FL2VA_MODEL, "weight_dtype": "default"}}}
+    if options["chain"] == "pika":
+        g["21"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["20", 0], "lora_name": PIKA_FL2VA_LORA,
+                                                                   "strength_model": 1.0}}
+    else:
+        g["21"] = {"class_type": "MiniMaxH3TurboLoRA", "inputs": {"model": ["20", 0], "lora_name": TURBO_LORAS["v4"],
+                                                                  "strength": 1.0, "low_vram": True}}
+    g["22"] = {"class_type": "ModelAttentionBackend", "inputs": {"model": ["21", 0], "attention": "comfy kitchen attention"}}
+    g["30"] = {"class_type": "RandomNoise", "inputs": {"noise_seed": int(seed) % H3_DETAIL_SEED_MOD}}
+    g["31"] = {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "er_sde"}}
+    g["32"] = {"class_type": "ManualSigmas", "inputs": {"sigmas": options["sigmas"]}}
+    g["33"] = {"class_type": "MMH3TemporalSplitParams", "inputs": {"chunk_length": chunk, "temporal_overlap": overlap,
+                                                                   "anchor_strength": anchor}}
+    g["40"] = {"class_type": "MMH3UltimateUpscale", "inputs": {
+        "model": ["22", 0], "conditioning": ["11", 0], "latent": ["8", 0], "noise": ["30", 0], "sampler": ["31", 0],
+        "sigmas": ["32", 0], "cfg": 1.0, "temporal_split_param": ["33", 0]}}
+    g["41"] = {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["40", 0], "vae": ["4", 0], "tile_size": 512,
+                                                          "overlap": 64, "temporal_size": 64, "temporal_overlap": 8}}
+    g["42"] = {"class_type": "ImageScale", "inputs": {"image": ["41", 0], "upscale_method": "lanczos", "width": out_w,
+                                                      "height": out_h, "crop": "disabled"}}
+    g["43"] = {"class_type": "CreateVideo", "inputs": {"images": ["42", 0], "fps": float(options["fps"])}}
+    if options.get("audio"):
+        g["43"]["inputs"]["audio"] = ["2", 1]
+    g["44"] = {"class_type": "SaveVideo", "inputs": {"video": ["43", 0], "filename_prefix": prefix, "format": "mp4",
+                                                     "format.codec": "h264", "format.codec.encoding": "re-encode",
+                                                     "format.codec.encoding.crf": 12.0}}
+    return g
+
+
+H3_DETAIL_NODE_CLASSES = {
+    "LoadVideo", "GetVideoComponents", "ImageScale", "VAELoader", "VAEEncode", "VAEEncodeAudio", "LTXVConcatAVLatent",
+    "ImageFromBatch", "CLIPLoader", "MiniMaxH3ImageToVideo", "UNETLoader", "ModelAttentionBackend", "RandomNoise",
+    "KSamplerSelect", "ManualSigmas", "MMH3TemporalSplitParams", "MMH3UltimateUpscale", "VAEDecodeTiled",
+    "CreateVideo", "SaveVideo",
+}
+
+
+def post_required_files(options: dict) -> list[Path]:
+    """Every model file the job needs, as full paths."""
+    if options["method"] == H3_DETAIL:
+        lora = (SKIN_MODELS / "loras" / PIKA_FL2VA_LORA if options["chain"] == "pika"
+                else MODELS / "loras" / TURBO_LORAS["v4"])
+        return [MODELS / "diffusion_models" / FL2VA_MODEL, lora, MODELS / "text_encoders" / TEXT_ENCODER,
+                MODELS / "vae" / FUSED_VIDEO_VAE, MODELS / "vae" / AUDIO_VAE]
+    return [MODELS / folder / name for folder, name in post_model_files(options)]
+
+
 def post_title(options: dict, source_prompt: str) -> str:
     label = METHOD_LABELS[options["method"]]
+    if options["method"] == H3_DETAIL:
+        head = f"{label} ({options['detail_label']}) · {options['width']}x{options['height']}"
+        return f"{head} · {source_prompt.strip()[:160]}"
     if options["operation"] == "interpolate":
         head = f"{label} 2x · {options['source_fps']:g} -> {options['fps']:g} fps"
     else:

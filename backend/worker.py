@@ -27,8 +27,8 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
-from .post_process import (VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command, chunk_keep,
-                           post_model_files, post_node_classes,
+from .post_process import (H3_DETAIL, VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command,
+                           chunk_keep, h3_detail_workflow, post_node_classes, post_required_files,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
                            visual_enhancer_finish_command)
 from .workflows import (graph_spec_workflow, official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
@@ -803,8 +803,7 @@ class QueueWorker:
             if not post_options:
                 raise RuntimeError("Post-process job has no options")
             required = post_node_classes(post_options)
-            missing_files = [str(MODELS / folder / name) for folder, name in post_model_files(post_options)
-                             if not (MODELS / folder / name).exists()]
+            missing_files = [str(path) for path in post_required_files(post_options) if not path.exists()]
             if missing_files:
                 raise RuntimeError("Post-process model is not installed: " + ", ".join(missing_files))
             if not job.get("input_name") or not (INPUT / job["input_name"]).is_file():
@@ -1021,6 +1020,10 @@ class QueueWorker:
         if job["engine"] == "swap":
             workflow_builder = "graph_spec_workflow"
             workflow = graph_spec_workflow(swap_options["graph"], prefix)
+        elif job["engine"] == "post" and post_options.get("method") == H3_DETAIL:
+            # RTX VSR + H3 detail (issue #50): a short H3 pass with the source clip's own prompt and model.
+            workflow_builder = "h3_detail_workflow"
+            workflow = h3_detail_workflow(post_options, job["input_name"], prefix, seed)
         elif job["engine"] == "post":
             workflow_builder = "post_process_workflow"
             workflow = post_process_workflow(post_options, job["input_name"], prefix)
@@ -1540,8 +1543,7 @@ class QueueWorker:
             else:
                 self.loaded_engine_family = None
         else:
-            missing = [str(MODELS / folder / name) for folder, name in post_model_files(options)
-                       if not (MODELS / folder / name).exists()]
+            missing = [str(path) for path in post_required_files(options) if not path.exists()]
             if missing:
                 raise RuntimeError("Post-process model is not installed: " + ", ".join(missing))
             await self.comfy.ensure_started()

@@ -6,7 +6,7 @@ import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 import { BotImagesPage } from './bot-images'
-import { PostProcessSheet, POST_METHOD_LABELS, type PostOperation, type PostOptions } from './post-process'
+import { PostProcessSheet, POST_METHOD_LABELS, canAddH3Detail, type PostOperation, type PostOptions } from './post-process'
 import { SwapSheet } from './swap'
 
 type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync' | 'interpolate' | 'upscale' | 'swap'
@@ -2309,7 +2309,7 @@ function App() {
     <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
     {swapSheet && <SwapSheet jobId={swapSheet.jobId} csrf={csrf} onClose={() => setSwapSheet(null)}
       onQueued={() => { feedback.notify('success', 'ההחלפה נוספה לתור'); void load(true) }} />}
-    {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration }} operation={postSheet.operation} csrf={csrf} visualEnhancer={visualEnhancerReady}
+    {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration, method: postSheet.job.engine === 'post' ? postSheet.job.workflow_variant || undefined : undefined }} operation={postSheet.operation} csrf={csrf} visualEnhancer={visualEnhancerReady}
       onClose={() => setPostSheet(null)} onQueued={() => { setPostSheet(null); feedback.notify('success', 'נוספה עבודת עיבוד לתור'); void load(true) }} />}
   </main>
 }
@@ -2453,7 +2453,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}>{shownPrompt !== job.prompt && <p className="swap-prompt-label" dir="ltr">{job.prompt}</p>}<p dir="auto">{shownPrompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
       {swap ? <div className="job-config" dir="ltr">{swap.tags.map(tag => <span key={tag}>{tag}</span>)}{swap.size && <span>{swap.size}</span>}<span className="job-seed">Seed {job.seed}</span></div>
-      : engine === 'post' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{POST_METHOD_LABELS[job.workflow_variant || ''] || job.workflow_variant}</span>{job.post_options && <span dir="ltr">{job.post_options.source_width}×{job.post_options.source_height} → {width}×{height}</span>}{job.post_options && <span dir="ltr">{job.post_options.source_fps} → {job.post_options.fps} fps</span>}{job.post_options && <span dir="ltr">{job.post_options.frames} frames</span>}</div>
+      : engine === 'post' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{POST_METHOD_LABELS[job.workflow_variant || ''] || job.workflow_variant}</span>{job.post_options && <span dir="ltr">{job.post_options.source_width}×{job.post_options.source_height} → {width}×{height}</span>}{job.post_options && <span dir="ltr">{job.post_options.source_fps} → {job.post_options.fps} fps</span>}{job.post_options && <span dir="ltr">{job.post_options.frames} frames</span>}{job.post_options?.detail_label && <span dir="ltr">{job.post_options.detail_label}</span>}{job.post_options?.trimmed_frames ? <span>{job.post_options.trimmed_frames} פריימים נחתכו בסוף</span> : null}</div>
       : <div className="job-config">{engine !== 'singularity' && engine !== 'pika' && <span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>}{engine === 'ltx' && job.ltx_recipe === 'official' && <span className="job-loras" dir="ltr">Official ComfyUI template ({job.mode === 'frames' ? 'video_ltx2_5_flf2v' : 'video_ltx2_5_i2v'})</span>}{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'pika' && pikaSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{engine === 'singularity' && <span className="job-setup job-tier" dir="ltr">{skinTierLabel(job.workflow_variant || 'skin_god')}</span>}{engine === 'singularity' && skinSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{(engine === 'singularity' || engine === 'pika' || engine === 'ltx' || engine === 'omni') && <span className="job-inputs" dir="ltr">{job.mode} · {jobInputsLabel(job.source_assets)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span>{engine !== 'singularity' && <span>{steps} סטפים</span>}<span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>}
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
@@ -2485,6 +2485,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
         {onPostProcess && (engine !== 'post' || job.mode === 'upscale') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
         {onPostProcess && (engine !== 'post' || job.mode === 'interpolate') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
+        {onPostProcess && canAddH3Detail(job) && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> פרטים H3</button>}
         {onSwap && <button className="post-button" onClick={onSwap}><Users size={15} /> החלפת דמות</button>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}

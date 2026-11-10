@@ -128,6 +128,18 @@
         "Real-ESRGAN upscale"
       ]
     },
+    "h3_detail": {
+      "label": "RTX VSR + H3 detail",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae",
+        "pika"
+      ],
+      "engines": [
+        "RTX VSR + H3 detail (upscale sheet; uses the h3 and pika models, adds only a node pack)"
+      ]
+    },
     "clipproj_spectrum": {
       "label": "ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default)",
       "default": false,

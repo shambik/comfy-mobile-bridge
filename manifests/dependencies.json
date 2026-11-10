@@ -83,6 +83,13 @@
       "url": "https://github.com/akatz-ai/h3-relay.git",
       "revision": "e2a7665b6eb8ea37a88c0de2c9c6b69a8f7c9220",
       "target": ".runtime/comfyui/custom_nodes/h3-relay"
+    },
+    {
+      "name": "MMH3 Ultimate Upscale (MIT; its tiled-diffusion file GPL-3.0)",
+      "group": "h3_detail",
+      "url": "https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale.git",
+      "revision": "0a8d5ee3914e8fe8bd842885412ec397d7ca1629",
+      "target": ".runtime/comfyui/custom_nodes/Comfyui-MMH3-UltimateUpscale"
     }
   ],
   "tools": {
