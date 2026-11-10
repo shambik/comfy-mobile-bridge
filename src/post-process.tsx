@@ -9,8 +9,10 @@ export type PostOptions = {
   operation: PostOperation; method: string; source_job_id?: string | null; source_filename?: string
   source_width: number; source_height: number; source_fps: number; source_frames: number; source_duration: number
   width: number; height: number; fps: number; frames: number; long_side?: number; crop_percent?: number; audio?: boolean
+  detail?: string; detail_label?: string; trimmed_frames?: number
 }
-type SourceJob = { id: string; width: number; height: number; duration: number }
+// `method`: set when the source is itself an upscaled card (an RTX VSR 1920 card offers RTX VSR + H3 detail, issue #50).
+type SourceJob = { id: string; width: number; height: number; duration: number; method?: string }
 type SourceSize = { width: number; height: number; duration: number }
 
 // `visualEnhancer`: runs through the user's own Visual Enhancer VE_CLI.exe (issue #39), not ComfyUI; offered only
@@ -27,7 +29,21 @@ const METHODS: Record<PostOperation, { id: string; label: string; detail: string
     { id: 'rtx', label: 'RTX VSR', detail: 'הכי מהיר · כ־12 שניות לשוט · עור טבעי · Visual Enhancer', visualEnhancer: true },
   ],
 }
-export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2', rtx: 'RTX VSR', fsr3: 'FSR 3' }
+export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2', rtx: 'RTX VSR', fsr3: 'FSR 3', h3detail: 'RTX VSR + H3 detail' }
+// RTX VSR + H3 detail (issue #50): a short H3 pass with the original clip's prompt and model. Only the strengths the
+// lab tested on the RTX 3080 (all rated good); the server enforces the same list and the tested sources.
+const H3_DETAIL_LEVELS = [
+  { id: 's30', label: 'קל · 0.30', detail: 'הכי קרוב למקור' },
+  { id: 's45', label: 'בינוני · 0.45', detail: 'מומלץ · פרטים חדים בלי לשנות פנים' },
+  { id: 's60', label: 'חזק · 0.60', detail: 'יותר פרטים · העור מתחיל להיראות מטופל' },
+  { id: 's60x3', label: 'חזק · 0.60 · 3 צעדים', detail: 'קצת יותר חד מ־2 צעדים' },
+  { id: 's75x3', label: 'הכי חזק · 0.75 · 3 צעדים', detail: 'הכי חד · דוגמאות צבועות מתחילות להשתנות' },
+]
+// An RTX VSR card at 1920 can take the H3 detail pass.
+export function canAddH3Detail(job: { engine?: string; workflow_variant?: string | null; width: number; height: number }) {
+  return job.engine === 'post' && job.workflow_variant === 'rtx'
+    && ((job.width === 1920 && job.height === 1080) || (job.width === 1080 && job.height === 1920))
+}
 const LONG_SIDES = [1920, 2560]
 const UPLOAD_ACCEPT = 'video/mp4,video/quicktime,video/webm,video/x-matroska'
 
@@ -53,8 +69,10 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
   job?: SourceJob; operation: PostOperation; csrf: string; visualEnhancer?: boolean; onClose: () => void; onQueued: () => void
 }) {
   const external = !job
+  const detailSheet = job?.method === 'rtx'
   const [operation, setOperation] = useState<PostOperation>(initialOperation)
-  const [method, setMethod] = useState(METHODS[initialOperation][0].id)
+  const [method, setMethod] = useState(detailSheet ? 'h3detail' : METHODS[initialOperation][0].id)
+  const [detailLevel, setDetailLevel] = useState('s45')
   const [longSide, setLongSide] = useState(2560)
   const [file, setFile] = useState<File | null>(null)
   const [fileSize, setFileSize] = useState<SourceSize | null>(null)
@@ -92,7 +110,8 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
       if (job) {
         response = await fetch(`/api/jobs/${job.id}/post-process`, {
           method: 'POST', headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operation, method, long_side: operation === 'upscale' ? longSide : null }),
+          body: JSON.stringify(detailSheet ? { operation: 'upscale', method: 'h3detail', detail: detailLevel }
+            : { operation, method, long_side: operation === 'upscale' ? longSide : null }),
         })
       } else {
         const form = new FormData()
@@ -115,7 +134,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
     }
   }
 
-  const title = external ? 'עיבוד וידאו חיצוני' : operation === 'upscale' ? 'הגדלת וידאו' : 'החלקת תנועה · פי 2 פריימים'
+  const title = external ? 'עיבוד וידאו חיצוני' : detailSheet ? 'פרטים עם H3' : operation === 'upscale' ? 'הגדלת וידאו' : 'החלקת תנועה · פי 2 פריימים'
   return <div className="dialog-backdrop app-modal-backdrop" onMouseDown={() => { if (!busy) onClose() }}>
     <form className="app-modal post-sheet" role="dialog" aria-modal="true" onSubmit={submit} onMouseDown={event => event.stopPropagation()}>
       <div className="app-modal-head"><div className="app-modal-icon">{external ? <Upload size={21} /> : operation === 'upscale' ? <Sparkles size={21} /> : <Gauge size={21} />}</div><button type="button" className="app-modal-close" onClick={onClose} disabled={busy} aria-label="סגירה"><X size={17} /></button></div>
@@ -131,13 +150,18 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
         </button>)}
       </div>}
       {source && <p dir="ltr" className="post-sheet-source">{source.width}×{source.height} · {source.duration.toFixed(2)} s</p>}
-      <div className="post-sheet-options" role="radiogroup" aria-label="שיטה">
+      {detailSheet ? <div className="post-sheet-options" role="radiogroup" aria-label="עוצמת פרטים">
+        {H3_DETAIL_LEVELS.map(item => <button key={item.id} type="button" role="radio" aria-checked={detailLevel === item.id}
+          className={detailLevel === item.id ? 'active' : ''} onClick={() => setDetailLevel(item.id)}>
+          <strong>{item.label}</strong><small>{item.detail}</small>
+        </button>)}
+      </div> : <div className="post-sheet-options" role="radiogroup" aria-label="שיטה">
         {METHODS[operation].filter(item => visualEnhancer || !item.visualEnhancer).map(item => <button key={item.id} type="button" role="radio" aria-checked={method === item.id}
           className={method === item.id ? 'active' : ''} onClick={() => setMethod(item.id)}>
           <strong dir="ltr">{item.label}</strong><small>{item.detail}</small>
         </button>)}
-      </div>
-      {operation === 'upscale' && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="גודל יעד">
+      </div>}
+      {operation === 'upscale' && !detailSheet && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="גודל יעד">
         {LONG_SIDES.map(side => {
           const size = source ? upscaleSize(source.width, source.height, side) : null
           const crop = source && size ? cropPercent(source.width, source.height, size) : 0
@@ -148,7 +172,8 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
           </button>
         })}
       </div>}
-      <p className="post-sheet-note">קליפים ארוכים עוברים בחלקים בתוך עבודה אחת ומחוברים בסוף (RTX VSR ו־FSR 3 בלי חלוקה). מקורות עד 30fps: הגדלה עד 1080p, החלקה עם RIFE ו־FSR 3 גם על קליפים מוגדלים עד 2560 (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>
+      {detailSheet ? <p className="post-sheet-note">H3 מצייר מחדש פרטים (בד, עור, עיניים, שיער) עם הפרומפט והמודל של הקליפ המקורי, ושומר על התנועה, הפנים, השפתיים והסאונד. כ־5.5 דקות לשוט של 5 שניות, עד 15 שניות. נבדק על קליפים של Pika (פריים פתיחה) ושל Turbo v4 (ליפ־סינק). H3 צריך 17n+5 פריימים, אז לפעמים כמה פריימים בסוף נחתכים.</p>
+      : <p className="post-sheet-note">קליפים ארוכים עוברים בחלקים בתוך עבודה אחת ומחוברים בסוף (RTX VSR ו־FSR 3 בלי חלוקה). מקורות עד 30fps: הגדלה עד 1080p, החלקה עם RIFE ו־FSR 3 גם על קליפים מוגדלים עד 2560 (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>}
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>
     </form>

@@ -37,6 +37,7 @@ public revision with its exact size and SHA-256, taken from the files the app ra
 | `swap_viggle` | Character swap: Viggle Remake: Character swap (Viggle Remake) | 19.5 GB | `h3` | yes |
 | `swap_akatz` | Character swap: akatz: Character swap (akatz V1.5) | 3.6 GB | `h3` | yes |
 | `post_process` | Upscale and smoothing: RIFE and FILM smoothing, Real-ESRGAN upscale | 151 MB | - | yes |
+| `h3_detail` | RTX VSR + H3 detail: the upscale sheet's H3 detail pass (a node pack; it uses the `h3` and `pika` models) | 0 B | `h3`, `h3_int8_vae`, `pika` | yes |
 | `clipproj_spectrum` | ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default): Spectrum speed-up, ClipProj text encoder | 5.0 GB | `h3` | no |
 
 All default groups together: 236.5 GB of models.
@@ -166,12 +167,16 @@ both as not ready, and nothing in the tested setup uses them. They stay listed f
 | [PlagueKind sparse attention nodes](https://github.com/ethanfel/ComfyUI-PlagueKind-Nodes-only-sparse) | `fused_sla` | `fd26ffb89d` | `.runtime/comfyui/custom_nodes/ComfyUI-PlagueKind-Nodes-only-sparse` |
 | [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) | `ltx25_reference`, `ltx23_reference` | `220e1d45aa` | `.runtime/comfyui/custom_nodes/ComfyUI-LTXVideo` |
 | [h3-relay (GPL-3.0, akatz character swap)](https://github.com/akatz-ai/h3-relay) | `swap_akatz` | `e2a7665b6e` | `.runtime/comfyui/custom_nodes/h3-relay` |
+| [MMH3 Ultimate Upscale (MIT; its tiled-diffusion file GPL-3.0)](https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale) | `h3_detail` | `0a8d5ee391` | `.runtime/comfyui/custom_nodes/Comfyui-MMH3-UltimateUpscale` |
 
 Copied from this repository by bootstrap: `custom_nodes/ComfyUI-H3-NativeAudioLock` and
 `custom_nodes/ComfyUI-H3-SteadyMemory` (MIT, bridge code).
 
 h3-relay is GPL-3.0. It is cloned into ComfyUI at install time and the app reads akatz's graph from that folder;
 no GPL file is stored in this MIT repository.
+
+MMH3 Ultimate Upscale is MIT except `nodes/tiled_diffusion.py` (GPL-3.0, from ComfyUI-TiledDiffusion). It is
+cloned at install time; the H3 detail pass does not use its tiled-diffusion node, and no file of it is stored here.
 
 ## Single files
 

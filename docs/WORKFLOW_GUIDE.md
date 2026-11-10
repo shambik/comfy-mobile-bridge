@@ -69,6 +69,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
 | A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; sources up to 1080p, any length (long clips run in chunks inside one job), uploads too (see below) |
+| More real detail in a finished Pika or Turbo v4 lip-sync shot | **RTX VSR** to 1920, then **פרטים H3** on that card | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s, up to 15 s (see "RTX VSR + H3 detail" below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -534,6 +535,39 @@ For comparison on the same 1632×928 shots: Real-ESRGAN takes about 232 s and RI
   CRF 12 like the ComfyUI jobs.
 - Not offered: DLSS frame generation (refused on RTX 30 cards), PeakMagnetar (about 2.5 hours per shot),
   DLSS Super Resolution (its modes fix the output at 2× or more, so it needs another resize).
+
+## RTX VSR + H3 detail (2026-11-10, issue #50)
+
+RTX VSR, Real-ESRGAN and Lanczos only sharpen what is in the clip. On an **RTX VSR 1920** card the **פרטים H3**
+button runs a short second H3 pass that redraws real detail (fabric, skin, eyes, hair, background) with the original
+clip's prompt and model, keeping its motion, face, lips and sound. It uses bbaudio-2025's MMH3 Ultimate Upscale node
+(time chunks of 68 frames with 17 frames of overlap; the sound passes through untouched).
+
+Lab A/B on the RTX 3080, 2026-11-10, against RTX VSR alone on the same frames
+(`D:\h3-omnilab\tests\h3_detail_pass\RESULTS.md`). The user rated every one of these good:
+
+| Clip | Source | Time | Result |
+| --- | --- | --- | --- |
+| Missed Bus S02, slow face | Pika flow 1632×928, 5 s | 332 s | same face; 0.30 slightly crisper lips and lashes, 0.60 starts to retouch the skin |
+| The Package rooftop jump | Pika flow 1632×928, 5 s | 332 s | the clearest gain: RTX VSR leaves motion smear, the pass redraws the bag, fabric, sweat, hair and the town |
+| Yoni lip-sync | Turbo v4 928×1632, 4.5 s | 275 s (2 steps), 331 s (3 steps) | mouth shapes match RTX VSR at every checked frame up to 0.75 × 3 steps; 0.75 starts to change painted patterns |
+| The Last Fold | Pika flow 1024×576, 15 s, two hard cuts | 901-913 s | clean at both cuts, no chunk seams; the close-up's lashes, iris and pores clearly sharper than RTX VSR |
+
+Peak VRAM was 9.5-9.7 GB in every run, peak RAM 47-58 GB for 5 s and 61 GB of 64 for 15 s.
+
+Strengths (explicit noise levels; a scheduler "denoise" at shift 6 starts much higher and redrew mouths in the lab):
+**0.30** (light), **0.45** (recommended), **0.60**, and with 3 steps **0.60** or **0.75** (the sharpest).
+
+Limits, enforced by the server:
+
+- Only on RTX VSR 1920 clips (1920×1080 or 1080×1920, 24 fps), made from a **Pika-flow opening-frame** clip (the
+  Pika engine, or Singularity with the Pika speed LoRA on the base model) or a **Turbo v4 lip-sync** clip. Those are
+  the sources that were tested; other engines, other modes and uploads are refused with the reason.
+- 107 to 362 frames (4.5-15 s). H3 needs 17n+5 frames, so up to 16 frames at the end are trimmed; the card says how
+  many (RTX VSR returned 360 of The Last Fold's 362 frames, so 15 were trimmed).
+- 1920 only: 2560 would need spatial tiles, which were not tested.
+- Not offered (rejected in the same lab): the "draft, then latent upscale" two-pass route (10 s clips came out "not
+  good") and RelayVSR ("low quality" on The Last Fold).
 
 ## Character swap (2026-11-09/10, issue #46)
 
