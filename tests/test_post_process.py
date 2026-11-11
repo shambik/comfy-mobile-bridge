@@ -805,6 +805,82 @@ class H3DetailApiTests(ApiBase):
         self.assertEqual(list(self.input.iterdir()), [])
 
 
+# --- RIFE 60 / 120 fps (issue #52) -------------------------------------------------------------------------------
+from backend.post_process import decimate_command  # noqa: E402
+
+SHOT_24 = {"width": 1632, "height": 928, "fps": 24.0, "frames": 124, "duration": 5.167, "audio": True}
+
+
+class RifeHighFpsTests(unittest.TestCase):
+    def test_plan_matches_the_lab_runs(self):
+        for target, keep_every, frames in ((120, 1, 616), (60, 2, 308)):
+            options = plan_post_process(SHOT_24, "interpolate", "rife", None, target)
+            self.assertEqual((options["fps"], options["multiplier"], options["keep_every"], options["frames"],
+                              options["graph_fps"], options["width"], options["height"]),
+                             (float(target), 5, keep_every, frames, 120.0, 1632, 928))
+        self.assertNotIn("chunks", options)
+
+    def test_untested_requests_are_refused_with_a_reason(self):
+        refused = [
+            ({**SHOT_24, "fps": 30.0}, "interpolate", "rife", 60, "24 fps"),
+            ({**SHOT_24, "frames": 145}, "interpolate", "rife", 120, "124 frames"),
+            ({**SHOT_24, "width": 1920, "height": 1080}, "interpolate", "rife", 60, "1632x928"),
+            (SHOT_24, "interpolate", "film", 60, "RIFE"),
+            (SHOT_24, "upscale", "rife", 60, "Upscale supports"),   # the existing method check refuses first
+            (SHOT_24, "interpolate", "rife", 90, "60 or 120"),
+        ]
+        for source, operation, method, target, text in refused:
+            with self.assertRaises(ValueError) as caught:
+                plan_post_process(source, operation, method, 1920 if operation == "upscale" else None, target)
+            self.assertIn(text, str(caught.exception))
+        self.assertEqual(plan_post_process(SHOT_24, "interpolate", "rife")["frames"], 247)   # the 48 fps choice is unchanged
+
+    def test_graph_runs_x5_at_120_fps_and_the_title_says_so(self):
+        options = plan_post_process(SHOT_24, "interpolate", "rife", None, 60)
+        g = post_process_workflow(options, "v.mp4", "p")
+        by_class = {node["class_type"]: node["inputs"] for node in g.values()}
+        self.assertEqual(by_class["FrameInterpolate"]["multiplier"], 5)
+        self.assertEqual(by_class["CreateVideo"]["fps"], 120.0)
+        self.assertIn("x5", post_title(options, "A bus"))
+        plain = plan_post_process(SHOT_24, "interpolate", "rife")
+        self.assertEqual(post_process_workflow(plain, "v.mp4", "p")["11"]["inputs"]["multiplier"], 2)
+
+    def test_60_fps_decimation_command(self):
+        options = plan_post_process(SHOT_24, "interpolate", "rife", None, 60)
+        command = decimate_command(options, Path("in.mp4"), Path("out.mp4"))
+        self.assertIn("select='not(mod(n,2))',setpts=N/(60*TB)", command)
+        self.assertEqual(command[command.index("-r") + 1], "60")
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+    def test_decimation_keeps_every_second_frame(self):
+        with tempfile.TemporaryDirectory(prefix="h3-decimate-") as temp:
+            source, out = Path(temp) / "x5.mp4", Path(temp) / "x2.mp4"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=120",
+                            "-f", "lavfi", "-i", "sine=frequency=440", "-frames:v", "61", "-t", "0.508", "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)], check=True)
+            options = plan_post_process(SHOT_24, "interpolate", "rife", None, 60)
+            subprocess.run(decimate_command(options, source, out), check=True)
+            probe = probe_video(out)
+            self.assertEqual((probe["frames"], round(probe["fps"], 3), probe["audio"]), (31, 60.0, True))
+
+
+class RifeHighFpsApiTests(ApiBase):
+    def test_card_request_carries_the_rate(self):
+        self.add_job("src")
+        with patch("backend.main.probe_video", return_value=dict(SHOT_24)):
+            response = self.post("src", {"operation": "interpolate", "method": "rife", "fps_target": 120})
+            self.assertEqual(response.status_code, 200, response.text)
+            refused = self.post("src", {"operation": "interpolate", "method": "film", "fps_target": 60})
+        self.assertEqual(refused.status_code, 400)
+        with connect() as db:
+            row = db.execute("SELECT workflow_variant, width, height, post_options_json FROM jobs WHERE id=?",
+                             (response.json()["created"][0],)).fetchone()
+        options = json.loads(row["post_options_json"])
+        self.assertEqual((row["workflow_variant"], options["fps"], options["frames"], options["keep_every"]),
+                         ("rife", 120.0, 616, 1))
+
+
 class H3DetailMigrationTests(unittest.TestCase):
     def test_existing_job_tables_take_the_new_variant_and_keep_every_row(self):
         temp = tempfile.TemporaryDirectory(prefix="h3-detail-db-")

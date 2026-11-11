@@ -3199,6 +3199,7 @@ class PostProcessBody(BaseModel):
     operation: str
     method: str
     long_side: int | None = None
+    fps_target: int | None = None   # RIFE 60 or 120 fps (issue #52)
     detail: str | None = None   # H3 detail strength (issue #50): s30, s45, s60, s60x3 or s75x3
 
 
@@ -3219,7 +3220,7 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
         return await _queue_h3_detail_job(source, Path(source_path), body.detail)
     try:
         probe = await asyncio.to_thread(probe_video, Path(source_path))
-        options = plan_post_process(probe, body.operation, body.method, body.long_side)
+        options = plan_post_process(probe, body.operation, body.method, body.long_side, body.fps_target)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     new_id = uuid.uuid4().hex
@@ -3558,7 +3559,8 @@ swap_lab.set_job_queue(_queue_swap_job)
 
 @app.post("/api/post-process")
 async def post_process_upload(request: Request, video: UploadFile = File(...), operation: str = Form(...),
-                              method: str = Form(...), long_side: int | None = Form(None)):
+                              method: str = Form(...), long_side: int | None = Form(None),
+                              fps_target: int | None = Form(None)):
     """Queue an upscale or interpolation of an uploaded video (same tested limits as finished jobs)."""
     require_csrf(request)
     require_visual_enhancer(method)
@@ -3577,7 +3579,7 @@ async def post_process_upload(request: Request, video: UploadFile = File(...), o
                 handle.write(chunk)
         try:
             probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
-            options = plan_post_process(probe, operation, method, long_side)
+            options = plan_post_process(probe, operation, method, long_side, fps_target)
         except ValueError as exc:
             (INPUT / input_name).unlink(missing_ok=True)
             raise HTTPException(400, str(exc)) from exc

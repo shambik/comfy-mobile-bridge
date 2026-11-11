@@ -9,7 +9,7 @@ export type PostOptions = {
   operation: PostOperation; method: string; source_job_id?: string | null; source_filename?: string
   source_width: number; source_height: number; source_fps: number; source_frames: number; source_duration: number
   width: number; height: number; fps: number; frames: number; long_side?: number; crop_percent?: number; audio?: boolean
-  detail?: string; detail_label?: string; trimmed_frames?: number
+  detail?: string; detail_label?: string; trimmed_frames?: number; fps_target?: number
 }
 // `method`: set when the source is itself an upscaled card (an RTX VSR 1920 card offers RTX VSR + H3 detail, issue #50).
 type SourceJob = { id: string; width: number; height: number; duration: number; method?: string }
@@ -45,6 +45,13 @@ export function canAddH3Detail(job: { engine?: string; workflow_variant?: string
     && ((job.width === 1920 && job.height === 1080) || (job.width === 1080 && job.height === 1920))
 }
 const LONG_SIDES = [1920, 2560]
+// RIFE 60 / 120 fps (issue #52): RIFE x5, 60 keeps every second frame. Tested on 24 fps clips of up to 5.2 s at 1632x928;
+// the server refuses anything else with the reason.
+const RIFE_RATES = [
+  { id: 0, label: '×2 · 48 fps', detail: 'הרגיל · כל קליפ עד 30fps' },
+  { id: 60, label: '60 fps', detail: 'חלק מאוד · כ־40 שניות לשוט · קליפ 24fps עד 5.2 שניות' },
+  { id: 120, label: '120 fps', detail: 'הכי חלק · כ־40 שניות לשוט · קליפ 24fps עד 5.2 שניות' },
+]
 const UPLOAD_ACCEPT = 'video/mp4,video/quicktime,video/webm,video/x-matroska'
 
 // Mirrors backend/post_process.py upscale_size: near-16:9 / 9:16 sources get the standard sizes with a small crop.
@@ -73,6 +80,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
   const [operation, setOperation] = useState<PostOperation>(initialOperation)
   const [method, setMethod] = useState(detailSheet ? 'h3detail' : METHODS[initialOperation][0].id)
   const [detailLevel, setDetailLevel] = useState('s45')
+  const [fpsTarget, setFpsTarget] = useState(0)
   const [longSide, setLongSide] = useState(2560)
   const [file, setFile] = useState<File | null>(null)
   const [fileSize, setFileSize] = useState<SourceSize | null>(null)
@@ -99,7 +107,8 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
     return () => { video.removeAttribute('src'); URL.revokeObjectURL(url) }
   }, [file])
 
-  const chooseOperation = (next: PostOperation) => { setOperation(next); setMethod(METHODS[next][0].id); setError('') }
+  const chooseOperation = (next: PostOperation) => { setOperation(next); setMethod(METHODS[next][0].id); setFpsTarget(0); setError('') }
+  const showRates = operation === 'interpolate' && method === 'rife' && !detailSheet
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -111,7 +120,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
         response = await fetch(`/api/jobs/${job.id}/post-process`, {
           method: 'POST', headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' },
           body: JSON.stringify(detailSheet ? { operation: 'upscale', method: 'h3detail', detail: detailLevel }
-            : { operation, method, long_side: operation === 'upscale' ? longSide : null }),
+            : { operation, method, long_side: operation === 'upscale' ? longSide : null, fps_target: showRates && fpsTarget ? fpsTarget : null }),
         })
       } else {
         const form = new FormData()
@@ -119,6 +128,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
         form.append('operation', operation)
         form.append('method', method)
         if (operation === 'upscale') form.append('long_side', String(longSide))
+        if (showRates && fpsTarget) form.append('fps_target', String(fpsTarget))
         response = await fetch('/api/post-process', { method: 'POST', headers: { 'X-CSRF-Token': csrf }, body: form })
       }
       if (!response.ok) {
@@ -157,7 +167,13 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
         </button>)}
       </div> : <div className="post-sheet-options" role="radiogroup" aria-label="שיטה">
         {METHODS[operation].filter(item => visualEnhancer || !item.visualEnhancer).map(item => <button key={item.id} type="button" role="radio" aria-checked={method === item.id}
-          className={method === item.id ? 'active' : ''} onClick={() => setMethod(item.id)}>
+          className={method === item.id ? 'active' : ''} onClick={() => { setMethod(item.id); if (item.id !== 'rife') setFpsTarget(0) }}>
+          <strong dir="ltr">{item.label}</strong><small>{item.detail}</small>
+        </button>)}
+      </div>}
+      {showRates && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="קצב פריימים">
+        {RIFE_RATES.map(item => <button key={item.id} type="button" role="radio" aria-checked={fpsTarget === item.id}
+          className={fpsTarget === item.id ? 'active' : ''} onClick={() => setFpsTarget(item.id)}>
           <strong dir="ltr">{item.label}</strong><small>{item.detail}</small>
         </button>)}
       </div>}
