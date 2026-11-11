@@ -26,13 +26,14 @@ from fractions import Fraction
 from pathlib import Path
 
 from .config import AUDIO_VAE, FL2VA_MODEL, FUSED_VIDEO_VAE, MODELS, PIKA_FL2VA_LORA, SKIN_MODELS, TEXT_ENCODER, TURBO_LORAS
+from .video_edit import H3_EDIT, edit_node_classes, edit_required_files, edit_title
 
 INTERPOLATION_MODELS = {"rife": "rife_v4.26.safetensors", "film": "film_net_fp16.safetensors"}
 UPSCALE_MODELS = {"gan": "RealESRGAN_x2plus.pth"}
 METHODS = {"interpolate": ("rife", "film", "fsr3"), "upscale": ("lanczos", "gan", "rtx")}
 METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2",
                  "rtx": "RTX Video Super Resolution", "fsr3": "FSR 3 frame generation",
-                 "h3detail": "RTX VSR + H3 detail"}
+                 "h3detail": "RTX VSR + H3 detail", "h3edit": "H3 edit"}
 # Methods the worker runs through Visual Enhancer's VE_CLI.exe instead of a ComfyUI graph.
 VISUAL_ENHANCER_METHODS = ("rtx", "fsr3")
 VISUAL_ENHANCER_TIMEOUT_SECONDS = 15 * 60  # the lab runs took 5-19 s; a hung run must not hold the queue
@@ -304,6 +305,8 @@ def visual_enhancer_finish_command(options: dict, rendered: Path, source: Path, 
 
 
 def post_node_classes(options: dict) -> set[str]:
+    if options["method"] == H3_EDIT:
+        return edit_node_classes(options)
     if options["method"] == H3_DETAIL:
         lora_node = "LoraLoaderModelOnly" if options["chain"] == "pika" else "MiniMaxH3TurboLoRA"
         return H3_DETAIL_NODE_CLASSES | {lora_node}
@@ -516,6 +519,8 @@ H3_DETAIL_NODE_CLASSES = {
 
 def post_required_files(options: dict) -> list[Path]:
     """Every model file the job needs, as full paths."""
+    if options["method"] == H3_EDIT:
+        return edit_required_files(options)
     if options["method"] == H3_DETAIL:
         lora = (SKIN_MODELS / "loras" / PIKA_FL2VA_LORA if options["chain"] == "pika"
                 else MODELS / "loras" / TURBO_LORAS["v4"])
@@ -525,6 +530,8 @@ def post_required_files(options: dict) -> list[Path]:
 
 
 def post_title(options: dict, source_prompt: str) -> str:
+    if options["method"] == H3_EDIT:
+        return edit_title(options, source_prompt)
     label = METHOD_LABELS[options["method"]]
     if options["method"] == H3_DETAIL:
         head = f"{label} ({options['detail_label']}) · {options['width']}x{options['height']}"

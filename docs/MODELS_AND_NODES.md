@@ -38,9 +38,10 @@ public revision with its exact size and SHA-256, taken from the files the app ra
 | `swap_akatz` | Character swap: akatz: Character swap (akatz V1.5) | 3.6 GB | `h3` | yes |
 | `post_process` | Upscale and smoothing: RIFE and FILM smoothing, Real-ESRGAN upscale | 151 MB | - | yes |
 | `h3_detail` | RTX VSR + H3 detail: the upscale sheet's H3 detail pass (a node pack; it uses the `h3` and `pika` models) | 0 B | `h3`, `h3_int8_vae`, `pika` | yes |
+| `h3_edit` | H3 video edit LoRAs: H3 edit (text edit, outfit from photos, style, head swap) | 2.4 GB | `h3`, `h3_int8_vae` | yes |
 | `clipproj_spectrum` | ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default): Spectrum speed-up, ClipProj text encoder | 5.0 GB | `h3` | no |
 
-All default groups together: 236.5 GB of models.
+All default groups together: 238.9 GB of models.
 
 `clipproj_spectrum` is off by default: ClipProj and Spectrum do not load on ComfyUI 0.44, the app shows
 both as not ready, and nothing in the tested setup uses them. They stay listed for an older ComfyUI.
@@ -135,6 +136,17 @@ both as not ready, and nothing in the tested setup uses them. They stay listed f
 | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` | `models/loras/character_swap` | 1.8 GB | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) `30f485ed87` |
 | `h3_character_swap_v1.5.safetensors` | `models/loras/character_swap` | 148 MB | [akatz-ai/MiniMax-H3-Character-Swap-LoRA](https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA) `96ea3407b2` |
 | `sam3.1_multiplex_fp16.safetensors` | `models/checkpoints` | 1.6 GB | [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1) `7bb8374780` |
+
+### `h3_edit`: H3 video edit LoRAs
+
+Runs on the `h3` Ref2VA int8 model, text encoder and VAEs; these four LoRAs are the only new files.
+
+| File | Folder | Size | Source (revision) |
+|---|---|---|---|
+| `minimax_h3_vfx_edit_v1.0_r128.safetensors` | `models/loras/h3_edit` | 1.2 GB | [Alissonerdx/Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI) `db85bdf94e` |
+| `minimax_h3_style_transfer_v1.0_r64.safetensors` | `models/loras/h3_edit` | 592 MB | [Alissonerdx/Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI) `db85bdf94e` |
+| `minimax_h3_head_swap_v1.0_r32.safetensors` | `models/loras/h3_edit` | 296 MB | [Alissonerdx/Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI) `db85bdf94e` |
+| `minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors` | `models/loras/h3_edit` | 350 MB | [Kijai/MiniMax-H3-experimental](https://huggingface.co/Kijai/MiniMax-H3-experimental) `c2e7b89b18` |
 
 ### `post_process`: Upscale and smoothing
 

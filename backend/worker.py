@@ -27,6 +27,7 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
+from .video_edit import H3_EDIT, edit_workflow
 from .post_process import (H3_DETAIL, VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command,
                            chunk_keep, decimate_command, h3_detail_workflow, post_node_classes, post_required_files,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
@@ -1020,6 +1021,10 @@ class QueueWorker:
         if job["engine"] == "swap":
             workflow_builder = "graph_spec_workflow"
             workflow = graph_spec_workflow(swap_options["graph"], prefix)
+        elif job["engine"] == "post" and post_options.get("method") == H3_EDIT:
+            # H3 edit LoRAs (issue #54): Ref2VA + DMAD 4-step + the task's LoRA over the prepared source clip.
+            workflow_builder = "edit_workflow"
+            workflow = edit_workflow(post_options, job["input_name"], prefix, seed)
         elif job["engine"] == "post" and post_options.get("method") == H3_DETAIL:
             # RTX VSR + H3 detail (issue #50): a short H3 pass with the source clip's own prompt and model.
             workflow_builder = "h3_detail_workflow"

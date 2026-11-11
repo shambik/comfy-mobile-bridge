@@ -890,7 +890,7 @@ class H3DetailMigrationTests(unittest.TestCase):
         db_module.DB_PATH = Path(temp.name) / "old.sqlite3"
         source = Path(db_module.__file__).read_text(encoding="utf-8")
         start = source.index("    CREATE TABLE jobs (")
-        sql = source[start:source.index("    CREATE INDEX idx_jobs_queue", start)].replace(",'h3detail'", "")
+        sql = source[start:source.index("    CREATE INDEX idx_jobs_queue", start)].replace(",'h3detail','h3edit'", "")
         old = sqlite3.connect(db_module.DB_PATH)
         old.executescript(sql)
         now = now_iso()
@@ -905,6 +905,178 @@ class H3DetailMigrationTests(unittest.TestCase):
             db.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,
                           width,height,seed,status,position,created_at,updated_at) VALUES('d','Detail','upscale',5,'post',
                           'h3detail','v1','native',1,1920,1080,'1','queued',2,?,?)""", (now, now))
+
+
+# ---------------------------------------------------------------- H3 video edit (issue #54)
+from backend.video_edit import (EDIT_TASKS, H3_EDIT, build_edit_prompt, edit_input_command,  # noqa: E402
+                                edit_required_files, edit_workflow, plan_edit)
+
+TALK = {"width": 720, "height": 1280, "fps": 24.0, "frames": 240, "duration": 10.0, "audio": True}
+
+
+class VideoEditPlanTests(unittest.TestCase):
+    def test_default_is_480_portrait_5_s(self):
+        options = plan_edit(TALK, "vfx", None, None, "Change his shirt into a flannel shirt, while preserving his face.",
+                            "", "", 0)
+        self.assertEqual((options["method"], options["operation"], options["width"], options["height"],
+                          options["frames"], options["fps"]), (H3_EDIT, "edit", 480, 864, 124, 24))
+        self.assertTrue(options["prompt"].startswith("vfx_edit: Change his shirt"))
+        self.assertEqual(options["output_duration"], round(124 / 24, 3))
+
+    def test_landscape_sources_get_turned_sizes(self):
+        wide = {**TALK, "width": 1632, "height": 928}
+        options = plan_edit(wide, "style", "704", 5, "", "anime", "", 0)
+        self.assertEqual((options["width"], options["height"]), (1280, 704))
+
+    def test_tested_limits(self):
+        with self.assertRaisesRegex(ValueError, "480x864 only"):
+            plan_edit(TALK, "outfit", "704", 5, "Put the jacket from @1 on him", "", "", 1)
+        with self.assertRaisesRegex(ValueError, "10 seconds runs at 480"):
+            plan_edit(TALK, "vfx", "704", 10, "Change the shirt", "", "", 0)
+        with self.assertRaisesRegex(ValueError, "size"):
+            plan_edit(TALK, "vfx", "576", 5, "Change the shirt", "", "", 0)
+        with self.assertRaisesRegex(ValueError, "5 or 10"):
+            plan_edit(TALK, "vfx", "480", 7, "Change the shirt", "", "", 0)
+        with self.assertRaisesRegex(ValueError, "photo"):
+            plan_edit(TALK, "head", "480", 5, "", "", "Male, short hair", 0)
+        with self.assertRaisesRegex(ValueError, "needs at least"):
+            plan_edit({**TALK, "duration": 4.0, "frames": 96}, "vfx", "480", 5, "Change the shirt", "", "", 0)
+        options = plan_edit(TALK, "vfx", "480", 10, "Change the shirt", "", "", 0)
+        self.assertEqual((options["frames"], options["pad_frames"]), (243, 3))   # the 240-frame clip holds 3 frames
+
+    def test_prompts(self):
+        self.assertEqual(build_edit_prompt("style", "", "anime", "", 0), "style_transfer: Transform this video into "
+                         "a 2D anime style with clean black line art, flat cel shading, soft gradients and vibrant colours.")
+        self.assertEqual(build_edit_prompt("vfx", "vfx_edit: Add glasses", "", "", 0), "vfx_edit: Add glasses")
+        outfit = build_edit_prompt("outfit", "Put the jacket from @1 and the cap from @2 on him", "", "", 2)
+        self.assertEqual(outfit, "vfx_edit: Put the jacket from <Picture 1> and the cap from <Picture 2> on him")
+        with self.assertRaisesRegex(ValueError, "not attached"):
+            build_edit_prompt("outfit", "Put the cap from @2 on him", "", "", 1)
+        with self.assertRaisesRegex(ValueError, "@1"):
+            build_edit_prompt("outfit", "Put the cap on him", "", "", 1)
+        head = build_edit_prompt("head", "", "", "Male, oval face, blond hair", 1)
+        self.assertTrue(head.startswith("head_swap:"))
+        self.assertIn("Facial details of <Subject 1>:\nMale, oval face, blond hair\n", head)
+        with self.assertRaisesRegex(ValueError, "Describe the face"):
+            build_edit_prompt("head", "", "", " ", 1)
+        with self.assertRaisesRegex(ValueError, "style"):
+            build_edit_prompt("style", "", "watercolour", "", 0)
+
+
+class VideoEditWorkflowTests(unittest.TestCase):
+    def test_graph_matches_the_lab_run(self):
+        options = plan_edit(TALK, "outfit", "480", 5, "Put the jacket from @1 on him", "", "", 1)
+        options["photos"] = ["upload_jacket.png"]
+        graph = edit_workflow(options, "post_x_source.mp4", "h3_bridge_x", 12345)
+        self.assertEqual(graph["21"]["inputs"]["lora_name"],
+                         "h3_edit\\minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors")
+        self.assertEqual(graph["22"]["inputs"]["lora_name"], "h3_edit\\minimax_h3_vfx_edit_v1.0_r128.safetensors")
+        self.assertEqual((graph["23"]["inputs"]["shift_video"], graph["23"]["inputs"]["shift_audio"]), (12.0, 3.0))
+        sampler = graph["30"]["inputs"]
+        self.assertEqual((sampler["steps"], sampler["cfg"], sampler["sampler_name"], sampler["scheduler"],
+                          sampler["seed"]), (4, 1.0, "euler", "simple", 12345))
+        rtv = graph["13"]["inputs"]
+        self.assertEqual((rtv["width"], rtv["height"], rtv["length"]), (480, 864, 124))
+        self.assertEqual(rtv["ref_images.ref_image_0"], ["50", 0])          # flat key, not a nested dict
+        self.assertEqual(graph["50"]["inputs"]["image"], "upload_jacket.png")
+        self.assertEqual(graph["14"]["inputs"]["frame_idx"], 0)
+        self.assertEqual(graph["43"]["inputs"]["audio"], ["2", 1])          # the source's own sound
+        self.assertEqual(graph["44"]["inputs"]["filename_prefix"], "h3_bridge_x")
+
+    def test_every_task_needs_its_lora(self):
+        for task, spec in EDIT_TASKS.items():
+            names = [path.name for path in edit_required_files({"task": task})]
+            self.assertIn(spec["lora"], names)
+            self.assertIn("minimax_h3_ref2va_pruned_int8_convrot.safetensors", names)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+    def test_input_is_cropped_padded_and_keeps_sound(self):
+        with tempfile.TemporaryDirectory(prefix="h3-edit-") as folder:
+            clip, out = Path(folder) / "talk.mp4", Path(folder) / "edit.mp4"
+            make_clip(clip, 640, 1136, 30, 5.0)       # 30 fps, 150 frames = 120 at 24 fps: 4 frames are held
+            options = plan_edit(probe_video(clip), "vfx", "480", 5, "Change the shirt", "", "", 0)
+            subprocess.run(edit_input_command(options, clip, out), check=True)
+            probe = probe_video(out)
+            self.assertEqual((probe["width"], probe["height"], probe["fps"], probe["frames"], probe["audio"]),
+                             (480, 864, 24.0, 124, True))
+
+
+class VideoEditApiTests(ApiBase):
+    def fake_ffmpeg(self, command, **_):
+        Path(command[-1]).write_bytes(b"prepared")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def edit(self, data: dict, files=None):
+        return self.client.post("/api/edit", data=data, files=files or [], headers={"X-CSRF-Token": self.token})
+
+    def test_queues_an_edit_of_a_finished_job_next_to_it(self):
+        self.add_job("src")
+        with patch("backend.main.probe_video", return_value=dict(TALK)), \
+                patch("backend.main.subprocess.run", side_effect=self.fake_ffmpeg):
+            response = self.edit({"source_job_id": "src", "task": "vfx", "prompt": "Change his shirt into a red shirt"})
+        self.assertEqual(response.status_code, 200, response.text)
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (response.json()["created"][0],)).fetchone())
+        options = json.loads(row["post_options_json"])
+        self.assertEqual((row["engine"], row["mode"], row["workflow_variant"], row["width"], row["height"], row["steps"]),
+                         ("post", "edit", "h3edit", 480, 864, 1))
+        self.assertEqual((options["source_job_id"], options["size"], options["seconds"]), ("src", "480", 5))
+        self.assertTrue(row["prompt"].startswith("H3 edit · Text edit · 480x864 · 5 s"))
+        self.assertAlmostEqual(row["duration"], 124 / 24, places=2)
+
+    def test_head_swap_keeps_its_photo_and_refusals_leave_no_files(self):
+        from PIL import Image
+        self.add_job("src")
+        photo = self.root / "face.png"
+        Image.new("RGB", (64, 64), "white").save(photo)
+        with patch("backend.main.probe_video", return_value=dict(TALK)), \
+                patch("backend.main.subprocess.run", side_effect=self.fake_ffmpeg):
+            with photo.open("rb") as handle:
+                refused = self.edit({"source_job_id": "src", "task": "head", "size": "704", "seconds": "10",
+                                     "face": "Male"}, [("photos", ("face.png", handle, "image/png"))])
+            self.assertEqual(refused.status_code, 400)
+            self.assertEqual(list(self.input.iterdir()), [])
+            with photo.open("rb") as handle:
+                response = self.edit({"source_job_id": "src", "task": "head", "size": "704", "face": "Male, short hair"},
+                                     [("photos", ("face.png", handle, "image/png"))])
+        self.assertEqual(response.status_code, 200, response.text)
+        job_id = response.json()["created"][0]
+        options = response.json()["options"]
+        self.assertEqual(len(options["photos"]), 1)
+        self.assertTrue((self.input / options["photos"][0]).is_file())
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}/input/reference_image_0").status_code, 200)
+
+    def test_unfinished_source_is_refused(self):
+        self.add_job("busy", status="running")
+        response = self.edit({"source_job_id": "busy", "task": "vfx", "prompt": "Change the shirt"})
+        self.assertEqual(response.status_code, 409)
+
+
+class VideoEditMigrationTests(unittest.TestCase):
+    def test_existing_job_tables_take_the_edit_mode_and_variant(self):
+        temp = tempfile.TemporaryDirectory(prefix="h3-edit-db-")
+        self.addCleanup(temp.cleanup)
+        original = db_module.DB_PATH
+        self.addCleanup(setattr, db_module, "DB_PATH", original)
+        db_module.DB_PATH = Path(temp.name) / "old.sqlite3"
+        source = Path(db_module.__file__).read_text(encoding="utf-8")
+        start = source.index("    CREATE TABLE jobs (")
+        sql = source[start:source.index("    CREATE INDEX idx_jobs_queue", start)]
+        sql = sql.replace(",'h3edit'", "").replace(",'edit')", ")")
+        old = sqlite3.connect(db_module.DB_PATH)
+        old.executescript(sql)
+        now = now_iso()
+        old.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,width,
+                       height,seed,status,position,created_at,updated_at) VALUES('keep','Detail','upscale',5,'post',
+                       'h3detail','v1','native',1,1920,1080,'1','completed',1,?,?)""", (now, now))
+        old.commit()
+        old.close()
+        db_module.init_db()
+        with connect() as db:
+            self.assertEqual(db.execute("SELECT workflow_variant FROM jobs WHERE id='keep'").fetchone()[0], "h3detail")
+            db.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,
+                          width,height,seed,status,position,created_at,updated_at) VALUES('e','Edit','edit',5.2,'post',
+                          'h3edit','v1','native',1,480,864,'1','queued',2,?,?)""", (now, now))
 
 
 if __name__ == "__main__":

@@ -6,10 +6,11 @@ import { Gauge, Sparkles, Upload, X } from 'lucide-react'
 // is outside them.
 export type PostOperation = 'interpolate' | 'upscale'
 export type PostOptions = {
-  operation: PostOperation; method: string; source_job_id?: string | null; source_filename?: string
+  operation: PostOperation | 'edit'; method: string; source_job_id?: string | null; source_filename?: string
   source_width: number; source_height: number; source_fps: number; source_frames: number; source_duration: number
   width: number; height: number; fps: number; frames: number; long_side?: number; crop_percent?: number; audio?: boolean
   detail?: string; detail_label?: string; trimmed_frames?: number; fps_target?: number
+  task?: string; task_label?: string; seconds?: number; pad_frames?: number; photos?: string[]  // H3 edit (issue #54)
 }
 // `method`: set when the source is itself an upscaled card (an RTX VSR 1920 card offers RTX VSR + H3 detail, issue #50).
 type SourceJob = { id: string; width: number; height: number; duration: number; method?: string }

@@ -908,6 +908,9 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .post-sheet-file { position: relative; display: flex; align-items: center; min-height: 48px; padding: 0 12px; border: 1px dashed #526158; border-radius: 12px; background: #121713; color: #c5d0c7; font-size: 12px; cursor: pointer; overflow: hidden; }
 .post-sheet-file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .post-sheet-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edit-sheet-field { display: grid; gap: 6px; color: #c5d0c7; font-size: 12px; }
+.edit-sheet-field textarea, .edit-sheet-field input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid #3a463e; border-radius: 12px; background: #121713; color: #e8efe9; font: inherit; font-size: 13px; resize: vertical; }
+.edit-sheet-photos { display: grid; gap: 8px; }
 .post-sheet-options button:disabled { opacity: .6; }
 
 /* Character swap sheet (issue #46) */
