@@ -635,6 +635,10 @@ figure → Comfy-Org H3 Fun ControlNet Union (int8) on Ref2VA + DMAD 4-step at 0
 | Dance, "Suit man (me)" library character, neon rooftop | 704×1280 | 397 s, 9.96 GB | dances; full body (the clip is full body) |
 | Dance, "Record-store man", beach boardwalk | 480×864 | 210 s, 9.0 GB | dances |
 
+App runs (lab bridge, "H3 edit app test"): a library character dancing at 480 219 s, an uploaded sheet doing tai chi in
+a new place at 704 380 s, both good. A fast rooftop jump (landscape 864×480, 210 s) did not hold: the character
+crouched and ran but never leapt, and a bag became a board. Use clear, slower moves (dance, tai chi, gestures).
+
 5 s only (10 s was not run). Pixaroma's notes: blurred fast hands come out smeared; the last half-second is the
 weakest; another seed gives another take.
 
