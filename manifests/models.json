@@ -151,6 +151,18 @@
         "H3 edit (text edit, outfit from photos, style, head swap)"
       ]
     },
+    "h3_motion": {
+      "label": "H3 motion transfer",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae",
+        "h3_edit"
+      ],
+      "engines": [
+        "Motion transfer in the edit sheet (pose ControlNet, SDPose, RT-DETR)"
+      ]
+    },
     "clipproj_spectrum": {
       "label": "ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default)",
       "default": false,
@@ -711,6 +723,42 @@
       "bytes": 366647000,
       "sha256": "ddfdd94f4c9a0f32bf3649bb8e98ca20db572e4db6bcd9cca546a5b33ea32d11",
       "license_reference": "https://huggingface.co/Kijai/MiniMax-H3-experimental"
+    },
+    {
+      "name": "H3 Fun ControlNet Union pruned int8 (pose)",
+      "source_repository": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "revision": "54472221d27c695fca9621b0c3ed52f06c4af707",
+      "source_path": "model_patches/minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
+      "filename": "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
+      "target_directory": "model_patches",
+      "bytes": 2296635360,
+      "sha256": "9c645c0a308c8af361efd43b409710f6f8fec0db297c29503e141a84991fed0c",
+      "license_reference": "https://huggingface.co/Comfy-Org/MiniMax-H3",
+      "group": "h3_motion"
+    },
+    {
+      "name": "SDPose whole body fp16",
+      "source_repository": "https://huggingface.co/Comfy-Org/SDPose",
+      "revision": "acb43fbe8142b54d9ebd52b720b81dd4e14c8d81",
+      "source_path": "checkpoints/sdpose_wholebody_fp16.safetensors",
+      "filename": "sdpose_wholebody_fp16.safetensors",
+      "target_directory": "checkpoints",
+      "bytes": 1916645792,
+      "sha256": "63d01f9a7494560693b24767f4469d59c9d3266b31ff0a253e74d1e611442721",
+      "license_reference": "https://huggingface.co/Comfy-Org/SDPose",
+      "group": "h3_motion"
+    },
+    {
+      "name": "RT-DETR v4 X HGNet fp16 (person boxes)",
+      "source_repository": "https://huggingface.co/Comfy-Org/SDPose",
+      "revision": "acb43fbe8142b54d9ebd52b720b81dd4e14c8d81",
+      "source_path": "diffusion_models/rt_detr_v4-x-hgnet_fp16.safetensors",
+      "filename": "rt_detr_v4-x-hgnet_fp16.safetensors",
+      "target_directory": "diffusion_models",
+      "bytes": 123968978,
+      "sha256": "581f9af9bbabb664d1891cbccd823308b176ecd409146f954dfa39af3bec2476",
+      "license_reference": "https://huggingface.co/Comfy-Org/SDPose",
+      "group": "h3_motion"
     }
   ]
 }

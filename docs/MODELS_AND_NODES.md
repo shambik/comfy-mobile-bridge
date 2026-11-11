@@ -39,9 +39,10 @@ public revision with its exact size and SHA-256, taken from the files the app ra
 | `post_process` | Upscale and smoothing: RIFE and FILM smoothing, Real-ESRGAN upscale | 151 MB | - | yes |
 | `h3_detail` | RTX VSR + H3 detail: the upscale sheet's H3 detail pass (a node pack; it uses the `h3` and `pika` models) | 0 B | `h3`, `h3_int8_vae`, `pika` | yes |
 | `h3_edit` | H3 video edit LoRAs: H3 edit (text edit, outfit from photos, style, head swap) | 2.4 GB | `h3`, `h3_int8_vae` | yes |
+| `h3_motion` | H3 motion transfer: motion transfer in the edit sheet (pose ControlNet, SDPose, RT-DETR) | 4.0 GB | `h3`, `h3_int8_vae`, `h3_edit` | yes |
 | `clipproj_spectrum` | ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default): Spectrum speed-up, ClipProj text encoder | 5.0 GB | `h3` | no |
 
-All default groups together: 238.9 GB of models.
+All default groups together: 242.9 GB of models.
 
 `clipproj_spectrum` is off by default: ClipProj and Spectrum do not load on ComfyUI 0.44, the app shows
 both as not ready, and nothing in the tested setup uses them. They stay listed for an older ComfyUI.
@@ -147,6 +148,16 @@ Runs on the `h3` Ref2VA int8 model, text encoder and VAEs; these four LoRAs are 
 | `minimax_h3_style_transfer_v1.0_r64.safetensors` | `models/loras/h3_edit` | 592 MB | [Alissonerdx/Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI) `db85bdf94e` |
 | `minimax_h3_head_swap_v1.0_r32.safetensors` | `models/loras/h3_edit` | 296 MB | [Alissonerdx/Minimax-H3-ComfyUI](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI) `db85bdf94e` |
 | `minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors` | `models/loras/h3_edit` | 350 MB | [Kijai/MiniMax-H3-experimental](https://huggingface.co/Kijai/MiniMax-H3-experimental) `c2e7b89b18` |
+
+### `h3_motion`: H3 motion transfer
+
+Uses the `h3` Ref2VA model and the `h3_edit` DMAD 4-step LoRA (at 0.7); the pose nodes are core ComfyUI 0.44.
+
+| File | Folder | Size | Source (revision) |
+|---|---|---|---|
+| `minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors` | `models/model_patches` | 2.1 GB | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) `54472221d2` |
+| `sdpose_wholebody_fp16.safetensors` | `models/checkpoints` | 1.8 GB | [Comfy-Org/SDPose](https://huggingface.co/Comfy-Org/SDPose) `acb43fbe81` |
+| `rt_detr_v4-x-hgnet_fp16.safetensors` | `models/diffusion_models` | 118 MB | [Comfy-Org/SDPose](https://huggingface.co/Comfy-Org/SDPose) `acb43fbe81` |
 
 ### `post_process`: Upscale and smoothing
 

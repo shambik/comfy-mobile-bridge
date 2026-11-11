@@ -984,7 +984,7 @@ class VideoEditWorkflowTests(unittest.TestCase):
         self.assertEqual(graph["44"]["inputs"]["filename_prefix"], "h3_bridge_x")
 
     def test_every_task_needs_its_lora(self):
-        for task, spec in EDIT_TASKS.items():
+        for task, spec in ((t, sp) for t, sp in EDIT_TASKS.items() if sp["lora"]):   # motion has no edit LoRA
             names = [path.name for path in edit_required_files({"task": task})]
             self.assertIn(spec["lora"], names)
             self.assertIn("minimax_h3_ref2va_pruned_int8_convrot.safetensors", names)
@@ -1077,6 +1077,80 @@ class VideoEditMigrationTests(unittest.TestCase):
             db.execute("""INSERT INTO jobs (id,prompt,mode,duration,engine,workflow_variant,turbo_profile,encoder,steps,
                           width,height,seed,status,position,created_at,updated_at) VALUES('e','Edit','edit',5.2,'post',
                           'h3edit','v1','native',1,480,864,'1','queued',2,?,?)""", (now, now))
+
+
+# ---------------------------------------------------------------- motion transfer (issue #56)
+from backend.video_edit import MOTION_CONTROLNET, build_motion_prompt  # noqa: E402
+
+MOTION_BOXES = {"character": "man in a black suit and round sunglasses", "action": "dances energetically",
+                "place": "a rooftop at night"}
+
+
+class MotionTransferTests(unittest.TestCase):
+    def test_plan_is_5_s_at_both_sizes(self):
+        for size, dims in (("480", (480, 864)), ("704", (704, 1280))):
+            options = plan_edit(TALK, "motion", size, 5, "", "", "", 1, **MOTION_BOXES)
+            self.assertEqual((options["width"], options["height"], options["frames"]), (*dims, 124))
+            self.assertEqual(options["motion"]["action"], "dances energetically")
+        with self.assertRaisesRegex(ValueError, "5 second"):
+            plan_edit(TALK, "motion", "480", 10, "", "", "", 1, **MOTION_BOXES)
+        with self.assertRaisesRegex(ValueError, "photo"):
+            plan_edit(TALK, "motion", "480", 5, "", "", "", 0, **MOTION_BOXES)
+        with self.assertRaisesRegex(ValueError, "the new place"):
+            plan_edit(TALK, "motion", "480", 5, "", "", "", 1, character="man", action="dances", place=" ")
+
+    def test_prompt_is_pixaroma_template(self):
+        prompt = build_motion_prompt(**MOTION_BOXES)
+        self.assertTrue(prompt.startswith("The man in a black suit and round sunglasses, the person shown in the "
+                                          "character sheet <Picture 1>, dances energetically in a rooftop at night."))
+        self.assertIn("follows the moves exactly", prompt)
+
+    def test_graph_matches_the_lab_run(self):
+        options = plan_edit(TALK, "motion", "704", 5, "", "", "", 1, **MOTION_BOXES)
+        options["photos"] = ["upload_sheet.png"]
+        graph = edit_workflow(options, "post_x_source.mp4", "h3_bridge_x", 99)
+        self.assertEqual(graph["21"]["inputs"]["strength_model"], 0.7)
+        self.assertEqual(graph["60"]["inputs"]["name"], MOTION_CONTROLNET)
+        self.assertEqual(graph["66"]["inputs"]["control_video"], ["65", 0])
+        self.assertEqual(graph["24"]["inputs"]["model"], ["66", 0])
+        self.assertEqual((graph["63"]["inputs"]["class_name"], graph["63"]["inputs"]["max_detections"]), ("person", 2))
+        self.assertEqual((graph["30"]["inputs"]["steps"], graph["30"]["inputs"]["seed"]), (8, 99))
+        self.assertEqual(graph["13"]["inputs"]["ref_images.ref_image_0"], ["50", 0])
+        self.assertEqual(graph["50"]["inputs"]["image"], "upload_sheet.png")
+        self.assertEqual(graph["43"]["inputs"]["audio"], ["2", 1])
+        names = [path.name for path in edit_required_files(options)]
+        self.assertIn("sdpose_wholebody_fp16.safetensors", names)
+        self.assertIn("rt_detr_v4-x-hgnet_fp16.safetensors", names)
+        self.assertEqual(post_node_classes(options), {node["class_type"] for node in graph.values()})
+
+
+class MotionTransferApiTests(ApiBase):
+    def fake_ffmpeg(self, command, **_):
+        Path(command[-1]).write_bytes(b"prepared")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def test_library_character_is_copied_for_the_job(self):
+        from PIL import Image
+        import backend.character_swap as swap_lab
+        self.add_job("src")
+        library = self.root / "characters"
+        library.mkdir()
+        Image.new("RGB", (64, 96), "white").save(library / "abc.png")
+        characters = [{"id": "abc123", "name": "Suit man", "image": "abc.png", "look": "bald man", "status": "ready"}]
+        with patch.object(swap_lab, "CHARACTERS", library), patch.object(swap_lab, "list_characters", return_value=characters), \
+                patch("backend.main.probe_video", return_value=dict(TALK)), \
+                patch("backend.main.subprocess.run", side_effect=self.fake_ffmpeg):
+            unknown = self.client.post("/api/edit", headers={"X-CSRF-Token": self.token},
+                                       data={"source_job_id": "src", "task": "motion", "character_id": "nope", **MOTION_BOXES})
+            response = self.client.post("/api/edit", headers={"X-CSRF-Token": self.token},
+                                        data={"source_job_id": "src", "task": "motion", "character_id": "abc123",
+                                              **MOTION_BOXES})
+        self.assertEqual(unknown.status_code, 400)
+        self.assertEqual(response.status_code, 200, response.text)
+        options = response.json()["options"]
+        self.assertEqual((options["task"], options["character_id"], len(options["photos"])), ("motion", "abc123", 1))
+        self.assertTrue((self.input / options["photos"][0]).is_file())
+        self.assertTrue(response.json()["options"]["prompt"].startswith("The man in a black suit"))
 
 
 if __name__ == "__main__":

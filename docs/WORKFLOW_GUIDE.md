@@ -71,6 +71,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; sources up to 1080p, any length (long clips run in chunks inside one job), uploads too (see below) |
 | More real detail in a finished Pika or Turbo v4 lip-sync shot | **RTX VSR** to 1920, then **פרטים H3** on that card | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s, up to 15 s (see "RTX VSR + H3 detail" below) |
 | Change clothes, style or a head in a finished or uploaded video | **עריכה** on its card, or **עריכת וידאו** in the results header | 480×864 (default, ~2 min per 5 s) or 704×1280 (~5.5 min, sharper); 10 s at 480 only; outfit from photos at 480 only (see "H3 video edit" below) |
+| A character doing the moves of a video in a new place | **עריכה** → **העברת תנועה** | A library character or a sheet photo, three short boxes (character, what they do, new place); 480 (~3.5 min) or 704 (~6.5 min), 5 s (see "Motion transfer" below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -619,6 +620,23 @@ filed next to the source.
 - Sharper 480 results: **הגדלה** → RTX VSR on the edit's card (about 10 s; it keeps the skin texture). In the lab,
   RTX VSR + the H3 detail pass at 0.45 was crisper but smoothed skin and cut the clip to 4.5 s; the detail pass is
   not offered on edit cards yet. 704 native looked the most natural where it works.
+
+## Motion transfer (2026-11-11, issue #56)
+
+In the edit sheet: **העברת תנועה**. Only the body pose comes from the video (one person, whole body or knees up); the
+person, clothes, place and light come from the character (a library character or a sheet photo) and three boxes:
+the character, what they do, the new place. Pixaroma Ep41 workflow 06: RT-DETR person box → SDPose whole-body stick
+figure → Comfy-Org H3 Fun ControlNet Union (int8) on Ref2VA + DMAD 4-step at 0.7, 8 steps.
+
+| Lab run (project "Motion transfer test") | Size | Time | Result |
+|---|---|---|---|
+| Tai chi, pixaroma sheet, temple courtyard | 704×1280 | 388 s, 9.9 GB | follows the hand moves |
+| Same | 480×864 | 204 s, 8.9 GB | same, softer |
+| Dance, "Suit man (me)" library character, neon rooftop | 704×1280 | 397 s, 9.96 GB | dances; full body (the clip is full body) |
+| Dance, "Record-store man", beach boardwalk | 480×864 | 210 s, 9.0 GB | dances |
+
+5 s only (10 s was not run). Pixaroma's notes: blurred fast hands come out smeared; the last half-second is the
+weakest; another seed gives another take.
 
 ## Singularity, Pika and the official LTX templates
 
