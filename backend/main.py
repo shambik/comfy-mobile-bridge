@@ -3265,6 +3265,8 @@ async def _queue_h3_detail_job(rtx_job: dict, rtx_path: Path, level: str | None)
 @app.post("/api/edit")
 async def edit_video(request: Request, task: str = Form(...), size: str = Form("480"), seconds: int = Form(5),
                      prompt: str = Form(""), style: str = Form(""), face: str = Form(""),
+                     character: str = Form(""), action: str = Form(""), place: str = Form(""),
+                     character_id: str = Form(""),
                      source_job_id: str | None = Form(None), video: UploadFile | None = File(None),
                      photos: list[UploadFile] = File(default=[])):
     """Edit a finished video (source_job_id) or an uploaded one with an H3 edit LoRA (issue #54), as a post job.
@@ -3274,6 +3276,14 @@ async def edit_video(request: Request, task: str = Form(...), size: str = Form("
     photos = [photo for photo in photos if photo and photo.filename]
     if len(photos) > 2:
         raise HTTPException(400, "Attach at most two photos")
+    library_image = None
+    if character_id:   # motion transfer: a character from the swap library instead of an uploaded sheet
+        known = {item["id"]: item for item in swap_lab.list_characters()}
+        if character_id not in known or photos:
+            raise HTTPException(400, "Choose one character: a library character or a photo")
+        library_image = swap_lab.CHARACTERS / Path(known[character_id]["image"]).name
+        if not library_image.is_file():
+            raise HTTPException(409, "The library character's picture is missing")
     new_id = uuid.uuid4().hex
     input_name = f"post_{new_id}_source.mp4"
     location_job = None
@@ -3312,13 +3322,20 @@ async def edit_video(request: Request, task: str = Form(...), size: str = Form("
             raise HTTPException(400, "Choose a video to edit")
         try:
             probe = await asyncio.to_thread(probe_video, source_path)
-            options = plan_edit(probe, task, size, seconds, prompt, style, face, len(photos))
+            options = plan_edit(probe, task, size, seconds, prompt, style, face,
+                                len(photos) + (1 if library_image else 0), character, action, place)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         for photo in photos:
             path, name = await save_image(photo, destination=INPUT)
             cleanup.append(Path(path))
             options["photos"].append(name)
+        if library_image:
+            name = f"upload_{uuid.uuid4().hex}{library_image.suffix.lower()}"
+            await asyncio.to_thread(shutil.copyfile, library_image, INPUT / name)
+            cleanup.append(INPUT / name)
+            options["photos"].append(name)
+            options["character_id"] = character_id
         out = await asyncio.to_thread(subprocess.run, edit_input_command(options, source_path, INPUT / input_name),
                                       capture_output=True, text=True, timeout=600)
         if out.returncode or not (INPUT / input_name).is_file():

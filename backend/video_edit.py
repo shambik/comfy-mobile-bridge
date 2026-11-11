@@ -11,6 +11,12 @@ Only what the lab measured on the RTX 3080 10 GB (2026-11-11, project "Edit LoRA
   (2 seeds) and only the cap at 576, so it stays at 480. 704 at 10 s failed in the sampler ("CUDA error: device not
   ready"), so 10 s stays at 480.
 - Landscape sizes are the same sizes turned (864x480, 1280x704).
+
+Motion transfer (issue #56, pixaroma workflow 06; lab 2026-11-11, project "Motion transfer test"): the moves of the
+video (RT-DETR v4 person box -> SDPose whole-body stick figure -> the Comfy-Org H3 Fun ControlNet Union pose patch,
+strength 1) drive a character from a sheet (Ref2VA <Picture 1>) in a new place; DMAD at 0.7, 8 steps. Tai chi and
+dance clips with a pixaroma sheet and two app library characters followed the moves: 704x1280 388-397 s (peak
+9.96 GB), 480x864 204-210 s (~9 GB). Only 5 s (124 frames) was run, so 10 s is refused.
 """
 from __future__ import annotations
 
@@ -41,7 +47,18 @@ EDIT_TASKS = {
               "photos": (0, 0), "sizes": ("480", "704"), "seconds": (5, 10)},
     "head": {"label": "Head swap", "lora": "minimax_h3_head_swap_v1.0_r32.safetensors", "trigger": "head_swap:",
              "photos": (1, 1), "sizes": ("480", "704"), "seconds": (5, 10)},
+    "motion": {"label": "Motion transfer", "lora": None, "trigger": None,
+               "photos": (1, 1), "sizes": ("480", "704"), "seconds": (5,)},
 }
+MOTION_CONTROLNET = "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors"   # models/model_patches
+MOTION_SDPOSE = "sdpose_wholebody_fp16.safetensors"                                    # models/checkpoints
+MOTION_RTDETR = "rt_detr_v4-x-hgnet_fp16.safetensors"                                   # models/diffusion_models
+MOTION_DMAD_STRENGTH = 0.7
+MOTION_STEPS = 8
+MOTION_TEMPLATE = ("The {character}, the person shown in the character sheet <Picture 1>, {action} in {place}. "
+                   "The character follows the moves exactly. The camera stays still at chest height, framing the "
+                   "character from the knees up. Calm ambient music.")
+MAX_MOTION_FIELD = 400
 # Styles the LoRA's guide and the pixaroma tests name as working (drawn styles with lines; watercolor barely changes).
 EDIT_STYLES = {
     "anime": "a 2D anime style with clean black line art, flat cel shading, soft gradients and vibrant colours",
@@ -55,6 +72,12 @@ NODE_CLASSES = {
     "ConditioningZeroOut", "KSampler", "VAEDecode", "CreateVideo", "SaveVideo",
 }
 NODE_CLASSES_WITH_PHOTOS = NODE_CLASSES | {"LoadImage"}
+MOTION_NODE_CLASSES = {
+    "LoadVideo", "GetVideoComponents", "VAELoader", "CLIPLoader", "UNETLoader", "LoraLoaderModelOnly",
+    "MiniMaxH3SigmaShift", "ModelPatchLoader", "CheckpointLoaderSimple", "RTDETR_detect", "SDPoseKeypointExtractor",
+    "SDPoseDrawKeypoints", "MiniMaxH3FunControlNetApply", "ModelAttentionBackend", "LoadImage",
+    "MiniMaxH3ReferenceToVideo", "ConditioningZeroOut", "KSampler", "VAEDecode", "CreateVideo", "SaveVideo",
+}
 
 # The head swap LoRA's prompt template (Alissonerdx/Minimax-H3-ComfyUI docs/head-swap.md, as the lab ran it); the
 # user's short description of the face photo goes in {face}.
@@ -117,6 +140,19 @@ def edit_size(size: str, source_width: int, source_height: int) -> tuple[int, in
     return (height, width) if source_width > source_height else (width, height)
 
 
+def build_motion_prompt(character: str, action: str, place: str) -> str:
+    """Pixaroma's motion transfer prompt with the three boxes filled (raises ValueError with the reason)."""
+    values = {key: re.sub(r"\s+", " ", value or "").strip().rstrip(".")
+              for key, value in (("character", character), ("action", action), ("place", place))}
+    missing = [key for key, value in values.items() if not value]
+    if missing:
+        raise ValueError("Fill in " + ", ".join({"character": "the character", "action": "what they do",
+                                                  "place": "the new place"}[key] for key in missing))
+    if any(len(value) > MAX_MOTION_FIELD for value in values.values()):
+        raise ValueError(f"Keep each box under {MAX_MOTION_FIELD} characters")
+    return MOTION_TEMPLATE.format(**values)
+
+
 def build_edit_prompt(task: str, prompt: str, style: str, face: str, photos: int) -> str:
     """The prompt the LoRA expects (raises ValueError with the reason)."""
     prompt = re.sub(r"\s+", " ", prompt or "").strip()
@@ -157,7 +193,7 @@ def build_edit_prompt(task: str, prompt: str, style: str, face: str, photos: int
 
 
 def plan_edit(source: dict, task: str, size: str | None, seconds: int | None, prompt: str, style: str, face: str,
-              photos: int) -> dict:
+              photos: int, character: str = "", action: str = "", place: str = "") -> dict:
     """Check the request and the source probe against the tested limits; return the stored post options."""
     if task not in EDIT_TASKS:
         raise ValueError("Choose an edit: " + ", ".join(EDIT_TASKS))
@@ -169,6 +205,8 @@ def plan_edit(source: dict, task: str, size: str | None, seconds: int | None, pr
     if size not in spec["sizes"]:
         raise ValueError(f"{spec['label']} was tested at 480x864 only: at 576 and 704 the photo clothes did not appear")
     if seconds not in EDIT_FRAMES or seconds not in spec["seconds"]:
+        if task == "motion":
+            raise ValueError("Motion transfer was tested on 5 second clips only")
         raise ValueError("Choose 5 or 10 seconds")
     if seconds == 10 and size != "480":
         raise ValueError("10 seconds runs at 480x864 only: at 704x1280 it ran out of graphics memory on this card")
@@ -181,10 +219,15 @@ def plan_edit(source: dict, task: str, size: str | None, seconds: int | None, pr
         need = (frames - EDIT_MAX_PAD_FRAMES) / EDIT_FPS
         raise ValueError(f"The clip is {source['duration']:.1f} s; {seconds} s needs at least {need:.1f} s")
     width, height = edit_size(size, source["width"], source["height"])
-    final = build_edit_prompt(task, prompt, style, face, photos)
+    if task == "motion":
+        final = build_motion_prompt(character, action, place)
+    else:
+        final = build_edit_prompt(task, prompt, style, face, photos)
     return {"operation": "edit", "method": H3_EDIT, "task": task, "task_label": spec["label"], "size": size,
             "style": style if task == "style" else None, "user_prompt": (prompt or "").strip()[:MAX_PROMPT],
             "face": (face or "").strip()[:MAX_FACE] if task == "head" else None, "prompt": final,
+            "motion": {"character": character.strip(), "action": action.strip(), "place": place.strip()}
+            if task == "motion" else None,
             "source_width": source["width"], "source_height": source["height"], "source_fps": source["fps"],
             "source_frames": source["frames"], "source_duration": round(source["duration"], 3),
             "audio": bool(source["audio"]), "width": width, "height": height, "fps": EDIT_FPS, "frames": frames,
@@ -214,7 +257,57 @@ def edit_input_command(options: dict, source: Path, out: Path) -> list[str]:
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", str(out)]
 
 
+def motion_workflow(options: dict, video_name: str, prefix: str, seed: int) -> dict:
+    """Pixaroma workflow 06 as the lab ran it: pose stick figure from the moves clip -> Fun ControlNet pose patch on
+    Ref2VA + DMAD 0.7 -> the character sheet as <Picture 1> -> 8 steps; the moves clip's sound on the result."""
+    g = {"1": {"class_type": "LoadVideo", "inputs": {"file": video_name}},
+         "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
+         "4": {"class_type": "VAELoader", "inputs": {"vae_name": FUSED_VIDEO_VAE}},
+         "5": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
+         "10": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "minimax", "device": "default"}},
+         "20": {"class_type": "UNETLoader", "inputs": {"unet_name": REF2VA_MODEL, "weight_dtype": "default"}},
+         "21": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["20", 0], "lora_name": edit_lora_name(DMAD_LORA),
+                                                                "strength_model": MOTION_DMAD_STRENGTH}},
+         "23": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["21", 0], "shift_video": 12.0, "shift_audio": 3.0}},
+         "60": {"class_type": "ModelPatchLoader", "inputs": {"name": MOTION_CONTROLNET}},
+         "61": {"class_type": "UNETLoader", "inputs": {"unet_name": MOTION_RTDETR, "weight_dtype": "default"}},
+         "62": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": MOTION_SDPOSE}},
+         "63": {"class_type": "RTDETR_detect", "inputs": {"model": ["61", 0], "image": ["2", 0], "threshold": 0.5,
+                                                          "class_name": "person", "max_detections": 2}},
+         "64": {"class_type": "SDPoseKeypointExtractor", "inputs": {"model": ["62", 0], "vae": ["62", 2], "image": ["2", 0],
+                                                                    "batch_size": 16, "bboxes": ["63", 0]}},
+         "65": {"class_type": "SDPoseDrawKeypoints", "inputs": {"keypoints": ["64", 0], "draw_body": True,
+                                                                "draw_hands": True, "draw_face": True, "draw_feet": True,
+                                                                "stick_width": 4, "face_point_size": 2,
+                                                                "score_threshold": 0.5, "draw_head": True}},
+         "66": {"class_type": "MiniMaxH3FunControlNetApply", "inputs": {"model": ["23", 0], "model_patch": ["60", 0],
+                                                                        "vae": ["4", 0], "strength": 1.0,
+                                                                        "start_percent": 0.0, "end_percent": 1.0,
+                                                                        "control_video": ["65", 0]}},
+         "24": {"class_type": "ModelAttentionBackend", "inputs": {"model": ["66", 0], "attention": "comfy kitchen attention"}},
+         "50": {"class_type": "LoadImage", "inputs": {"image": options["photos"][0]}},
+         "13": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+             "clip": ["10", 0], "vae": ["4", 0], "audio_vae": ["5", 0], "prompt": options["prompt"],
+             "width": options["width"], "height": options["height"], "length": options["frames"],
+             "ref_image_size": "match", "ref_images.ref_image_0": ["50", 0]}},
+         "15": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["13", 0]}},
+         "30": {"class_type": "KSampler", "inputs": {"model": ["24", 0], "seed": int(seed) % EDIT_SEED_MOD,
+                                                     "steps": MOTION_STEPS, "cfg": 1.0, "sampler_name": "euler",
+                                                     "scheduler": "simple", "positive": ["13", 0], "negative": ["15", 0],
+                                                     "latent_image": ["13", 1], "denoise": 1.0}},
+         "41": {"class_type": "VAEDecode", "inputs": {"samples": ["30", 0], "vae": ["4", 0]}},
+         "43": {"class_type": "CreateVideo", "inputs": {"images": ["41", 0], "fps": float(EDIT_FPS)}},
+         "44": {"class_type": "SaveVideo", "inputs": {"filename_prefix": prefix, "video": ["43", 0], "format": "mp4",
+                                                      "format.codec": "h264", "format.codec.encoding": "re-encode",
+                                                      "format.codec.encoding.crf": 12.0}}}
+    if options.get("audio"):
+        g["43"]["inputs"]["audio"] = ["2", 1]
+    return g
+
+
 def edit_workflow(options: dict, video_name: str, prefix: str, seed: int) -> dict:
+    if options["task"] == "motion":
+        return motion_workflow(options, video_name, prefix, seed)
     task = EDIT_TASKS[options["task"]]
     g = {"1": {"class_type": "LoadVideo", "inputs": {"file": video_name}},
          "2": {"class_type": "GetVideoComponents", "inputs": {"video": ["1", 0]}},
@@ -254,16 +347,25 @@ def edit_workflow(options: dict, video_name: str, prefix: str, seed: int) -> dic
 
 
 def edit_node_classes(options: dict) -> set[str]:
+    if options["task"] == "motion":
+        return MOTION_NODE_CLASSES
     return NODE_CLASSES_WITH_PHOTOS if options.get("photos") else NODE_CLASSES
 
 
 def edit_required_files(options: dict) -> list[Path]:
     loras = MODELS / "loras" / EDIT_LORA_DIR
+    if options["task"] == "motion":
+        return [MODELS / "diffusion_models" / REF2VA_MODEL, loras / DMAD_LORA,
+                MODELS / "model_patches" / MOTION_CONTROLNET, MODELS / "checkpoints" / MOTION_SDPOSE,
+                MODELS / "diffusion_models" / MOTION_RTDETR, MODELS / "text_encoders" / TEXT_ENCODER,
+                MODELS / "vae" / FUSED_VIDEO_VAE, MODELS / "vae" / AUDIO_VAE]
     return [MODELS / "diffusion_models" / REF2VA_MODEL, loras / DMAD_LORA, loras / EDIT_TASKS[options["task"]]["lora"],
             MODELS / "text_encoders" / TEXT_ENCODER, MODELS / "vae" / FUSED_VIDEO_VAE, MODELS / "vae" / AUDIO_VAE]
 
 
 def edit_title(options: dict, source_prompt: str) -> str:
-    what = options.get("user_prompt") or options.get("face") or EDIT_STYLES.get(options.get("style") or "", "")
+    motion = options.get("motion") or {}
+    what = (f"{motion['action']} in {motion['place']}" if motion else
+            options.get("user_prompt") or options.get("face") or EDIT_STYLES.get(options.get("style") or "", ""))
     head = f"H3 edit · {options['task_label']} · {options['width']}x{options['height']} · {options['seconds']} s"
     return f"{head} · {(what or source_prompt).strip()[:160]}"
