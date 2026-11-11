@@ -606,11 +606,14 @@ filed next to the source.
 | Edit | What to write | 480×864 5 s | 704×1280 5 s |
 |---|---|---|---|
 | Text edit (`vfx_edit`) | One English sentence: change X into Y, while preserving Z. Point at things the way you see them | 133 s, flannel shirt exact | 322 s, sharper |
-| Outfit from photos | 1-2 photos (one piece each, plain background) and a sentence that names them as @1 / @2 | 133 s, jacket and cap (brim colour off) | **no change** on 2 seeds (576: cap only), so 480 only |
+| Outfit from photos | 1-2 photos (one piece each, plain background) and a sentence that names them as @1 / @2 | 133 s; 3 seeds: jacket and cap, jacket and cap plus a stray arrow and text drawn on the wall, no change. Queue it again when it misses | **no change** on 2 seeds (576: cap only), so 480 only |
 | Style | Anime, comic, manga or cartoon, or your own sentence (drawn styles with lines work best) | 128 s, clean cartoon, background colours shift | 314 s, finer lines |
 | Head swap | One photo of the whole head and a short description of it; only faces you have the right to use | 138 s, identity held | 331 s, identity held |
 
-- 10 s (243 frames) works at 480 (286 s, 9.9 GB). 704 at 10 s failed in the sampler on the 3080, so it is refused.
+- 10 s (243 frames) works at 480 (286-295 s, 9.9 GB). 704 at 10 s failed in the sampler on the 3080, so it is refused.
+  A 10 s head swap turned the navy polo maroon on 1 of 2 seeds; every job gets its own random seed, so queue it again.
+- App runs (lab bridge, project "H3 edit app test", 2026-11-11): text edit on a landscape clip 864×480 133 s and
+  1280×704 313 s (coat changed, face and street kept); anime at 704×1280 on a portrait lip-sync clip 317 s.
 - The clip is scaled and centre-cropped to the size (landscape clips get 864×480 / 1280×704), made 24 fps, and the
   first 5 or 10 s are used; a clip up to 0.5 s short gets its last frame held.
 - Sharper 480 results: **הגדלה** → RTX VSR on the edit's card (about 10 s; it keeps the skin texture). In the lab,

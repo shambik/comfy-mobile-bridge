@@ -8,7 +8,7 @@ type SourceJob = { id: string; width: number; height: number; duration: number }
 
 const TASKS: { id: Task; label: string; detail: string }[] = [
   { id: 'vfx', label: 'שינוי בטקסט', detail: 'משנה דבר אחד לפי משפט: בגד, שיער, כובע, משקפיים, חפץ בחדר' },
-  { id: 'outfit', label: 'בגדים מתמונות', detail: 'מלביש את הבגדים מהתמונות שלך · 480 בלבד' },
+  { id: 'outfit', label: 'בגדים מתמונות', detail: 'מלביש את הבגדים מהתמונות שלך · 480 בלבד · לפעמים לא נקלט: הרץ שוב' },
   { id: 'style', label: 'סגנון מצויר', detail: 'מצייר מחדש את כל הסרטון: אנימה, קומיקס, מנגה, קרטון' },
   { id: 'head', label: 'החלפת ראש', detail: 'ראש ופנים מתמונה · הגוף, התנועה והקול נשארים' },
 ]
@@ -135,7 +135,7 @@ export function VideoEditSheet({ job, csrf, onClose, onQueued }: {
           <strong>{value} שניות</strong><small>{value === 10 ? (size === '480' ? 'מתחילת הקליפ' : 'ב־480 בלבד') : 'מתחילת הקליפ'}</small>
         </button>)}
       </div>
-      <p className="post-sheet-note">H3 עם LoRA עריכה ו־LoRA מהירות (4 צעדים). התנועה, הפנים, השפתיים והסאונד של המקור נשמרים. קליפ לרוחב מקבל את אותם גדלים לרוחב. כדי לחדד תוצאה של 480: הגדלה עם RTX VSR מהכרטיס שלה.{task === 'head' && ' רק פנים שיש לך זכות להשתמש בהן: שלך, דמות מומצאת, או מי שהסכים.'}</p>
+      <p className="post-sheet-note">H3 עם LoRA עריכה ו־LoRA מהירות (4 צעדים). התנועה, הפנים, השפתיים והסאונד של המקור נשמרים. כל הרצה מקבלת seed חדש: אם העריכה לא נקלטה או הוסיפה משהו מוזר, הרץ שוב. קליפ לרוחב מקבל את אותם גדלים לרוחב. כדי לחדד תוצאה של 480: הגדלה עם RTX VSR מהכרטיס שלה.{task === 'head' && ' רק פנים שיש לך זכות להשתמש בהן: שלך, דמות מומצאת, או מי שהסכים.'}</p>
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (job ? 'מוסיף…' : 'מעלה…') : 'הוסף לתור'}</button></div>
     </form>
