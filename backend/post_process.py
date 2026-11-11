@@ -48,6 +48,14 @@ GAN_SMOOTHED_MAX_FRAMES = 248       # Real-ESRGAN on a smoothed 48 fps shot up t
 GAN_SMOOTHED_MAX_PIXELS = 1632 * 928  # 454 s, 6.8 GB VRAM, 31 GB ComfyUI RAM (3 lab windows of 83 frames: ~470 s)
 LANCZOS_MAX_FRAMES = 300            # a 5 s 60 fps clip, or a smoothed 30 fps clip (299 frames)
 INTERPOLATE_MAX_FPS = 30.0          # 24 and 30 fps sources were tested; smoothing a 48/60 fps clip is not
+# RIFE 60 / 120 fps (issue #52). Lab 2026-11-10: RIFE x5 on two 24 fps shots (1632x928, 124 frames): 36 and 42 s, 3.7 GB,
+# 616 frames at 120 fps. Keeping every second frame gives exactly 60 fps (308 frames). x5 holds 5x the frames in RAM,
+# so only that tested size is allowed, as one whole run.
+RIFE_HIGH_FPS = (60, 120)
+RIFE_HIGH_SOURCE_FPS = 24.0
+RIFE_HIGH_MAX_FRAMES = 124          # 5.2 s
+RIFE_HIGH_MAX_PIXELS = 1632 * 928
+RIFE_HIGH_MULTIPLIER = 5
 UPSCALE_LONG_SIDES = (1920, 2560)   # 2560 = the measured 2560x1456 target class
 UPSCALE_MAX_PIXELS = 2560 * 1456
 # Near-16:9 and near-9:16 sources (the app's sizes are 1.75-1.83, not exactly 1.78) go to the standard delivery
@@ -138,7 +146,8 @@ def crop_percent(width: int, height: int, target_width: int, target_height: int)
     return round((1 - min(ratio, 1 / ratio)) * 100, 1)
 
 
-def plan_post_process(source: dict, operation: str, method: str, long_side: int | None = None) -> dict:
+def plan_post_process(source: dict, operation: str, method: str, long_side: int | None = None,
+                      fps_target: int | None = None) -> dict:
     """Check the request against the tested limits and return the stored options (raises ValueError)."""
     if operation not in METHODS:
         raise ValueError("Choose upscale or interpolate")
@@ -156,6 +165,8 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
     options = {"operation": operation, "method": method, "source_width": width, "source_height": height,
                "source_frames": frames, "source_fps": round(fps, 3), "source_duration": round(source["duration"], 3),
                "audio": bool(source["audio"])}
+    if fps_target is not None:
+        return _plan_rife_high_fps(options, operation, method, fps_target)
     chunks = chunk_plan(method, operation, frames, width, height)
     if chunks:
         options["chunks"] = chunks
@@ -176,6 +187,39 @@ def plan_post_process(source: dict, operation: str, method: str, long_side: int 
         options.update(width=target[0], height=target[1], fps=round(fps, 3), frames=frames, long_side=long_side,
                        crop_percent=crop_percent(width, height, *target))
     return options
+
+
+def _plan_rife_high_fps(options: dict, operation: str, method: str, fps_target: int) -> dict:
+    """RIFE x5 (24 -> 120 fps); 60 fps keeps every second frame afterwards (issue #52)."""
+    if operation != "interpolate" or method != "rife":
+        raise ValueError("60 and 120 fps are RIFE smoothing options")
+    if fps_target not in RIFE_HIGH_FPS:
+        raise ValueError("Choose 60 or 120 fps")
+    width, height = options["source_width"], options["source_height"]
+    frames, fps = options["source_frames"], options["source_fps"]
+    if abs(fps - RIFE_HIGH_SOURCE_FPS) > 0.01:
+        raise ValueError(f"60 and 120 fps were tested on 24 fps clips; this one is {fps:g} fps")
+    if frames > RIFE_HIGH_MAX_FRAMES:
+        raise ValueError(f"60 and 120 fps were tested on clips of up to {RIFE_HIGH_MAX_FRAMES} frames (5.2 s); "
+                         f"this one has {frames}")
+    if width * height > RIFE_HIGH_MAX_PIXELS:
+        raise ValueError(f"60 and 120 fps were tested on clips up to 1632x928; this one is {width}x{height}")
+    produced = (frames - 1) * RIFE_HIGH_MULTIPLIER + 1            # 124 -> 616 frames at 120 fps
+    keep_every = 120 // fps_target                                # 1 at 120 fps, 2 at 60 fps
+    options.update(width=width, height=height, fps=float(fps_target), fps_target=fps_target,
+                   multiplier=RIFE_HIGH_MULTIPLIER, graph_fps=round(fps * RIFE_HIGH_MULTIPLIER, 3),
+                   keep_every=keep_every, frames=-(-produced // keep_every))
+    return options
+
+
+def decimate_command(options: dict, source: Path, out: Path) -> list[str]:
+    """FFmpeg command that keeps every `keep_every`-th frame of the RIFE x5 clip (CPU only; sound copied)."""
+    every, fps = int(options["keep_every"]), float(options["fps"])
+    command = ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-vf",
+               f"select='not(mod(n,{every}))',setpts=N/({fps:g}*TB)", "-r", f"{fps:g}", "-fps_mode", "cfr",
+               "-c:v", "libx264", "-crf", "12", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    command += ["-c:a", "copy"] if options.get("audio") else ["-an"]
+    return [*command, "-movflags", "+faststart", str(out)]
 
 
 def chunk_cut_command(options: dict, chunk: dict, source: Path, out: Path) -> list[str]:
@@ -290,8 +334,10 @@ def post_process_workflow(options: dict, video_name: str, prefix: str) -> dict:
     method = options["method"]
     if method in INTERPOLATION_MODELS:
         g["10"] = {"class_type": "FrameInterpolationModelLoader", "inputs": {"model_name": INTERPOLATION_MODELS[method]}}
-        g["11"] = {"class_type": "FrameInterpolate", "inputs": {"interp_model": ["10", 0], "images": frames, "multiplier": 2}}
-        frames, fps = ["11", 0], float(options["fps"])
+        g["11"] = {"class_type": "FrameInterpolate", "inputs": {"interp_model": ["10", 0], "images": frames,
+                                                                "multiplier": int(options.get("multiplier", 2))}}
+        # x5 runs at 120 fps; the 60 fps choice keeps every second frame afterwards (decimate_command)
+        frames, fps = ["11", 0], float(options.get("graph_fps", options["fps"]))
     else:
         if method == "gan":
             g["10"] = {"class_type": "UpscaleModelLoader", "inputs": {"model_name": UPSCALE_MODELS["gan"]}}
@@ -484,7 +530,8 @@ def post_title(options: dict, source_prompt: str) -> str:
         head = f"{label} ({options['detail_label']}) · {options['width']}x{options['height']}"
         return f"{head} · {source_prompt.strip()[:160]}"
     if options["operation"] == "interpolate":
-        head = f"{label} 2x · {options['source_fps']:g} -> {options['fps']:g} fps"
+        times = "x5" if options.get("multiplier") == 5 else "2x"
+        head = f"{label} {times} · {options['source_fps']:g} -> {options['fps']:g} fps"
     else:
         head = f"{label} upscale · {options['source_width']}x{options['source_height']} -> {options['width']}x{options['height']}"
     return f"{head} · {source_prompt.strip()[:160]}"

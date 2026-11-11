@@ -2484,7 +2484,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
         {onPostProcess && (engine !== 'post' || job.mode === 'upscale') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
-        {onPostProcess && (engine !== 'post' || job.mode === 'interpolate') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
+        {onPostProcess && (engine !== 'post' || job.mode === 'interpolate' || job.workflow_variant === 'h3detail') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
         {onPostProcess && canAddH3Detail(job) && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> פרטים H3</button>}
         {onSwap && <button className="post-button" onClick={onSwap}><Users size={15} /> החלפת דמות</button>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}

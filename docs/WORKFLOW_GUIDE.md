@@ -483,6 +483,12 @@ Limits (the server refuses anything else and says why):
   chunks also read the next chunk's first frame, so the frame between two chunks is still made. RTX VSR and
   FSR 3 stream frame by frame and never split. The job card shows the chunk count (for example 2/3).
 - Smoothing takes sources up to 30 fps. A clip at 48 or 60 fps cannot be smoothed again.
+- **RIFE 60 and 120 fps** (issue #52): extra choices next to the usual ×2. RIFE ×5 turns 24 fps into 120 fps (four new
+  frames between each pair); 60 fps keeps every second frame of that (an FFmpeg step on the CPU), which lands on exactly
+  60 fps. Lab 2026-11-10, Missed Bus face and the rooftop jump (1632×928, 124 frames): 36 s and 42 s, 3.7 GB, 616 frames at
+  120 fps; the user watched 24, 48, 60 and 120 fps side by side and rated 60 and 120 good. ×5 holds 5× the frames in RAM,
+  so only that tested size is allowed: **24 fps clips of up to 124 frames (5.2 s) at up to 1632×928**, one whole run. 120 fps
+  files are 9-42 MB; most sites play 60 fps at most.
 - Upscale targets have a 1920 or 2560 long side. Near-16:9 and near-9:16 sources get the standard sizes
   1920×1080 / 2560×1440 (or 1080×1920 / 1440×2560). The app's frame sizes are 1.75–1.83 wide, not
   exactly 1.78, so up to 2.6% is cut from the center to fit; 1632×928 loses 1.1%. Standard sizes keep
@@ -566,6 +572,10 @@ Limits, enforced by the server:
 - 107 to 362 frames (4.5-15 s). H3 needs 17n+5 frames, so up to 16 frames at the end are trimmed; the card says how
   many (RTX VSR returned 360 of The Last Fold's 362 frames, so 15 were trimmed).
 - 1920 only: 2560 would need spatial tiles, which were not tested.
+- **To 2560:** press **הגדלה** on the H3 detail card and choose RTX VSR (about 17 s, 2.3 GB). Lab 2026-11-10, same two
+  clips: H3 detail at 1920 then RTX VSR to 2560 took about 6 min and added almost no flicker (+0.014 on the face, against
+  +0.12 for native 2560 with 512 px tiles, which also left a blue streak on the rooftop arm). Native 2560 is not offered:
+  the pack's seam-free tiling removed the flicker (+0.006) in 12 min but used 62 of the PC's 64 GB of RAM.
 - Not offered (rejected in the same lab): the "draft, then latent upscale" two-pass route (10 s clips came out "not
   good") and RelayVSR ("low quality" on The Last Fold).
 

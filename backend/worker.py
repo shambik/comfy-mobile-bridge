@@ -28,7 +28,7 @@ from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
 from .post_process import (H3_DETAIL, VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command,
-                           chunk_keep, h3_detail_workflow, post_node_classes, post_required_files,
+                           chunk_keep, decimate_command, h3_detail_workflow, post_node_classes, post_required_files,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
                            visual_enhancer_finish_command)
 from .workflows import (graph_spec_workflow, official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
@@ -1426,6 +1426,9 @@ class QueueWorker:
                 await asyncio.sleep(5)
             if not video:
                 raise RuntimeError("ComfyUI completed but no MP4 was found")
+            if job["engine"] == "post" and int((post_options or {}).get("keep_every") or 1) > 1:
+                # RIFE 60 fps (issue #52): the graph made 120 fps; keep every second frame, on the CPU.
+                await self._decimate_output(video, post_options)
             probe = await asyncio.to_thread(
                 media_probe, video, require_audio=not bool(job.get("no_audio"))
             )
@@ -1525,6 +1528,18 @@ class QueueWorker:
             process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             pass
+
+    @staticmethod
+    async def _decimate_output(video, options: dict):
+        """Replace a RIFE x5 (120 fps) clip by its every-second-frame 60 fps version, in place."""
+        video = Path(video)
+        part = video.with_name(video.stem + "_60fps_part.mp4")
+        out = await asyncio.to_thread(subprocess.run, decimate_command(options, video, part),
+                                      capture_output=True, text=True, timeout=900)
+        if out.returncode or not part.is_file():
+            part.unlink(missing_ok=True)
+            raise RuntimeError("Could not make the 60 fps version: " + (out.stderr.strip().splitlines() or ["unknown"])[-1])
+        part.replace(video)
 
     async def _run_chunked_post_job(self, job: dict, options: dict, estimated_total: float | None):
         """Upscale or smooth a long clip chunk by chunk in one job (issue #44): each chunk is cut from the source, processed
