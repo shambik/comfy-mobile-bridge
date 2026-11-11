@@ -57,6 +57,7 @@ from .post_process import (H3_DETAIL, UPLOAD_MAX_BYTES, UPLOAD_TYPES, VISUAL_ENH
                            h3_detail_input_command, plan_h3_detail, plan_post_process, post_title, prepare_upload,
                            probe_video)
 from .security import COOKIE, new_token, require_csrf
+from .video_edit import edit_input_command, plan_edit
 from .agents import agent_health, model_catalog, process_manager
 from .council import COUNCIL_PIPELINE, LEGACY_PIPELINE
 from .council.capabilities import verify_council_config
@@ -3261,6 +3262,83 @@ async def _queue_h3_detail_job(rtx_job: dict, rtx_path: Path, level: str | None)
                            rtx_job.get("aspect_ratio") or aspect_label(options["width"], options["height"]), rtx_job["id"])
 
 
+@app.post("/api/edit")
+async def edit_video(request: Request, task: str = Form(...), size: str = Form("480"), seconds: int = Form(5),
+                     prompt: str = Form(""), style: str = Form(""), face: str = Form(""),
+                     source_job_id: str | None = Form(None), video: UploadFile | None = File(None),
+                     photos: list[UploadFile] = File(default=[])):
+    """Edit a finished video (source_job_id) or an uploaded one with an H3 edit LoRA (issue #54), as a post job.
+
+    Only the measured sizes and lengths are accepted (backend/video_edit.py says why)."""
+    require_csrf(request)
+    photos = [photo for photo in photos if photo and photo.filename]
+    if len(photos) > 2:
+        raise HTTPException(400, "Attach at most two photos")
+    new_id = uuid.uuid4().hex
+    input_name = f"post_{new_id}_source.mp4"
+    location_job = None
+    cleanup: list[Path] = []
+    try:
+        if source_job_id:
+            source = get_job(source_job_id, public=False)
+            if not source:
+                raise HTTPException(404, "Job not found")
+            if source["status"] != "completed":
+                raise HTTPException(409, "Only a finished video can be edited")
+            source_path = resolve_asset_path("job", source_job_id)
+            if not source_path or not Path(source_path).is_file():
+                raise HTTPException(409, "The source video file is missing")
+            source_path = Path(source_path)
+            source_prompt, location_job = source["prompt"], source_job_id
+        elif video and video.filename:
+            if video.content_type not in UPLOAD_TYPES:
+                raise HTTPException(400, "Only MP4, MOV, WebM or MKV videos are allowed")
+            raw = INPUT / f".edit_{new_id}_upload{UPLOAD_TYPES[video.content_type]}"
+            source_path = INPUT / f".edit_{new_id}_converted.mp4"
+            cleanup += [raw, source_path]
+            size_read = 0
+            with raw.open("wb") as handle:
+                while chunk := await video.read(4 * 1024 * 1024):
+                    size_read += len(chunk)
+                    if size_read > UPLOAD_MAX_BYTES:
+                        raise HTTPException(400, "The video is larger than 500 MB")
+                    handle.write(chunk)
+            try:
+                await asyncio.to_thread(prepare_upload, raw, source_path)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            source_prompt = f"External video: {Path(video.filename).name[:120]}"
+        else:
+            raise HTTPException(400, "Choose a video to edit")
+        try:
+            probe = await asyncio.to_thread(probe_video, source_path)
+            options = plan_edit(probe, task, size, seconds, prompt, style, face, len(photos))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        for photo in photos:
+            path, name = await save_image(photo, destination=INPUT)
+            cleanup.append(Path(path))
+            options["photos"].append(name)
+        out = await asyncio.to_thread(subprocess.run, edit_input_command(options, source_path, INPUT / input_name),
+                                      capture_output=True, text=True, timeout=600)
+        if out.returncode or not (INPUT / input_name).is_file():
+            raise HTTPException(500, "The video could not be prepared for the edit")
+        if source_job_id:
+            options["source_job_id"] = source_job_id
+        else:
+            options["source_filename"] = Path(video.filename).name[:120]
+        result = _queue_post_job(new_id, input_name, options, source_prompt,
+                                 aspect_label(options["width"], options["height"]), location_job)
+        cleanup = [path for path in cleanup if path.name.startswith(".edit_")]   # keep the photos for the job
+        return result
+    except BaseException:
+        (INPUT / input_name).unlink(missing_ok=True)
+        raise
+    finally:
+        for path in cleanup:
+            path.unlink(missing_ok=True)
+
+
 from . import character_swap as swap_lab  # noqa: E402
 
 
@@ -3607,7 +3685,7 @@ def _queue_post_job(new_id: str, input_name: str, options: dict, source_prompt: 
                     created_at,updated_at)
                    VALUES(?,?,?,?,'post',?,'v1','standard','native',1,?,?,?,?,?,'queued',?,?,?,?,?,?,?)""",
                 (new_id, post_title(options, source_prompt), options["operation"],
-                 max(0.5, min(60.0, options["source_duration"])), options["method"], options["width"], options["height"],
+                 max(0.5, min(60.0, options.get("output_duration") or options["source_duration"])), options["method"], options["width"], options["height"],
                  round(options["width"] * options["height"] / 1_000_000, 2), aspect,
                  str(secrets.randbits(63)), position, str(input_path), input_name, int(not options["audio"]),
                  json.dumps(options), now, now),
@@ -3801,6 +3879,8 @@ def _job_input_asset_path(job: dict, asset_key: str) -> Path | None:
         try:
             index = int(asset_key.removeprefix("reference_image_"))
             names = json.loads(job.get("reference_images_json") or "[]")
+            if not names and job.get("mode") == "edit":   # H3 edit photos live in the post options (issue #54)
+                names = (json.loads(job.get("post_options_json") or "null") or {}).get("photos") or []
             name = names[index]
             path_value = str(INPUT / Path(name).name)
         except (ValueError, IndexError, TypeError, json.JSONDecodeError):

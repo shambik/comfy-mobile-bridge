@@ -140,6 +140,17 @@
         "RTX VSR + H3 detail (upscale sheet; uses the h3 and pika models, adds only a node pack)"
       ]
     },
+    "h3_edit": {
+      "label": "H3 video edit LoRAs",
+      "default": true,
+      "needs": [
+        "h3",
+        "h3_int8_vae"
+      ],
+      "engines": [
+        "H3 edit (text edit, outfit from photos, style, head swap)"
+      ]
+    },
     "clipproj_spectrum": {
       "label": "ClipProj and Spectrum (not ready on ComfyUI 0.44; off by default)",
       "default": false,
@@ -652,6 +663,54 @@
       "bytes": 67061725,
       "sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
       "license_reference": "https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE"
+    },
+    {
+      "name": "H3 VFX Edit LoRA v1.0 r128",
+      "group": "h3_edit",
+      "source_repository": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI",
+      "revision": "db85bdf94ef5ba2467787f1e4704588fce3cabbd",
+      "source_path": "loras/minimax_h3_vfx_edit_v1.0_r128.safetensors",
+      "filename": "minimax_h3_vfx_edit_v1.0_r128.safetensors",
+      "target_directory": "loras/h3_edit",
+      "bytes": 1240518744,
+      "sha256": "9053607b28f271a22cf3f70d7fa534b35eb88d2259dcbec03d63a97d8929c210",
+      "license_reference": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI/blob/main/LICENSES.md"
+    },
+    {
+      "name": "H3 Style Transfer LoRA v1.0 r64",
+      "group": "h3_edit",
+      "source_repository": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI",
+      "revision": "db85bdf94ef5ba2467787f1e4704588fce3cabbd",
+      "source_path": "loras/minimax_h3_style_transfer_v1.0_r64.safetensors",
+      "filename": "minimax_h3_style_transfer_v1.0_r64.safetensors",
+      "target_directory": "loras/h3_edit",
+      "bytes": 620306000,
+      "sha256": "3be2d89ca3476ed952251463499896a4a323cce9d82af6d0e83609ceb4e1e25e",
+      "license_reference": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI/blob/main/LICENSES.md"
+    },
+    {
+      "name": "H3 Head Swap LoRA v1.0 r32",
+      "group": "h3_edit",
+      "source_repository": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI",
+      "revision": "db85bdf94ef5ba2467787f1e4704588fce3cabbd",
+      "source_path": "loras/minimax_h3_head_swap_v1.0_r32.safetensors",
+      "filename": "minimax_h3_head_swap_v1.0_r32.safetensors",
+      "target_directory": "loras/h3_edit",
+      "bytes": 310177072,
+      "sha256": "ea97bd1a8178460661055784d63b4cb560732196fd15d5d7f33bfd214b65ab00",
+      "license_reference": "https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI/blob/main/LICENSES.md"
+    },
+    {
+      "name": "H3 DMAD 4-step speed LoRA",
+      "group": "h3_edit",
+      "source_repository": "https://huggingface.co/Kijai/MiniMax-H3-experimental",
+      "revision": "c2e7b89b1800123c49a0f620a1932c01d8952256",
+      "source_path": "loras/minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors",
+      "filename": "minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors",
+      "target_directory": "loras/h3_edit",
+      "bytes": 366647000,
+      "sha256": "ddfdd94f4c9a0f32bf3649bb8e98ca20db572e4db6bcd9cca546a5b33ea32d11",
+      "license_reference": "https://huggingface.co/Kijai/MiniMax-H3-experimental"
     }
   ]
 }

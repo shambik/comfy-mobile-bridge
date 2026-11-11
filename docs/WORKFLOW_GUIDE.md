@@ -70,6 +70,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
 | A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; sources up to 1080p, any length (long clips run in chunks inside one job), uploads too (see below) |
 | More real detail in a finished Pika or Turbo v4 lip-sync shot | **RTX VSR** to 1920, then **פרטים H3** on that card | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s, up to 15 s (see "RTX VSR + H3 detail" below) |
+| Change clothes, style or a head in a finished or uploaded video | **עריכה** on its card, or **עריכת וידאו** in the results header | 480×864 (default, ~2 min per 5 s) or 704×1280 (~5.5 min, sharper); 10 s at 480 only; outfit from photos at 480 only (see "H3 video edit" below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -594,6 +595,30 @@ header) with characters from a library. How it works, the API and how to make pa
 Painted frames: Codex refuses frames it classifies as showing a public figure; use another image editor or a frame
 from another render of the same clip (an akatz run) for those parts. Paint each later part from the first painted
 frame of the same character, or he changes look at the window join.
+
+## H3 video edit (2026-11-11, issue #54)
+
+Edit a finished job (its card's **עריכה** button) or an uploaded video (**עריכת וידאו** in the results header) with
+the Alissonerdx H3 edit LoRAs: the pixaroma Ep41 setups on Ref2VA int8 + Kijai's DMAD 4-step speed LoRA, 4 steps
+euler simple, shift 12/3. The source's motion, face, lip movements and sound stay; the result is its own post job,
+filed next to the source.
+
+| Edit | What to write | 480×864 5 s | 704×1280 5 s |
+|---|---|---|---|
+| Text edit (`vfx_edit`) | One English sentence: change X into Y, while preserving Z. Point at things the way you see them | 133 s, flannel shirt exact | 322 s, sharper |
+| Outfit from photos | 1-2 photos (one piece each, plain background) and a sentence that names them as @1 / @2 | 133 s; 3 seeds: jacket and cap, jacket and cap plus a stray arrow and text drawn on the wall, no change. Queue it again when it misses | **no change** on 2 seeds (576: cap only), so 480 only |
+| Style | Anime, comic, manga or cartoon, or your own sentence (drawn styles with lines work best) | 128 s, clean cartoon, background colours shift | 314 s, finer lines |
+| Head swap | One photo of the whole head and a short description of it; only faces you have the right to use | 138 s, identity held | 331 s, identity held |
+
+- 10 s (243 frames) works at 480 (286-295 s, 9.9 GB). 704 at 10 s failed in the sampler on the 3080, so it is refused.
+  A 10 s head swap turned the navy polo maroon on 1 of 2 seeds; every job gets its own random seed, so queue it again.
+- App runs (lab bridge, project "H3 edit app test", 2026-11-11): text edit on a landscape clip 864×480 133 s and
+  1280×704 313 s (coat changed, face and street kept); anime at 704×1280 on a portrait lip-sync clip 317 s.
+- The clip is scaled and centre-cropped to the size (landscape clips get 864×480 / 1280×704), made 24 fps, and the
+  first 5 or 10 s are used; a clip up to 0.5 s short gets its last frame held.
+- Sharper 480 results: **הגדלה** → RTX VSR on the edit's card (about 10 s; it keeps the skin texture). In the lab,
+  RTX VSR + the H3 detail pass at 0.45 was crisper but smoothed skin and cut the clip to 4.5 s; the detail pass is
+  not offered on edit cards yet. 704 native looked the most natural where it works.
 
 ## Singularity, Pika and the official LTX templates
 

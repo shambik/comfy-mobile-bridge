@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, Upload, X, Zap, Users } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, BrainCircuit, Check, ChevronDown, ChevronLeft, ChevronsDownUp, ChevronsUpDown, Clapperboard, Combine, Copy, Download, Folder, FolderPlus, Gauge, Image as ImageIcon, Link2, LoaderCircle, Lock, Mic, Minus, Move, Pencil, Play, Plus, Power, RefreshCw, Route, Send, ShieldAlert, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, Upload, X, Zap, Users, Wand2 } from 'lucide-react'
 import './styles.css'
 import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 import { BotImagesPage } from './bot-images'
 import { PostProcessSheet, POST_METHOD_LABELS, canAddH3Detail, type PostOperation, type PostOptions } from './post-process'
+import { VideoEditSheet } from './video-edit'
 import { SwapSheet } from './swap'
 
-type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync' | 'interpolate' | 'upscale' | 'swap'
+type Mode = 'text' | 'frames' | 'reference' | 'opening' | 'closing' | 'lip_sync' | 'interpolate' | 'upscale' | 'swap' | 'edit'
 type Engine = 'turbo' | 'standard' | 'spectrum' | 'fused_sla' | 'ltx' | 'singularity' | 'pika' | 'omni' | 'post' | 'swap'
 type LtxRecipe = 'app' | 'official'
 type PikaSpeed = 'direct' | 'turbo4'
@@ -691,6 +692,7 @@ function App() {
   const [rerunLoading, setRerunLoading] = useState<string | null>(null)
   const [postSheet, setPostSheet] = useState<{ job?: Job; operation: PostOperation } | null>(null)
   const [swapSheet, setSwapSheet] = useState<{ jobId?: string } | null>(null)
+  const [editSheet, setEditSheet] = useState<{ job?: Job } | null>(null)
   const [mainErrors, setMainErrors] = useState<Partial<Record<MainErrorScope, string>>>({})
   const setMainError = (scope: MainErrorScope, message = '') => setMainErrors(current => ({ ...current, [scope]: message }))
   const clearMainError = (scope: MainErrorScope) => setMainErrors(current => ({ ...current, [scope]: '' }))
@@ -1877,7 +1879,7 @@ function App() {
     const { job } = asset
     const reference = `job:${job.id}`
     const order = selectedResults.indexOf(reference) + 1
-    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={job.engine !== 'post' && job.engine !== 'swap' && ['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={job.engine !== 'post' && job.engine !== 'swap' ? () => useJobSeed(job) : undefined} onSwap={job.status === 'completed' && job.video_url && job.engine !== 'post' ? () => setSwapSheet({ jobId: job.id }) : undefined} onPostProcess={job.status === 'completed' && job.video_url ? operation => setPostSheet({ job, operation }) : undefined} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
+    return <JobCard key={reference} job={job} assignment={assignmentFor('job', job.id)} csrf={csrf} selectedOrder={order || undefined} onSelect={job.status === 'completed' ? () => toggleResult(reference) : undefined} onManage={job.status === 'completed' ? () => openAssetEditor('job', job.id, job.prompt.slice(0, 100)) : undefined} onRerun={job.engine !== 'post' && job.engine !== 'swap' && ['completed', 'failed'].includes(job.status) ? () => { void rerunJob(job) } : undefined} onUseSeed={job.engine !== 'post' && job.engine !== 'swap' ? () => useJobSeed(job) : undefined} onSwap={job.status === 'completed' && job.video_url && job.engine !== 'post' ? () => setSwapSheet({ jobId: job.id }) : undefined} onEdit={job.status === 'completed' && job.video_url ? () => setEditSheet({ job }) : undefined} onPostProcess={job.status === 'completed' && job.video_url ? operation => setPostSheet({ job, operation }) : undefined} rerunLoading={rerunLoading === job.id} onDelete={() => { void deleteGeneratedAsset('job', job.id, job.prompt.slice(0, 80)) }} bulkMode={bulkMode} bulkSelected={bulkSelected.includes(reference)} onToggleBulk={() => toggleBulkAsset(reference)} />
   }
 
   // Collapse or expand every folder nested in a project at once; expanding also opens the project itself.
@@ -2245,7 +2247,7 @@ function App() {
     </section>
 
     {(!!history.length || !!sequenceHistory.length) && <section className="results-section">
-      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setPostSheet({ operation: 'upscale' })}><Upload size={14} /> עיבוד וידאו חיצוני</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setSwapSheet({})}><Users size={14} /> החלפת דמות</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
+      <div className="section-heading"><div><span>תוצאות</span><h2>הסרטונים האחרונים</h2></div><div className="section-heading-actions"><span className="selection-hint">{bulkMode ? 'בחר נכסים להעברה או מחיקה' : 'בחר לפי סדר לחיבור'}</span>{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setPostSheet({ operation: 'upscale' })}><Upload size={14} /> עיבוד וידאו חיצוני</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setSwapSheet({})}><Users size={14} /> החלפת דמות</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={() => setEditSheet({})}><Wand2 size={14} /> עריכת וידאו</button>}{!bulkMode && <button type="button" className="bulk-mode-toggle" onClick={toggleBulkMode}><Check size={14} /> בחירה מרובה</button>}</div></div>
       <MainSectionError message={mainErrors.library} onDismiss={() => clearMainError('library')} />
       {!!selectedResults.length && <div className="join-dock">
         <div className="join-dock-head"><div><Combine size={18} /><span><strong>{selectedResults.length} קטעים נבחרו</strong><small>זה יהיה סדר החיבור</small></span></div><button type="button" onClick={() => setSelectedResults([])}>נקה</button></div>
@@ -2309,6 +2311,8 @@ function App() {
     <AppModal modal={appModal.modal} value={appModal.value} onValueChange={appModal.setValue} onResolve={appModal.resolveModal} />
     {swapSheet && <SwapSheet jobId={swapSheet.jobId} csrf={csrf} onClose={() => setSwapSheet(null)}
       onQueued={() => { feedback.notify('success', 'ההחלפה נוספה לתור'); void load(true) }} />}
+    {editSheet && <VideoEditSheet job={editSheet.job && { id: editSheet.job.id, width: editSheet.job.width, height: editSheet.job.height, duration: editSheet.job.duration }} csrf={csrf}
+      onClose={() => setEditSheet(null)} onQueued={() => { setEditSheet(null); feedback.notify('success', 'העריכה נוספה לתור'); void load(true) }} />}
     {postSheet && <PostProcessSheet job={postSheet.job && { id: postSheet.job.id, width: postSheet.job.width, height: postSheet.job.height, duration: postSheet.job.duration, method: postSheet.job.engine === 'post' ? postSheet.job.workflow_variant || undefined : undefined }} operation={postSheet.operation} csrf={csrf} visualEnhancer={visualEnhancerReady}
       onClose={() => setPostSheet(null)} onQueued={() => { setPostSheet(null); feedback.notify('success', 'נוספה עבודת עיבוד לתור'); void load(true) }} />}
   </main>
@@ -2398,7 +2402,7 @@ function swapPrompt(job: Job) {
   return typeof text === 'string' && text.trim() ? text : undefined
 }
 
-function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, onPostProcess, onSwap, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; onPostProcess?: (operation: PostOperation) => void; onSwap?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
+function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, onPostProcess, onSwap, onEdit, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; onPostProcess?: (operation: PostOperation) => void; onSwap?: () => void; onEdit?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const swap = swapDisplay(job)
   const shownPrompt = swapPrompt(job) || job.prompt
@@ -2453,6 +2457,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       <div className={`prompt-card ${promptExpanded ? 'expanded' : ''}`}>{shownPrompt !== job.prompt && <p className="swap-prompt-label" dir="ltr">{job.prompt}</p>}<p dir="auto">{shownPrompt}</p></div>
       <div className="prompt-actions"><button type="button" onClick={() => setPromptExpanded(current => !current)}>{promptExpanded ? 'הסתר פרומפט' : 'הצג פרומפט מלא'}</button><button type="button" onClick={() => { void copyPrompt() }}><Copy size={14} /> {promptCopied ? 'הועתק' : 'העתק'}</button></div>
       {swap ? <div className="job-config" dir="ltr">{swap.tags.map(tag => <span key={tag}>{tag}</span>)}{swap.size && <span>{swap.size}</span>}<span className="job-seed">Seed {job.seed}</span></div>
+      : engine === 'post' && job.mode === 'edit' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{job.post_options?.task_label}</span><span dir="ltr">{width}×{height}</span>{job.post_options && <span dir="ltr">{job.post_options.frames} frames · {job.post_options.seconds} s</span>}{job.post_options?.pad_frames ? <span>{job.post_options.pad_frames} פריימים אחרונים הוחזקו</span> : null}<span dir="ltr">Ref2VA · DMAD 4-step</span>{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       : engine === 'post' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{POST_METHOD_LABELS[job.workflow_variant || ''] || job.workflow_variant}</span>{job.post_options && <span dir="ltr">{job.post_options.source_width}×{job.post_options.source_height} → {width}×{height}</span>}{job.post_options && <span dir="ltr">{job.post_options.source_fps} → {job.post_options.fps} fps</span>}{job.post_options && <span dir="ltr">{job.post_options.frames} frames</span>}{job.post_options?.detail_label && <span dir="ltr">{job.post_options.detail_label}</span>}{job.post_options?.trimmed_frames ? <span>{job.post_options.trimmed_frames} פריימים נחתכו בסוף</span> : null}</div>
       : <div className="job-config">{engine !== 'singularity' && engine !== 'pika' && <span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>}{engine === 'ltx' && job.ltx_recipe === 'official' && <span className="job-loras" dir="ltr">Official ComfyUI template ({job.mode === 'frames' ? 'video_ltx2_5_flf2v' : 'video_ltx2_5_i2v'})</span>}{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'pika' && pikaSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{engine === 'singularity' && <span className="job-setup job-tier" dir="ltr">{skinTierLabel(job.workflow_variant || 'skin_god')}</span>}{engine === 'singularity' && skinSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{(engine === 'singularity' || engine === 'pika' || engine === 'ltx' || engine === 'omni') && <span className="job-inputs" dir="ltr">{job.mode} · {jobInputsLabel(job.source_assets)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span>{engine !== 'singularity' && <span>{steps} סטפים</span>}<span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>}
       {active && <div className="progress-shell">
@@ -2483,10 +2488,11 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.status === 'queued' && <><button onClick={onUp} disabled={index === 0}><ArrowUp size={17} /></button><button onClick={onDown} disabled={index === (total || 0) - 1}><ArrowDown size={17} /></button></>}
         {job.video_url && <><a href={job.video_url} download><Download size={17} /> הורדה</a><button onClick={share}><Link2 size={17} /> שיתוף</button></>}
         {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
-        {onPostProcess && (engine !== 'post' || job.mode === 'upscale') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
-        {onPostProcess && (engine !== 'post' || job.mode === 'interpolate' || job.workflow_variant === 'h3detail') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
+        {onPostProcess && (engine !== 'post' || job.mode === 'upscale' || job.mode === 'edit') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
+        {onPostProcess && (engine !== 'post' || job.mode === 'interpolate' || job.mode === 'edit' || job.workflow_variant === 'h3detail') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
         {onPostProcess && canAddH3Detail(job) && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> פרטים H3</button>}
         {onSwap && <button className="post-button" onClick={onSwap}><Users size={15} /> החלפת דמות</button>}
+        {onEdit && <button className="post-button" onClick={onEdit}><Wand2 size={15} /> עריכה</button>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}
         {onManage && <button onClick={onManage}><Folder size={16}/> ארגון</button>}
         {onUseSeed && job.seed && <button className="seed-button" onClick={onUseSeed}><Zap size={15} /> השתמש ב־Seed</button>}
@@ -2563,6 +2569,7 @@ function modeLabel(mode: Mode) {
   if (mode === 'lip_sync') return 'דיבוב'
   if (mode === 'interpolate') return 'החלקת תנועה'
   if (mode === 'upscale') return 'הגדלה'
+  if (mode === 'edit') return 'עריכה'
   return 'רפרנס'
 }
 

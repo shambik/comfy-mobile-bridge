@@ -30,12 +30,12 @@ def _create_jobs_table(db):
     CREATE TABLE jobs (
         id TEXT PRIMARY KEY,
         prompt TEXT NOT NULL,
-        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync','interpolate','upscale','swap')),
+        mode TEXT NOT NULL CHECK(mode IN ('text','opening','closing','frames','reference','lip_sync','interpolate','upscale','swap','edit')),
         duration REAL NOT NULL CHECK(duration BETWEEN 0.5 AND 60),
         audio_start REAL NOT NULL DEFAULT 0,
         audio_duration REAL,
         engine TEXT NOT NULL CHECK(engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni','post','swap')),
-        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4','rife','film','lanczos','gan','rtx','fsr3','viggle','akatz','swap_join','h3detail')),
+        workflow_variant TEXT NOT NULL DEFAULT 'direct' CHECK(workflow_variant IN ('direct','i2v_fl2v','ref2va','ref2va_multiref','derope','dyrope','skin_god','skin_balanced','skin_max','skin_app','turbo4','rife','film','lanczos','gan','rtx','fsr3','viggle','akatz','swap_join','h3detail','h3edit')),
         turbo_profile TEXT NOT NULL CHECK(turbo_profile IN ('v1','v4')),
         attention_mode TEXT NOT NULL DEFAULT 'standard' CHECK(attention_mode IN ('standard','sage','sla','sage_sla','int8')),
         ltx_reference_model TEXT CHECK(ltx_reference_model IS NULL OR ltx_reference_model IN ('2.5','2.3')),
@@ -290,7 +290,7 @@ def init_db():
                 "reference_images_json", "reference_videos_json", "no_audio",
                 "runtime_json",
             }
-            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "width % 2 = 0 AND height % 2 = 0" not in table_sql or "'rtx','fsr3'" not in table_sql or "'swap_join'" not in table_sql or "'h3detail'" not in table_sql or not required_columns.issubset(_table_columns(db)):
+            if "frames" not in table_sql or "spectrum" not in table_sql or "fused_sla" not in table_sql or "engine='ltx' AND steps = 8" not in table_sql or "engine='singularity' AND steps BETWEEN 4 AND 16" not in table_sql or "engine='pika' AND steps IN (4,6)" not in table_sql or "engine='omni' AND steps = 8" not in table_sql or "skin_app" not in table_sql or "mode <> 'reference' OR engine IN ('turbo','standard','spectrum','fused_sla','ltx','singularity','pika','omni')" not in table_sql or "engine='fused_sla' AND steps BETWEEN 4 AND 8" not in table_sql or "ref2va_multiref" not in table_sql or "workflow_variant" not in table_sql or "clipproj" not in table_sql or "lip_sync" not in table_sql or "turbo_profile" not in table_sql or "2000000" not in table_sql or "duration REAL" not in table_sql or "no_audio" not in table_sql or "'sage_sla','int8'" not in table_sql or "width % 2 = 0 AND height % 2 = 0" not in table_sql or "'rtx','fsr3'" not in table_sql or "'swap_join'" not in table_sql or "'h3edit'" not in table_sql or not required_columns.issubset(_table_columns(db)):
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
                 # table while preserving every existing job and its output path.
                 _rebuild_jobs_table(db)
@@ -377,9 +377,16 @@ def row_dict(row):
         add_source("reference_audio", item.get("reference_audio_name"), "reference audio")
         if not source_assets and item.get("input_name"):
             add_source("image", item.get("input_name"), "image")
-    elif mode in ("interpolate", "upscale"):
+    elif mode in ("interpolate", "upscale", "edit"):
         # Post-process jobs read a copy of the finished source video (served through the same input route).
         add_source("image", item.get("input_name"), "source video")
+        if mode == "edit":   # H3 edit (issue #54): the outfit or face photos
+            try:
+                photos = (json.loads(item.get("post_options_json") or "null") or {}).get("photos") or []
+            except json.JSONDecodeError:
+                photos = []
+            for index, name in enumerate(photos):
+                add_source(f"reference_image_{index}", name, "photo")
     else:
         add_source("image", item.get("input_name"), "image")
         add_source("audio", item.get("source_audio_name") or item.get("reference_audio_name"), "audio")
