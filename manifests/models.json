@@ -119,6 +119,18 @@
         "Character swap (akatz V1.5)"
       ]
     },
+    "swap_openjutsu": {
+      "label": "Character swap: Openjutsu",
+      "default": true,
+      "needs": [
+        "h3",
+        "swap_akatz",
+        "h3_edit"
+      ],
+      "engines": [
+        "Character swap (Openjutsu, D3voz)"
+      ]
+    },
     "post_process": {
       "label": "Upscale and smoothing",
       "default": true,
@@ -638,6 +650,18 @@
       "bytes": 1745546848,
       "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03",
       "license_reference": "https://huggingface.co/Comfy-Org/sam3.1"
+    },
+    {
+      "name": "Qwen3-VL 8B int8 (Openjutsu describer)",
+      "group": "swap_openjutsu",
+      "source_repository": "https://huggingface.co/Comfy-Org/Qwen3-VL",
+      "revision": "02f0d3eefb59528799653d16735818801177ef1f",
+      "source_path": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+      "filename": "qwen3vl_8b_int8_convrot.safetensors",
+      "target_directory": "text_encoders",
+      "bytes": 9350798360,
+      "sha256": "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f",
+      "license_reference": "https://huggingface.co/Comfy-Org/Qwen3-VL"
     },
     {
       "name": "RIFE 4.26",

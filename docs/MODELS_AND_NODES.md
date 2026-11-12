@@ -138,6 +138,14 @@ both as not ready, and nothing in the tested setup uses them. They stay listed f
 | `h3_character_swap_v1.5.safetensors` | `models/loras/character_swap` | 148 MB | [akatz-ai/MiniMax-H3-Character-Swap-LoRA](https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA) `96ea3407b2` |
 | `sam3.1_multiplex_fp16.safetensors` | `models/checkpoints` | 1.6 GB | [Comfy-Org/sam3.1](https://huggingface.co/Comfy-Org/sam3.1) `7bb8374780` |
 
+### `swap_openjutsu`: Character swap: Openjutsu
+
+Needs `swap_akatz` for SAM 3.1 and `h3_edit` for the DMAD 4-step LoRA; the H3 model, text encoder and VAEs are the `h3` ones.
+
+| File | Folder | Size | Source (revision) |
+|---|---|---|---|
+| `qwen3vl_8b_int8_convrot.safetensors` | `models/text_encoders` | 8.7 GB | [Comfy-Org/Qwen3-VL](https://huggingface.co/Comfy-Org/Qwen3-VL) `02f0d3eefb` |
+
 ### `h3_edit`: H3 video edit LoRAs
 
 Runs on the `h3` Ref2VA int8 model, text encoder and VAEs; these four LoRAs are the only new files.
@@ -191,9 +199,13 @@ Uses the `h3` Ref2VA model and the `h3_edit` DMAD 4-step LoRA (at 0.7); the pose
 | [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) | `ltx25_reference`, `ltx23_reference` | `220e1d45aa` | `.runtime/comfyui/custom_nodes/ComfyUI-LTXVideo` |
 | [h3-relay (GPL-3.0, akatz character swap)](https://github.com/akatz-ai/h3-relay) | `swap_akatz` | `e2a7665b6e` | `.runtime/comfyui/custom_nodes/h3-relay` |
 | [MMH3 Ultimate Upscale (MIT; its tiled-diffusion file GPL-3.0)](https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale) | `h3_detail` | `0a8d5ee391` | `.runtime/comfyui/custom_nodes/Comfyui-MMH3-UltimateUpscale` |
+| [comfyui-h3-oneclick-swap (MIT)](https://github.com/D3voz/comfyui-h3-oneclick-swap) | `swap_openjutsu` | `e44a56e929` | `.runtime/comfyui/custom_nodes/comfyui-h3-oneclick-swap` |
+| [ComfyUI-MiniMaxH3-Context-Loop (GPL-3.0)](https://github.com/ethanfel/ComfyUI-MiniMaxH3-Context-Loop) | `swap_openjutsu` | `43afeffcc5` | `.runtime/comfyui/custom_nodes/ComfyUI-MiniMaxH3-Context-Loop` |
+| [ComfyUI-Fantastic-MiniMaxH3-PromptBuilder (MIT, bridge patch)](https://github.com/Adudeguyman/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder) | `swap_openjutsu` | `22e719fe89` | `.runtime/comfyui/custom_nodes/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder` |
 
-Copied from this repository by bootstrap: `custom_nodes/ComfyUI-H3-NativeAudioLock` and
-`custom_nodes/ComfyUI-H3-SteadyMemory` (MIT, bridge code).
+Copied from this repository by bootstrap: `custom_nodes/ComfyUI-H3-NativeAudioLock`,
+`custom_nodes/ComfyUI-H3-SteadyMemory` and, with `swap_openjutsu`, `custom_nodes/ComfyUI-H3-OpenjutsuHelpers` (MIT,
+bridge code). With `swap_openjutsu` bootstrap also applies `patches/fantastic-promptbuilder-empty-mask.patch`.
 
 h3-relay is GPL-3.0. It is cloned into ComfyUI at install time and the app reads akatz's graph from that folder;
 no GPL file is stored in this MIT repository.

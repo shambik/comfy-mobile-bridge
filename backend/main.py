@@ -6,6 +6,7 @@ import logging
 import math
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -3507,13 +3508,15 @@ class SwapMarksBody(BaseModel):
     notes: str = ""
     engine: str = "viggle"
     empty: list[int] = []
+    openjutsu: dict | None = None
 
 
 @app.put("/api/swap/{swap_id}/marks")
 async def swap_marks(request: Request, swap_id: str, body: SwapMarksBody):
     require_csrf(request)
     try:
-        return _swap_public(swap_lab.set_marks(swap_id, body.marks, body.mode, body.notes, body.engine, body.empty))
+        return _swap_public(swap_lab.set_marks(swap_id, body.marks, body.mode, body.notes, body.engine, body.empty,
+                                                   body.openjutsu))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except (ValueError, TypeError) as exc:

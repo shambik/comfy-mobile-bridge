@@ -956,6 +956,8 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .swap-paint-actions a, .swap-paint-actions label, .swap-paint-actions button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 9px; border: 1px solid #2c3530; background: #141a17; color: inherit; cursor: pointer; text-decoration: none; }
 .swap-painted-by { position: absolute; top: 6px; inset-inline-start: 6px; background: #000b; color: #fff; font: 600 11px/1 system-ui; padding: 4px 7px; border-radius: 7px; }
 .swap-notes { display: grid; gap: 4px; font-size: 12px; }
+.swap-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #cfd8d1; }
+.swap-toggle input { width: 18px; height: 18px; }
 .swap-notes span { color: #8f9b92; }
 .swap-add { flex-wrap: wrap; }
 
