@@ -7,6 +7,7 @@ import re
 import signal
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -16,6 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from PIL import Image, UnidentifiedImageError
 
+from . import codex_guard
 from .config import (AGENT_HEARTBEAT_SECONDS, AGENT_TIMEOUT_SECONDS, AGY_COMMAND, CODEX_COMMAND,
                      AGY_DEFAULT_EFFORT, AGY_DEFAULT_MODEL, CODEX_GENERATED_IMAGES, PRODUCTIONS, ROOT)
 
@@ -30,15 +32,14 @@ REFERENCE_ASPECT_RATIOS = {
 
 
 CODEX_FALLBACK_MODELS = [
-    {"id": "gpt-5.6-sol", "name": "GPT-5.6 Sol", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
-    {"id": "gpt-5.6-terra", "name": "GPT-5.6 Terra", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
-    {"id": "gpt-5.6-luna", "name": "GPT-5.6 Luna", "efforts": ["none", "low", "medium", "high", "xhigh", "max"]},
+    {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+    {"id": "gpt-6.1-terra", "name": "GPT-6.1 Terra", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+    {"id": "gpt-6-astra", "name": "GPT-6 Astra", "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]},
+    {"id": "gpt-6-luna", "name": "GPT-6 Luna", "efforts": ["low", "medium", "high", "xhigh", "max"]},
 ]
 
-# The bridge runs local production work.  Keep unrelated global Codex MCP
-# servers out of these child processes; an enabled but unauthenticated server
-# can emit fatal startup noise and obscure the actual production activity.
-CODEX_DISABLED_MCP_SERVERS = ("runpod",)
+# Bridge-started Codex processes get codex_guard's settings: none of the user's global plugins, apps or MCP
+# servers (an enabled but unauthenticated server can also emit fatal startup noise).
 
 AGENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -921,8 +922,9 @@ class AgentProcessManager:
                        "--sandbox", "read-only",
                        "--skip-git-repo-check", "-C", str(PRODUCTIONS / production_id)]
         command.extend(["--model", model, "-c", f'model_reasoning_effort="{effort}"'])
-        for server in CODEX_DISABLED_MCP_SERVERS:
-            command.extend(["-c", f"mcp_servers.{server}.enabled=false"])
+        # Read-only file access stays (agents read the production); plugins, apps, browser and computer use,
+        # hooks, web search and every MCP server are off.
+        command.extend(codex_guard.restriction_args())
         for directory in extra_dirs or []:
             resolved = Path(directory).resolve()
             # ``codex exec resume`` has a narrower option set than a new
@@ -1297,14 +1299,10 @@ Requirements:
 - Finish after the image-generation tool has produced the still and you have
   completed your visual inspection; do not wait for a project-local copy.
 """.strip()
-        command = [
-            executable, "exec", "--json", "--sandbox", "workspace-write",
-            "--skip-git-repo-check", "--ephemeral",
-            "-C", str(production_root), "--model", model,
-            "-c", f'model_reasoning_effort="{effort}"',
-        ]
-        for server in CODEX_DISABLED_MCP_SERVERS:
-            command.extend(["-c", f"mcp_servers.{server}.enabled=false"])
+        # Image-only settings (codex_guard): read-only, no shell tool, nothing beyond image generation, run in an
+        # empty folder. The bridge picks the image up from Codex's own generated_images folder afterwards.
+        empty = Path(tempfile.mkdtemp(prefix="codex_image_"))
+        command = [executable, "exec", "--json", *codex_guard.image_args(empty, model, effort)]
         for image in source_images:
             command.extend(["--image", str(image)])
         command.append("-")
@@ -1319,6 +1317,7 @@ Requirements:
             # the CLI connection closes. Verify the handoff before discarding
             # that useful result.
             run_error = exc
+        shutil.rmtree(empty, ignore_errors=True)
         finalized = await self._finalize_generated_image_after_run(
             target, "Codex ImageGen", production_root, before, started_at, aspect_ratio,
             provider_roots,

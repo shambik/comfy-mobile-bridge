@@ -43,6 +43,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from . import openjutsu
+from . import codex_guard
 from .config import CODEX_COMMAND, CODEX_GENERATED_IMAGES, COMFY_CODE, INPUT, STATE
 
 SWAPS = STATE / "swaps"
@@ -52,7 +53,7 @@ VIGGLE_MODEL = "viggle_remake_swap_pruned_int8_convrot.safetensors"
 TEXT_ENCODER = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 MAX_FRAMES, MIN_FRAMES = 124, 90          # one window at 1 MP on the 10 GB card; Viggle's minimum
 SHORT_EDGE = 736                           # ~1 MP (1280x736 / 736x1280)
-CODEX_MODEL, CODEX_EFFORT = "gpt-5.6-luna", "medium"   # used only when the app has no Codex agent settings
+CODEX_MODEL, CODEX_EFFORT = "gpt-6-luna", "medium"   # used only when the app has no Codex agent settings
 CODEX_TIMEOUT = 1800
 MAX_PEOPLE = 4                             # tested: 1-4 people in one render
 SEGMENT_WINDOWS = 4                        # windows per job: 4 = ~18 s, ran in 34 min at 9.5 GB (2026-11-09)
@@ -232,22 +233,32 @@ def _newest_image(after: float) -> Path | None:
 
 
 def _codex(task: str, images: list[Path], workdir: Path, schema: dict | None = None) -> str:
-    """Run Codex once; returns its last message (JSON text when a schema is given)."""
+    """Run Codex once; returns its last message (JSON text when a schema is given).
+
+    Codex runs in a new empty folder with the shared image-only settings (codex_guard): read-only, no shell tool,
+    none of the user's plugins, apps or MCP servers. The inputs arrive as attached images, not as files to read.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
-    last = workdir / f"codex_{uuid.uuid4().hex[:8]}.txt"
-    command = [shutil.which(CODEX_COMMAND) or CODEX_COMMAND, "exec", "--sandbox", "workspace-write",
-               "--skip-git-repo-check", "--ephemeral", "-C", str(workdir), "--model", codex_settings()[0],
-               "-c", f'model_reasoning_effort="{codex_settings()[1]}"',
+    run = workdir / f"codex_run_{uuid.uuid4().hex[:8]}"
+    empty = run / "work"
+    empty.mkdir(parents=True)
+    last = run / "answer.txt"
+    model, effort = codex_settings()
+    command = [shutil.which(CODEX_COMMAND) or CODEX_COMMAND, "exec", *codex_guard.image_args(empty, model, effort),
                "-o", str(last)]
     if schema:
-        schema_file = workdir / f"schema_{uuid.uuid4().hex[:8]}.json"
+        schema_file = run / "schema.json"
         schema_file.write_text(json.dumps(schema), encoding="utf-8")
         command += ["--output-schema", str(schema_file)]
     for image in images:
         command += ["--image", str(image)]
     command.append("-")
-    subprocess.run(command, input=task, capture_output=True, text=True, encoding="utf-8", timeout=CODEX_TIMEOUT)
-    return last.read_text(encoding="utf-8") if last.exists() else ""
+    try:
+        subprocess.run(command, input=task, capture_output=True, text=True, encoding="utf-8",
+                       timeout=CODEX_TIMEOUT)
+        return last.read_text(encoding="utf-8") if last.exists() else ""
+    finally:
+        shutil.rmtree(run, ignore_errors=True)
 
 
 def _codex_image(task: str, images: list[Path], workdir: Path, out: Path, size: tuple[int, int]) -> None:
@@ -256,7 +267,9 @@ def _codex_image(task: str, images: list[Path], workdir: Path, out: Path, size: 
         answer = _codex(task, images, workdir)
         image = _newest_image(started)
     if not image:
-        raise RuntimeError("Codex returned no image" + (f" ({' '.join(answer.split())[:200]})" if answer else ""))
+        # Codex's answer goes to a log next to the swap; the job card shows a short message.
+        (workdir / "codex_last_answer.txt").write_text(answer, encoding="utf-8")
+        raise RuntimeError("Codex returned no image (its answer is in codex_last_answer.txt in the swap folder)")
     with Image.open(image) as im:
         im.convert("RGB").resize(size, Image.LANCZOS).save(out)
 
@@ -608,8 +621,9 @@ def _paint(folder: Path, swap: dict, shot: dict, people: dict, characters: dict)
         char = characters[mark["character_id"]]
         images.append(CHARACTERS / char["image"])
         where = f" (red circle {number} in image 2)" if circles else ""
-        line = (f"- Replace {mark['description']}{where} with the character in image {len(images)}: "
-                f"{char['look'] or char['name']}. Copy that character's face, hair and outfit exactly.")
+        line = (f"- Replace the person described as {codex_guard.user_text(mark['description'])}{where} with the "
+                f"character in image {len(images)}, who looks like {codex_guard.user_text(char['look'] or char['name'])}"
+                ". Copy that character's face, hair and outfit exactly.")
         anchor = consistency_frame(get_swap(swap["id"]), shot["index"], mark["character_id"])
         if anchor:
             images.append(folder / anchor)
@@ -620,7 +634,8 @@ def _paint(folder: Path, swap: dict, shot: dict, people: dict, characters: dict)
     guide = ("Image 2 is the same frame with red numbered circles that only show who is who: the result must have no "
              "circles or numbers.\n" if circles else "")
     task = ("Use your image generation tool to edit the FIRST image (a frame from a video) into exactly one new image, "
-            "then inspect it against all the inputs and regenerate once if anything is wrong. " + guide +
+            "then inspect it against all the inputs and regenerate once if anything is wrong. " +
+            codex_guard.DATA_NOTE + "\n" + guide +
             "Make these replacements, and nothing else:\n" + "\n".join(lines) + "\n\nEach new person keeps exactly the "
             "pose, position, size and action of the person they replace. Same camera angle, framing, lens, lighting, "
             "colour grade and aspect ratio as the first image; the background and every other person stay exactly as "

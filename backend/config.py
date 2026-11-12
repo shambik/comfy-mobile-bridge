@@ -323,7 +323,7 @@ CODEX_GENERATED_IMAGES = _as_path(
     relative_to=CODEX_HOME,
 )
 CODEX_DEFAULT_RUNTIME = str(agents_config.get("codex_runtime") or "codex").strip()
-CODEX_DEFAULT_MODEL = str(agents_config.get("codex_model") or "gpt-5.6-sol").strip()
+CODEX_DEFAULT_MODEL = str(agents_config.get("codex_model") or "gpt-6.1-sol").strip()
 CODEX_DEFAULT_EFFORT = str(agents_config.get("codex_effort") or "high").strip()
 AGY_DEFAULT_RUNTIME = str(agents_config.get("agy_runtime") or "agy").strip()
 AGY_DEFAULT_MODEL = str(agents_config.get("agy_model") or "gemini-3.1-pro-high").strip()
