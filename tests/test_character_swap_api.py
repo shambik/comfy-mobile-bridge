@@ -100,6 +100,36 @@ class SwapApiTests(unittest.TestCase):
         self.assertEqual(cs.get_swap(swap["id"])["status"], "done")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
+    def test_the_sheet_loads_part_frames_and_openjutsu_queues_one_job_for_two_characters(self):
+        self.add_job()
+        swap = self.client.post("/api/swap", data={"job_id": "src"}, headers=self.headers).json()
+        frame = self.client.get(f"/api/swap/{swap['id']}/image/{swap['shots'][0]['frame']}")
+        self.assertEqual((frame.status_code, frame.headers["content-type"]), (200, "image/png"))   # was a 500 (#58)
+        self.assertEqual(self.client.get(f"/api/swap/{swap['id']}/image/swap.json").status_code, 404)
+        first, second = self.character("Suit man"), self.character("Wanderer")
+        marks = [{"shot": 0, "x": 0.2, "y": 0.4, "character_id": first, "description": "boxer in red shorts"},
+                 {"shot": 0, "x": 0.8, "y": 0.4, "character_id": second, "description": "boxer in blue shorts"}]
+        r = self.client.put(f"/api/swap/{swap['id']}/marks", headers=self.headers,
+                            json={"marks": marks, "engine": "openjutsu",
+                                  "openjutsu": {"resolution": "480p", "remove_hair": True}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["openjutsu"], {"resolution": "480p", "remove_hair": True})
+        patched = self.root / "video_edit.py"
+        patched.write_text("# comfy-mobile-bridge #58", encoding="utf-8")
+        with patch.object(cs, "OPENJUTSU_PATCH", patched):
+            r = self.client.post(f"/api/swap/{swap['id']}/render", headers=self.headers)
+        self.assertEqual(r.status_code, 200, r.text)
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (r.json()["job_id"],)).fetchone())
+        self.assertEqual((row["workflow_variant"], row["steps"], row["width"], row["height"]), ("openjutsu", 6, 480, 832))
+        options = json.loads(row["swap_options_json"])
+        roles = next(n for n in options["graph"]["base"].values()
+                     if n["class_type"] == "H3AdvancedSwapPlan")["inputs"]["roles"].splitlines()
+        self.assertEqual(roles, ["the person on the left - boxer in red shorts",
+                                 "the person on the right - boxer in blue shorts"])
+        self.assertIn(("text_encoders", "qwen3vl_8b_int8_convrot.safetensors"), [tuple(m) for m in options["models"]])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_akatz_queues_one_job_with_its_own_graph_and_models(self):
         self.add_job()
         swap = self.client.post("/api/swap", data={"job_id": "src"}, headers=self.headers).json()

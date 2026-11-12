@@ -1,0 +1,18 @@
+diff --git a/video_edit.py b/video_edit.py
+index 0a0c182..7cb1965 100644
+--- a/video_edit.py
++++ b/video_edit.py
+@@ -287,7 +287,12 @@ def build_latent(vae, frames, mask, grow=16, audio_vae=None, audio=None, width=0
+                          "or a single frame for the whole clip.")
+     obj, box = shape(m, n, w, h, grow, invert, context)
+     if not obj.any():
+-        raise ValueError("The mask is empty on every frame, so nothing would change.")
++        # comfy-mobile-bridge #58: an Openjutsu clip where the replaced person is off screen has an empty mask.
++        # Keep that clip (an all-zero noise mask: H3 returns the source) instead of stopping the whole chain.
++        if invert:
++            raise ValueError("The mask is empty on every frame, so nothing would change.")
++        print("[MiniMaxH3FantasticVideoEditLatent] the mask is empty on every frame; "
++              "this clip keeps the source (nothing is regenerated)")
+     src = frames[:n]
+     if box:
+         x, y, bw, bh = box

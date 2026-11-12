@@ -90,6 +90,27 @@
       "url": "https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale.git",
       "revision": "0a8d5ee3914e8fe8bd842885412ec397d7ca1629",
       "target": ".runtime/comfyui/custom_nodes/Comfyui-MMH3-UltimateUpscale"
+    },
+    {
+      "name": "comfyui-h3-oneclick-swap (MIT, Openjutsu swap plan, masks, mannequins)",
+      "group": "swap_openjutsu",
+      "url": "https://github.com/D3voz/comfyui-h3-oneclick-swap.git",
+      "revision": "e44a56e92920000e675d14be484aea0d7498d63e",
+      "target": ".runtime/comfyui/custom_nodes/comfyui-h3-oneclick-swap"
+    },
+    {
+      "name": "ComfyUI-MiniMaxH3-Context-Loop (GPL-3.0, Openjutsu clip chain)",
+      "group": "swap_openjutsu",
+      "url": "https://github.com/ethanfel/ComfyUI-MiniMaxH3-Context-Loop.git",
+      "revision": "43afeffcc570beb5f7382593e79e4b211c7e02f6",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-MiniMaxH3-Context-Loop"
+    },
+    {
+      "name": "ComfyUI-Fantastic-MiniMaxH3-PromptBuilder (MIT, Openjutsu masked edit; bridge patch)",
+      "group": "swap_openjutsu",
+      "url": "https://github.com/Adudeguyman/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder.git",
+      "revision": "22e719fe89336c628383363182a4da3cb58d4f9b",
+      "target": ".runtime/comfyui/custom_nodes/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder"
     }
   ],
   "tools": {

@@ -9,8 +9,8 @@ Code: `backend/character_swap.py` (flow), `backend/main.py` (`/api/swap…` rout
 ## Installation (models and nodes)
 
 The swap needs these in ComfyUI; the job card says "not installed" with the missing file when one is absent.
-Bootstrap installs them with the `swap_viggle` and `swap_akatz` groups (both on by default;
-`.\scripts\bootstrap.ps1 -Profile Full -AcceptLicenses -Groups swap_viggle,swap_akatz` adds just these), pinned with
+Bootstrap installs them with the `swap_viggle`, `swap_akatz` and `swap_openjutsu` groups (all on by default;
+`.\scripts\bootstrap.ps1 -Profile Full -AcceptLicenses -Groups swap_viggle,swap_akatz,swap_openjutsu` adds just these), pinned with
 size and SHA-256 in `manifests/`; see `docs/MODELS_AND_NODES.md`:
 
 | Piece | Where it goes | Source | License |
@@ -21,6 +21,11 @@ size and SHA-256 in `manifests/`; see `docs/MODELS_AND_NODES.md`:
 | `h3_character_swap_v1.5.safetensors` (akatz only) | `models/loras/character_swap` | `akatz-ai/MiniMax-H3-Character-Swap-LoRA` | model card |
 | `minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` (akatz only) | `models/loras/character_swap` | `lightx2v/Minimax-h3-Turbo` | model card |
 | H3 Relay nodes (akatz only) | `custom_nodes/h3-relay` | `akatz-ai/h3-relay` (v2.0.1, commit `e2a7665b`) | GPL-3.0 |
+| `qwen3vl_8b_int8_convrot.safetensors` (8.7 GiB, Openjutsu's describer) | `models/text_encoders` | `Comfy-Org/Qwen3-VL`, `text_encoders/` | model card |
+| comfyui-h3-oneclick-swap (Openjutsu) | `custom_nodes/comfyui-h3-oneclick-swap` | `D3voz/comfyui-h3-oneclick-swap` `e44a56e9` | MIT |
+| MiniMaxH3 Context Loop (Openjutsu) | `custom_nodes/ComfyUI-MiniMaxH3-Context-Loop` | `ethanfel/ComfyUI-MiniMaxH3-Context-Loop` `43afeffc` | GPL-3.0 |
+| Fantastic PromptBuilder (Openjutsu) + `patches/fantastic-promptbuilder-empty-mask.patch` | `custom_nodes/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder` | `Adudeguyman/ComfyUI-Fantastic-MiniMaxH3-PromptBuilder` `22e719fe` | MIT |
+| H3 Openjutsu helpers (hair eraser, this repo) | `custom_nodes/ComfyUI-H3-OpenjutsuHelpers` | `custom_nodes/` here | MIT |
 
 The H3 text encoder, VAEs and the Ref2VA int8 model are the app's own. akatz's graph is read from
 `custom_nodes/h3-relay/example_workflows/toolkit/H3-Character-Swap.api.json`, so no GPL file is copied into this
@@ -29,6 +34,12 @@ MIT repository; the Viggle graph is built in code (`character_swap.viggle_base_g
 H3 Relay installs a pass-through wrapper on H3's packed layout the first time an akatz job runs, for the rest of that
 ComfyUI process. A normal H3 Turbo render with the same seed before and after an akatz job came out bit-identical
 (all 124 frames, 2026-11-10), so no restart is needed.
+
+Openjutsu's graph is D3voz's own export, `workflows/openjutsu/advanced.api.json` (D3voz/openjutsu `7fe118b`, MIT,
+license next to it), pruned in `backend/openjutsu.py` the way Openjutsu's app does. Two bridge fixes, both measured in
+the lab on 2026-11-12: the patch keeps a 6 s piece where nobody to replace is on screen (upstream stops the whole job
+with "The mask is empty on every frame"; the app refuses to render without the patch), and the optional hair eraser
+removes the source person's hair from the grey mannequin so a bald character does not grow the source hairline.
 
 ## Rules that always apply
 
@@ -61,14 +72,14 @@ ComfyUI process. A normal H3 Turbo render with the same seed before and after an
 
 ### Engines and modes (measured on the RTX 3080, 2026-11-09)
 
-| | Viggle, character picture only | Viggle, painted frames | akatz V1.5 |
-|---|---|---|---|
-| People per render | up to 4 | up to 4 | 1 |
-| Input | character pictures + descriptions | one painted frame per part with people | character picture + a description of how the person looks |
-| Good at | one person close to the camera | several people, far shots, people who leave and come back | one person who stays in view all clip |
-| Fails when | similar-looking people (two characters blended), far/small people (kept the original face) | a part has no painted frame | the person leaves the shot: it swaps whoever matches the description (swapped a helper in a navy suit) |
-| Time per 5 s | ~9 min | ~9 min + painting | ~6 min |
-| Length | any | any | up to 149 s (its own limit) |
+| | Viggle, character picture only | Viggle, painted frames | akatz V1.5 | Openjutsu (D3voz, 2026-11-12) |
+|---|---|---|---|---|
+| People per render | up to 4 | up to 4 | 1 | up to 3 |
+| Input | character pictures + descriptions | one painted frame per part with people | character picture + a description of how the person looks | one clean picture per character + a description; where you tap sets left/middle/right |
+| Good at | one person close to the camera | several people, far shots, people who leave and come back | one person who stays in view all clip | people who leave and come back (those pieces keep the source); 2-3 people right in one pass |
+| Fails when | similar-looking people (two characters blended), far/small people (kept the original face) | a part has no painted frame | the person leaves the shot: it swaps whoever matches the description (swapped a helper in a navy suit) | the picture shows several faces (a poster: the describer took the wrong face); the outfit follows the source outline (a long tunic became trousers); round gold glasses came out as dark aviators; with 4 people one started wrong for 2-4 s |
+| Time per 5 s | ~9 min | ~9 min + painting | ~6 min | 7-8 min at 736p (one pass for all people); 15 s: 27 min at 736p, 13-15 min at 480p |
+| Length | any | any | up to 149 s (its own limit) | up to 15.1 s (tested) |
 
 All flows: fine invented detail (dreads, beads, beard) can shimmer; that is a model limit (A/B 2026-11-09).
 Painted frames give the most reliable result; use them for anything with more than one person.
@@ -93,7 +104,7 @@ s.headers["X-CSRF-Token"] = s.get(f"{B}/api/session").json()["csrf_token"]
 | Read a swap | `GET /api/swap/{id}`: `shots` = the parts (`index, start, end, key_frame, scene, window, frame_url, painted_url`), `windows`, `scenes`, `marks`, `status`, `stage`, `error` |
 | A part's frame | `GET /api/swap/{id}/image/shot{N}_frame.png` |
 | Split a part | `POST /api/swap/{id}/parts/{N}/split` JSON `{"frame": absolute_frame}` (each half ≥ 12 frames; later part numbers move up by one) |
-| Save marks | `PUT /api/swap/{id}/marks` JSON `{"marks": [{"shot": N, "x": 0-1, "y": 0-1, "character_id", "description"}], "mode": "reference"\|"painted", "engine": "viggle"\|"akatz", "notes": "...", "empty": [parts with nobody to swap]}` |
+| Save marks | `PUT /api/swap/{id}/marks` JSON `{"marks": [{"shot": N, "x": 0-1, "y": 0-1, "character_id", "description"}], "mode": "reference"\|"painted", "engine": "viggle"\|"akatz"\|"openjutsu", "notes": "...", "empty": [parts with nobody to swap], "openjutsu": {"resolution": "736p"\|"480p", "remove_hair": false}}` |
 | Codex paints all missing frames | `POST /api/swap/{id}/prepare` (runs in the background; `status` "preparing", then "review" or "marking" with `error` naming refused parts) |
 | Codex repaints one part | `POST /api/swap/{id}/shots/{N}/repaint` |
 | Upload a painted frame | `POST /api/swap/{id}/shots/{N}/painted` form `image` (≤ 25 MB; any size, it is cover-fitted to the part frame) |

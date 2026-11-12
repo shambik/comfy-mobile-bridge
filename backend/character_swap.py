@@ -9,6 +9,10 @@ Engines:
 - akatz Character Swap V1.5: one person per render; its own graph loops 124-frame windows over the clip (up to its
   own 149 s limit). It finds the person by the description on every frame, so when they leave the shot it can
   pick someone else who matches (2026-11-09 stage clip): the sheet says so, nothing stops it (user, 2026-11-09).
+- Openjutsu (D3voz, issue #58): 1-3 people per render, from the character pictures alone; SAM 3.1 + a Qwen3-VL 8B
+  describer find the person per 6 s piece, H3 redraws only their mask from a grey mannequin. Pieces without them keep
+  the source (bridge patch); an optional hair eraser for characters whose hair differs. Tested up to 15.1 s at
+  480p and 736p (backend/openjutsu.py).
 
 The flow:
 1. create   - a finished job's video or an upload is converted to 24 fps; hard cuts are found (issue #43 rule,
@@ -38,6 +42,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import openjutsu
 from .config import CODEX_COMMAND, CODEX_GENERATED_IMAGES, COMFY_CODE, INPUT, STATE
 
 SWAPS = STATE / "swaps"
@@ -53,7 +58,7 @@ MAX_PEOPLE = 4                             # tested: 1-4 people in one render
 SEGMENT_WINDOWS = 4                        # windows per job: 4 = ~18 s, ran in 34 min at 9.5 GB (2026-11-09)
 AKATZ_MAX_SECONDS = 149                    # H3 Relay's PrepareSource limit (149.66 s)
 LOCK = 17                                  # Remake Prefix: frames of the previous window that open the next one
-ENGINES = ("viggle", "akatz")
+ENGINES = ("viggle", "akatz", "openjutsu")
 # akatz's own API graph ships with the H3 Relay node pack (GPL-3.0), so it is read from there, not copied here
 AKATZ_GRAPH = COMFY_CODE / "custom_nodes" / "h3-relay" / "example_workflows" / "toolkit" / "H3-Character-Swap.api.json"
 AKATZ_MODEL = "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
@@ -434,14 +439,18 @@ def create_swap(source: Path, title: str, source_job_id: str | None = None) -> d
 
 
 def set_marks(swap_id: str, marks: list[dict], mode: str = "reference", notes: str = "",
-              engine: str = "viggle", empty: list[int] | None = None) -> dict:
+              engine: str = "viggle", empty: list[int] | None = None, openjutsu_options: dict | None = None) -> dict:
     swap = get_swap(swap_id)
     if swap["status"] not in ("marking", "review", "failed", "done"):
         raise ValueError("This swap is busy")
     if mode not in ("reference", "painted"):
         raise ValueError("Mode is reference or painted")
     if engine not in ENGINES:
-        raise ValueError("Engine is viggle or akatz")
+        raise ValueError("Engine is viggle, akatz or openjutsu")
+    oj = {"resolution": "736p", "remove_hair": False, **(openjutsu_options or {})}
+    if oj["resolution"] not in openjutsu.RESOLUTIONS:
+        raise ValueError("Openjutsu renders at 480p or 736p")
+    oj = {"resolution": oj["resolution"], "remove_hair": bool(oj["remove_hair"])}
     characters = {c["id"] for c in list_characters()}
     clean = []
     for number, mark in enumerate(marks, 1):
@@ -469,6 +478,9 @@ def set_marks(swap_id: str, marks: list[dict], mode: str = "reference", notes: s
             raise ValueError("One character can replace only one person in a part")
     if engine == "akatz" and len({m["character_id"] for m in clean}) > 1:
         raise ValueError("akatz swaps one person per render: mark one person (one character)")
+    if engine == "openjutsu" and len({m["character_id"] for m in clean}) > openjutsu.MAX_CHARACTERS:
+        raise ValueError(f"Openjutsu swaps up to {openjutsu.MAX_CHARACTERS} people per render (the tested counts): "
+                         f"mark up to {openjutsu.MAX_CHARACTERS} characters")
     marked = {m["shot"] for m in clean}
     nobody = {int(i) for i in (empty or [])} - marked
     with _STATE_LOCK:
@@ -477,7 +489,7 @@ def set_marks(swap_id: str, marks: list[dict], mode: str = "reference", notes: s
             part.pop("empty", None)
             if part["index"] in nobody:
                 part["empty"] = True
-        swap.update(marks=clean, mode=mode, engine=engine, notes=" ".join(notes.split())[:1000], status="marking",
+        swap.update(marks=clean, mode=mode, engine=engine, openjutsu=oj, notes=" ".join(notes.split())[:1000], status="marking",
                     updated=time.strftime("%Y-%m-%dT%H:%M:%S"))
         _save_swap(swap)
     return swap
@@ -1083,6 +1095,8 @@ def render(swap_id: str, folder_ref: tuple[str, str] | None) -> dict:
                                                    "Characters: " + ", ".join(who)],
                 "windows": akatz_windows(swap["frames"]), "steps": 8, "variant": "akatz"}
         return _submit(swap_id, graph, card, seed)
+    if engine == "openjutsu":
+        return _render_openjutsu(swap_id, swap, source, seed, characters_by_id)
     built = [_window_spec(swap, k, painted, characters_by_id) for k in range(len(windows))]
     (folder / "prompt.txt").write_text("\n\n".join(
         f"[Window {k + 1}: {ts(w['start'])}-{ts(w['start'] + w['frames'])}]\n{w['prompt']}" for k, w in enumerate(built)),
@@ -1103,6 +1117,49 @@ def render(swap_id: str, folder_ref: tuple[str, str] | None) -> dict:
                                                "Attention: int8 (kitchen)", *tags, "Short edge 736",
                                                "6 steps per window", "Characters: " + ", ".join(who)],
             "windows": len(windows), "steps": 6, "variant": "viggle"}
+    return _submit(swap_id, graph, card, seed)
+
+
+OPENJUTSU_PATCH = COMFY_CODE / "custom_nodes" / "ComfyUI-Fantastic-MiniMaxH3-PromptBuilder" / "video_edit.py"
+OPENJUTSU_PATCH_MARK = "comfy-mobile-bridge #58"
+
+
+def _render_openjutsu(swap_id: str, swap: dict, source: str, seed: str, characters_by_id: dict) -> dict:
+    if swap["frames"] / 24 > openjutsu.MAX_SECONDS:
+        raise ValueError(f"Openjutsu was tested up to {openjutsu.MAX_SECONDS:g} s; use Viggle for longer clips")
+    try:
+        patched = OPENJUTSU_PATCH_MARK in OPENJUTSU_PATCH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        patched = False
+    if not patched:
+        raise ValueError("Openjutsu needs the Fantastic PromptBuilder pack with the bridge patch "
+                         "(patches/fantastic-promptbuilder-empty-mask.patch) in ComfyUI")
+    settings = swap.get("openjutsu") or {"resolution": "736p", "remove_hair": False}
+    first = {}                                     # one picture and role per character: its first mark's description
+    for mark in swap["marks"]:
+        first.setdefault(mark["character_id"], mark)
+    people, chars = [], []
+    whos = openjutsu.positions([m["x"] for m in first.values()])
+    for (cid, mark), who in zip(first.items(), whos):
+        char = characters_by_id[cid]
+        picture = f"swap_char_{char['id']}.png"
+        shutil.copyfile(CHARACTERS / char["image"], INPUT / picture)
+        people.append((picture, openjutsu.role_text(mark["description"], who)))
+        chars.append((char, mark))
+    (SWAPS / swap_id / "prompt.txt").write_text(
+        "\n".join(f"Openjutsu role {k}: {role}" for k, (_p, role) in enumerate(people, 1)), encoding="utf-8")
+    graph = {"base": openjutsu.build_graph(source, people, int(seed), settings["resolution"],
+                                           settings["remove_hair"])}
+    width, height = openjutsu.canvas(swap["width"], swap["height"], settings["resolution"])
+    card = {"kind": "Character swap", "tags": [
+        "Openjutsu (D3voz) Advanced swap", "Model: H3 Ref2VA int8 + DMAD LoRA, 6 steps, kitchen attention",
+        f"{settings['resolution']} ({width}x{height}), 6 s pieces with 39 frames of overlap (Context Loop)",
+        "SAM 3.1 mask + Qwen3-VL 8B describer; grey-mannequin motion reference",
+        *[f"Picture {k} ({char['name']}) replaces: {mark['description']}" for k, (char, mark) in enumerate(chars, 1)],
+        "Hair eraser on (source hair removed from the mannequin)" if settings["remove_hair"] else "Hair eraser off",
+        "Pieces without the people keep the source"],
+        "windows": max(1, -(-swap["frames"] // (openjutsu.CLIP_SECONDS * 24))), "steps": openjutsu.STEPS,
+        "variant": "openjutsu"}
     return _submit(swap_id, graph, card, seed)
 
 
@@ -1291,6 +1348,8 @@ def output_size(swap: dict, variant: str) -> tuple[int, int]:
     """The job's expected video size (the file's own size is in its ffprobe metrics). Viggle renders on its
     1280x736 / 736x1280 canvas; akatz at its "480" setting measured 512x928 for a 9:16 clip."""
     portrait = swap["height"] > swap["width"]
+    if variant == "openjutsu":
+        return openjutsu.canvas(swap["width"], swap["height"], (swap.get("openjutsu") or {}).get("resolution", "736p"))
     if variant == "akatz":
         return (512, 928) if portrait else (928, 512)
     return (736, 1280) if portrait else (1280, 736)
@@ -1302,7 +1361,8 @@ def _submit(swap_id: str, graph: dict, card: dict, seed: str, label_suffix: str 
     swap = get_swap(swap_id)
     variant = card.get("variant", "viggle")
     width, height = output_size(swap, variant)
-    models = AKATZ_MODELS if variant == "akatz" else VIGGLE_MODELS if variant == "viggle" else []
+    models = (AKATZ_MODELS if variant == "akatz" else VIGGLE_MODELS if variant == "viggle"
+              else openjutsu.MODELS if variant == "openjutsu" else [])
     options = {"swap_id": swap_id, "graph": graph, "card": card, "windows": card.get("windows", 1),
                "steps": card.get("steps", 0), "models": models}
     job_id = _QUEUE(title=f"Character swap · {swap['title'][:80]}{label_suffix}", variant=variant,

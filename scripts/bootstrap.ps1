@@ -119,6 +119,27 @@ try {
     Copy-Item -LiteralPath (Join-Path $steadySource '__init__.py') -Destination (Join-Path $steadyTarget '__init__.py') -Force
     Write-Host 'Installed local Steady Memory node.'
 
+    if ($selected -contains 'swap_openjutsu') {
+        # Openjutsu swap (issue #58): the hair eraser nodes, and the patch that keeps a clip where the replaced
+        # person is off screen (upstream raises "The mask is empty on every frame" and stops the chain).
+        $helperSource = Join-Path $repo 'custom_nodes\ComfyUI-H3-OpenjutsuHelpers'
+        $helperTarget = Join-Path $config.ComfyRoot 'custom_nodes\ComfyUI-H3-OpenjutsuHelpers'
+        New-Item -ItemType Directory -Path $helperTarget -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $helperSource '__init__.py') -Destination (Join-Path $helperTarget '__init__.py') -Force
+        Write-Host 'Installed local Openjutsu helper nodes.'
+        $packRoot = Join-Path $config.ComfyRoot 'custom_nodes\ComfyUI-Fantastic-MiniMaxH3-PromptBuilder'
+        $ojPatch = Join-Path $repo 'patches\fantastic-promptbuilder-empty-mask.patch'
+        & git -C $packRoot apply --check --whitespace=nowarn $ojPatch 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            & git -C $packRoot apply --whitespace=nowarn $ojPatch
+            if ($LASTEXITCODE -ne 0) { throw 'The Fantastic PromptBuilder empty-mask patch could not be applied.' }
+        } else {
+            & git -C $packRoot apply --reverse --check --whitespace=nowarn $ojPatch 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'Fantastic PromptBuilder is not at the expected patch base and is not already patched.' }
+            Write-Host 'Fantastic PromptBuilder empty-mask patch is already applied.'
+        }
+    }
+
     $patchPath = Join-Path $repo 'patches\comfyui-first-frame-center-crop.patch'
     & git -C $config.ComfyRoot apply --check --whitespace=nowarn $patchPath 2>$null
     if ($LASTEXITCODE -eq 0) {

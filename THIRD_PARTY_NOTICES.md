@@ -33,3 +33,9 @@ H3 Relay (`akatz-ai/h3-relay`, GPL-3.0: akatz's character-swap graph is read fro
 the akatz character-swap LoRA (`akatz-ai/MiniMax-H3-Character-Swap-LoRA`), the lightx2v FL2V Turbo 8-step LoRA
 (`lightx2v/Minimax-h3-Turbo`) and SAM 3.1 (`Comfy-Org/sam3.1`). The Viggle swap graph is written in this
 repository's own code. Review each license and model card before installing.
+
+The Openjutsu swap engine (issue #58) stores D3voz's exported graph `workflows/openjutsu/advanced.api.json` (MIT,
+D3voz/openjutsu, license in `workflows/openjutsu/LICENSE`) and a patch for the MIT Fantastic PromptBuilder pack
+(`patches/fantastic-promptbuilder-empty-mask.patch`). It also uses, installed into ComfyUI and not stored here:
+comfyui-h3-oneclick-swap (MIT), ComfyUI-MiniMaxH3-Context-Loop (GPL-3.0), Fantastic PromptBuilder (MIT) and the
+Qwen3-VL 8B int8 describer (`Comfy-Org/Qwen3-VL`, model card).

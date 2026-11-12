@@ -1,7 +1,7 @@
 import React, { ChangeEvent, MouseEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { Download, RefreshCw, Trash2, Upload, Users, X } from 'lucide-react'
 
-// Character swap (backend/character_swap.py, issue #46): Viggle Remake or akatz, any length.
+// Character swap (backend/character_swap.py, issue #46): Viggle Remake, akatz or Openjutsu (issue #58).
 // Manual choosing (user, 2026-11-09): you tap people, pick a character and type who each person is; no AI picks or
 // describes anyone. Two modes:
 //   A "reference": the character images themselves go to Viggle; render straight away.
@@ -12,11 +12,14 @@ type Shot = { index: number; start: number; end: number; key_frame: number; fram
   scene?: number; window?: number; empty?: boolean }
 type Mark = { shot: number; x: number; y: number; character_id: string; description: string }
 type Mode = 'reference' | 'painted'
-type Engine = 'viggle' | 'akatz'
+type Engine = 'viggle' | 'akatz' | 'openjutsu'
+type OpenjutsuOptions = { resolution: '480p' | '736p'; remove_hair: boolean }
+const OPENJUTSU_MAX_SECONDS = 15.1   // tested limit (backend/openjutsu.py)
+const OPENJUTSU_MAX_CHARACTERS = 3   // tested: 2 and 3 right, 4 started one person wrong
 type Swap = {
   id: string; title: string; status: string; stage: string; error: string | null; frames: number; seconds: number
   trimmed: boolean; shots: Shot[]; marks: Mark[]; job_id: string | null; mode?: Mode; notes?: string
-  engine?: Engine; windows?: number[][]; last_output?: string | null
+  engine?: Engine; windows?: number[][]; last_output?: string | null; openjutsu?: OpenjutsuOptions; width?: number; height?: number
 }
 
 const clock = (frame: number) => { const s = frame / 24; return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}` }
@@ -25,6 +28,7 @@ const clock = (frame: number) => { const s = frame / 24; return `${Math.floor(s 
 const FLOW_INFO: Record<string, string> = {
   'viggle-reference': 'Viggle · תמונת דמות בלבד: Viggle מקבל את הסרטון, את תמונת הדמות ואת התיאור שלך, ומחליט לבד איפה הדמות ואיך היא נראית. בלי ציור. עובד טוב לאדם אחד קרוב למצלמה. חלש כשיש כמה אנשים דומים, או כשהאדם רחוק או קטן: בבדיקה נשאר שם הפרצוף המקורי.',
   'viggle-painted': 'Viggle · פריימים מצוירים: לכל חלק שיש בו מישהו להחליף צריך פריים אחד שבו הדמות מצוירת במקום האדם, באותה תנוחה ובאותו מקום. מציירים בעצמך (הורד, צייר בכל עורך, העלה) או לוחצים על Codex. Viggle נועץ את הפריים ברגע הזה ומשם ממשיך. הכי מדויק: עד 4 אנשים, אנשים רחוקים, אנשים שיוצאים וחוזרים.',
+  'openjutsu': 'Openjutsu (D3voz): עד 3 אנשים ברינדור, רק מתמונות הדמויות, בלי ציור. SAM ומודל ראייה (Qwen3-VL 8B) מוצאים כל אדם בכל קטע של 6 שניות לפי התיאור שלך ולפי המקום שבו סימנת אותו, ו־H3 מצייר מחדש רק אותם, לפי בובות אפורות של האנשים המקוריים. קטעים שהם לא נמצאים בהם נשארים כמו במקור, ושאר האנשים לא משתנים. תמונה נקייה אחת לכל דמות: פוסטר עם כמה פרצופים מבלבל אותו. בבדיקה 2 ו־3 דמויות יצאו נכון; עם 4, אחד התחיל לא נכון, לכן המקסימום 3. לדמות קרחת או עם שיער שונה הפעל "הסר את השיער המקורי", אחרת היא מקבלת את קו השיער של האדם המקורי. בבדיקה (The Last Fold, 15 שניות): ברמה של Viggle 1MP בלי ציור; המשקפיים יצאו כהים ולא כמו בתמונה. עד 15 שניות.',
   'akatz': 'akatz: אדם אחד ברינדור, בלי ציור. מוצא את האדם לפי התיאור שלך בכל פריים, אז תאר איך הוא נראה (שיער, בגדים). אם האדם יוצא מהשוט, akatz עלול להחליף מישהו אחר שדומה לתיאור: בבדיקה הוא החליף גם את העוזר בחליפה הכחולה. מתאים כשהאדם נשאר בתמונה כל הסרטון. עד 149 שניות.',
 }
 const FLOW_COMMON = 'בכל המצבים: הסרטון מחולק לחלקים של ~5 שניות (חלק חדש גם בכל חיתוך). סמן את האנשים בחלק הראשון של כל שוט; החלקים הבאים באותו שוט ממשיכים עם אותם סימונים, אלא אם תסמן מחדש או תלחץ "אין אף אחד להחליף כאן". בכל חלק של Viggle צריך לפחות אדם אחד להחליף. סרטון ארוך מ־18 שניות מרונדר בכמה עבודות שממשיכות זו מזו ומחוברות בסוף עם הסאונד המקורי. פרטים דקים כמו ראסטות וחרוזים עלולים להבהב.'
@@ -59,6 +63,7 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
   const [marks, setMarks] = useState<Mark[]>([])
   const [mode, setMode] = useState<Mode>('reference')
   const [engine, setEngine] = useState<Engine>('viggle')
+  const [oj, setOj] = useState<OpenjutsuOptions>({ resolution: '736p', remove_hair: false })
   const [notes, setNotes] = useState('')
   const [empties, setEmpties] = useState<number[]>([])
   const [splitAt, setSplitAt] = useState<{ part: number; frame: number } | null>(null)
@@ -83,7 +88,7 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
     try { await work() } catch (exc) { setError(exc instanceof Error ? exc.message : 'הבקשה נכשלה') } finally { setBusy(false) }
   }
 
-  const open = (item: Swap) => { setSwap(item); setMarks(item.marks || []); setMode(item.mode || 'reference'); setEngine(item.engine || 'viggle'); setNotes(item.notes || ''); setEmpties(item.shots.filter(s => s.empty).map(s => s.index)) }
+  const open = (item: Swap) => { setSwap(item); setMarks(item.marks || []); setMode(item.mode || 'reference'); setEngine(item.engine || 'viggle'); setOj(item.openjutsu || { resolution: '736p', remove_hair: false }); setNotes(item.notes || ''); setEmpties(item.shots.filter(s => s.empty).map(s => s.index)) }
   const begin = (form: FormData) => run(async () => open(await api<Swap>('/api/swap', csrf, { method: 'POST', body: form })))
 
   useEffect(() => { void loadCharacters() }, [loadCharacters])
@@ -157,7 +162,7 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
   const saveMarks = async () => {
     if (!swap) throw new Error('אין החלפה פתוחה')
     const saved = await api<Swap>(`/api/swap/${swap.id}/marks`, csrf, { method: 'PUT',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marks, mode, notes, engine, empty: empties }) })
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ marks, mode, notes, engine, empty: empties, openjutsu: oj }) })
     return saved
   }
   const render = () => run(async () => {
@@ -228,19 +233,24 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
   const windows = swap?.windows?.length || 1
   const jobs = engine === 'viggle' && windows > 4 ? Math.ceil(windows / 4) : 1
   const people = new Set(marks.map(m => m.character_id)).size
-  const minutes = swap ? (engine === 'akatz' ? Math.ceil(swap.seconds / 5) * 6 : windows * 9) : 0
+  // measured: Openjutsu 15 s in 13-15 min at 480p, 27 min at 736p
+  const minutes = swap ? (engine === 'akatz' ? Math.ceil(swap.seconds / 5) * 6
+    : engine === 'openjutsu' ? Math.ceil(swap.seconds * (oj.resolution === '480p' ? 1 : 1.9)) : windows * 9) : 0
+  const ojTooLong = engine === 'openjutsu' && !!swap && swap.seconds > OPENJUTSU_MAX_SECONDS
   const warnings: string[] = []
   if (marks.some(m => DRAFT.test(m.description.trim())))
     warnings.push('תאר כל אדם במילים שלך: שיער, בגדים, מה הוא עושה. "the person on the left" לבד לא מספיק למודל.')
   if (engine === 'viggle' && mode === 'reference' && people > 1)
     warnings.push('תמונת דמות בלבד עם כמה דמויות לא אמין: בבדיקה עם 4 אחד פוספס, ובבדיקה עם 2 שתי הדמויות התערבבו. פריימים מצוירים עבדו עם 2-4 אנשים.')
   if (engine === 'akatz' && people > 1) warnings.push('akatz מחליף אדם אחד ברינדור: השאר סימון של דמות אחת.')
+  if (engine === 'openjutsu' && people > OPENJUTSU_MAX_CHARACTERS) warnings.push(`Openjutsu מחליף עד ${OPENJUTSU_MAX_CHARACTERS} אנשים ברינדור: השאר עד ${OPENJUTSU_MAX_CHARACTERS} דמויות.`)
+  if (ojTooLong) warnings.push(`Openjutsu נבדק עד ${OPENJUTSU_MAX_SECONDS} שניות; לסרטון ארוך יותר השתמש ב־Viggle.`)
 
   return <div className="dialog-backdrop app-modal-backdrop" onMouseDown={() => { if (!busy) onClose() }}>
     <div className="app-modal post-sheet swap-sheet" role="dialog" aria-modal="true" onMouseDown={event => event.stopPropagation()}>
       <div className="app-modal-head"><div className="app-modal-icon"><Users size={21} /></div>
         <button type="button" className="app-modal-close" onClick={onClose} disabled={busy} aria-label="סגירה"><X size={17} /></button></div>
-      <div><span className="app-modal-eyebrow">Viggle Remake / akatz</span><h2>החלפת דמות</h2></div>
+      <div><span className="app-modal-eyebrow">Viggle Remake / akatz / Openjutsu</span><h2>החלפת דמות</h2></div>
 
       {!swap && !jobId && <>
         <label className="post-sheet-file"><input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska" disabled={busy}
@@ -262,12 +272,25 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
         <p className="swap-status"><b>{STATUS_TEXT[swap.status] || swap.status}</b>{swap.stage && ` · ${swap.stage}`}</p>
 
         <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="מנוע">
-          {(['viggle', 'akatz'] as Engine[]).map(item => <button type="button" key={item} role="radio" aria-checked={engine === item}
+          {(['viggle', 'akatz', 'openjutsu'] as Engine[]).map(item => <button type="button" key={item} role="radio" aria-checked={engine === item}
             className={engine === item ? 'active' : ''} onClick={() => setEngine(item)} disabled={!editable}>
-            <strong>{item === 'viggle' ? 'Viggle Remake' : 'akatz V1.5'}</strong>
-            <small>{item === 'viggle' ? 'עד 4 אנשים ברינדור · ~9 דקות לכל 5 שניות' : 'אדם אחד ברינדור · מוצא אותו לפי התיאור (SAM) · ~6 דקות לכל 5 שניות'}</small>
+            <strong>{item === 'viggle' ? 'Viggle Remake' : item === 'akatz' ? 'akatz V1.5' : 'Openjutsu'}</strong>
+            <small>{item === 'viggle' ? 'עד 4 אנשים ברינדור · ~9 דקות לכל 5 שניות'
+              : item === 'akatz' ? 'אדם אחד ברינדור · מוצא אותו לפי התיאור (SAM) · ~6 דקות לכל 5 שניות'
+              : 'עד 3 אנשים · רק תמונות דמויות · עד 15 שניות · ~9 דקות לכל 5 שניות ב־736'}</small>
           </button>)}
         </div>
+
+        {engine === 'openjutsu' && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="רזולוציה">
+          {(['736p', '480p'] as const).map(item => <button type="button" key={item} role="radio" aria-checked={oj.resolution === item}
+            className={oj.resolution === item ? 'active' : ''} onClick={() => setOj({ ...oj, resolution: item })} disabled={!editable}>
+            <strong>{item === '736p' ? '736 (~1MP)' : '480'}</strong>
+            <small>{item === '736p' ? 'כמו Viggle · ~27 דקות ל־15 שניות' : 'טיוטה · ~14 דקות ל־15 שניות'}</small>
+          </button>)}
+        </div>}
+        {engine === 'openjutsu' && <label className="swap-toggle"><input type="checkbox" checked={oj.remove_hair} disabled={!editable}
+          onChange={event => setOj({ ...oj, remove_hair: event.target.checked })} />
+          <span>הסר את השיער המקורי (לדמות קרחת או עם שיער שונה)</span></label>}
 
         {engine === 'viggle' && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="מצב">
           {(['reference', 'painted'] as Mode[]).map(item => <button type="button" key={item} role="radio" aria-checked={mode === item}
@@ -279,7 +302,7 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
 
         <details className="swap-info" open={editable && swap.marks.length === 0}>
           <summary>איך זה עובד ומה זה יודע לעשות</summary>
-          <p>{FLOW_INFO[engine === 'akatz' ? 'akatz' : `viggle-${mode}`]}</p>
+          <p>{FLOW_INFO[engine === 'viggle' ? `viggle-${mode}` : engine]}</p>
           <p>{FLOW_COMMON}</p>
         </details>
 
@@ -361,7 +384,7 @@ export function SwapSheet({ jobId, csrf, onClose, onQueued }: {
       <div className="app-modal-actions">
         <button type="button" onClick={onClose} disabled={busy}>סגור</button>
         {swap && editable && engine === 'viggle' && mode === 'painted' && <button type="button" onClick={codexPaint} disabled={busy || marks.length === 0}>Codex יצייר את כולם</button>}
-        {swap && editable && <button type="button" className="confirm" onClick={render} disabled={busy || marks.length === 0 || (engine === 'akatz' && people > 1)}>רנדר{marks.length ? ` · ~${minutes} דק'` : ''}</button>}
+        {swap && editable && <button type="button" className="confirm" onClick={render} disabled={busy || marks.length === 0 || (engine === 'akatz' && people > 1) || (engine === 'openjutsu' && people > OPENJUTSU_MAX_CHARACTERS) || ojTooLong}>רנדר{marks.length ? ` · ~${minutes} דק'` : ''}</button>}
       </div>
     </div>
   </div>
