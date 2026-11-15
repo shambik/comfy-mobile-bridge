@@ -21,7 +21,6 @@ from .comfy import media_probe
 from .config import VIDEO_VAULT
 from .db import connect, now_iso
 
-MAX_VIDEO_BYTES = 500 * 1024 * 1024
 READ_CHUNK_BYTES = 1024 * 1024
 FILE_LOCK_RETRIES = 10
 
@@ -161,9 +160,7 @@ async def store_video(upload: UploadFile, display_name: str | None = None) -> di
                 chunk = await upload.read(READ_CHUNK_BYTES)
                 if not chunk:
                     break
-                size += len(chunk)
-                if size > MAX_VIDEO_BYTES:
-                    raise ValueError(f"Video exceeds the {MAX_VIDEO_BYTES // (1024 * 1024)}MB upload limit")
+                size += len(chunk)   # no size limit: written to disk in chunks, never held in memory
                 handle.write(chunk)
                 digest.update(chunk)
         if size == 0:
