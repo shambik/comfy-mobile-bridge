@@ -2125,7 +2125,9 @@ class AgentParsingTests(unittest.TestCase):
                 ))
                 command = process_manager._run.await_args.args[1]
                 task = process_manager._run.await_args.args[2]
-                self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+                self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+                self.assertIn("features.shell_tool=false", command)
+                self.assertIn("features.plugins=false", command)
                 self.assertNotIn("--approve-for-me", command)
                 self.assertIn("built-in image-generation tool directly", task)
                 self.assertIn("bridge", task)
