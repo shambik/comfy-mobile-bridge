@@ -166,11 +166,12 @@ tested it; the defaults did not change. Same seeds per row, ComfyUI 0.44:
 | Turbo v4 two-character scene, 3 shots (opening, first + last, opening), 1.5 MP 9:16 | 2,208 s standard | **1,086 s** | same |
 | Singularity Ref2V God, 3 shots, 1.5 MP 9:16 | 1,612 s Sage, 2,648 s standard | **1,348 s** | same faces and performance |
 | Singularity Pika flow opening frame, 1.5 MP 9:16 | 413 s Sage, 666 s standard | **348 s** | same performance |
+| Singularity God lip-sync (Native AudioLock), 1.5 MP 9:16, 5 s (2026-11-20, issue #67) | 584 s Sage | **432 s** | frames practically identical |
 | LTX lip-sync, 1600×896, 6 s | 259 s standard | **153 s** | frames nearly identical (PSNR 28) |
 | LTX two-character scene at 2 MP (1056×1888), 3 shots | 910 s standard | **667 s** | same motion |
 
 - **Where it is offered:** Turbo opening frame, lip-sync and first + last
-  frame; Singularity reference and opening frame; LTX lip-sync, opening frame
+  frame; Singularity reference, opening frame and lip-sync; LTX lip-sync, opening frame
   and first + last frame. Everything else refuses it until it is tested.
 - **On Turbo, Int8 also decodes with the INT8 video VAE**
   (`minimax_h3_video_vae_int8_convrot`): 63 s -> 27 s at 1.5 MP, PSNR 42-47 dB
@@ -711,8 +712,8 @@ extras; low-passed lip-sync audio makes characters freeze, so always send the re
 ## Not tested yet
 
 - Standard and Spectrum engine speed and quality on this card.
-- Int8 attention on Turbo text and reference, Singularity frame and lip-sync
-  modes, the Pika engine, Fused SLA, Standard, Spectrum, LTX text, closing
+- Int8 attention on Turbo text and reference, Singularity first + last and
+  closing frame, the Pika engine, Fused SLA, Standard, Spectrum, LTX text, closing
   frame and reference, and H3 stills (the app refuses Int8 there until tested).
 - ClipProj quality versus the native 32B encoder.
 - "Sharp decode" and "calm sampler" on closing and first + last frame beyond a
