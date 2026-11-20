@@ -8,8 +8,9 @@ from backend.config import OFFICIAL_LTX_TEMPLATES, PIKA_FL2VA_LORA, PIKA_REF2VA_
 from backend.generation import (PIKA_OPTIONS, PIKA_TURBO4_MODES, PIKA_TURBO4_OPTIONS, SKIN_OPTION_DEFAULTS,
                                 normalize_generation_settings, normalize_skin_options, pika_options)
 from backend.worker import history_retry_phase
-from backend.workflows import (apply_attention_mode, apply_steady_memory, official_ltx_template_workflow, singularity_app_workflow, singularity_workflow,
-                               steady_memory_needed,
+from backend.workflows import (LONG_TAKE_NODE_CLASSES, LONG_TAKE_PART_SECONDS, apply_attention_mode, apply_steady_memory,
+                               long_take_parts, long_take_workflow, official_ltx_template_workflow, singularity_app_workflow,
+                               singularity_workflow, steady_memory_needed,
                                skin_loras, skin_prompt, turbo_workflow, workflow_node_values)
 
 
@@ -112,6 +113,84 @@ class SingularityEngineTests(unittest.TestCase):
         workflow = singularity_app_workflow("hello", 5, 1, "x", "lip_sync", 928, 1632, first_frame_name="a.png", audio_name="a.wav",
                                             steps=8, options=SKIN_OPTION_DEFAULTS)
         self.assertFalse([name for name in classes(workflow) if "T8" in name])
+
+
+class LongTakeTests(unittest.TestCase):
+    """Issue #65: Singularity long take through Context-Loop (lab 2026-11-20: 3 parts, God, int8, 1.5 MP 9:16)."""
+
+    PROMPT = ("r34l1sm\n\nsubject_definitions:\n<Subject 1> is her.\n\nsummary:\npart one\n---\n"
+              "r34l1sm\n\nsummary:\npart two\n---\nr34l1sm\n\nsummary:\npart three")
+
+    def build(self, parts=None, include_audio=True, attention="int8"):
+        parts = parts or long_take_parts(self.PROMPT)
+        base = singularity_workflow(self.PROMPT, LONG_TAKE_PART_SECONDS, 7, "h3_bridge_x", "skin_god", 928, 1632,
+                                    ["ref.png"], mode="reference", steps=8, include_audio=include_audio)
+        return apply_attention_mode(long_take_workflow(base, parts, 7, 8, 928, 1632, "bridge_x",
+                                                       include_audio=include_audio), attention)
+
+    def test_parts_split_on_separator_lines_and_keep_their_paragraphs(self):
+        parts = long_take_parts(self.PROMPT)
+        self.assertEqual(len(parts), 3)
+        self.assertIn("subject_definitions:\n<Subject 1> is her.\n\nsummary:\npart one", parts[0])
+        self.assertEqual(long_take_parts("one\n\ntwo\n\nthree"), ["one", "two", "three"])
+        self.assertEqual(long_take_parts("a\r\n---\r\n\r\nb"), ["a", "b"])
+
+    def test_option_accepts_two_or_three_parts(self):
+        self.assertEqual(normalize_skin_options('{"parts": 3}')["parts"], 3)
+        self.assertEqual(normalize_skin_options(None)["parts"], 1)
+        for raw in ('{"parts": 4}', '{"parts": 0}', '{"parts": "3"}'):
+            with self.subTest(raw), self.assertRaises(ValueError):
+                normalize_skin_options(raw)
+
+    def test_graph_wraps_the_singularity_chain_in_context_loop(self):
+        workflow = self.build()
+        self.assertTrue(LONG_TAKE_NODE_CLASSES <= classes(workflow))
+        plan = json.loads(workflow["301"]["inputs"]["plan_json"])
+        self.assertEqual([shot["length"] for shot in plan["shots"]], [124, 141, 141])
+        self.assertEqual([shot["prompt"].splitlines()[-1] for shot in plan["shots"]], ["part one", "part two", "part three"])
+        self.assertEqual(len({shot["seed"] for shot in plan["shots"]}), 3)
+        reference = workflow["136"]["inputs"]
+        self.assertEqual((reference["prompt"], reference["width"], reference["height"], reference["length"]),
+                         (["305", 4], ["305", 8], ["305", 9], ["305", 6]))
+        self.assertEqual(reference["ref_images.ref_image_0"], ["137", 0])
+        self.assertEqual(workflow["15"]["inputs"]["noise_seed"], ["305", 5])
+        self.assertEqual(workflow["14"]["inputs"]["latent_image"], ["306", 3])
+        self.assertEqual(workflow["130"]["inputs"]["av_latent"], ["306", 3])
+        self.assertFalse(workflow["309"]["inputs"]["enabled"])  # unattended: no Review Gate pause
+        saves = [node for node in workflow.values() if node["class_type"] == "SaveVideo"]
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(saves[0]["inputs"]["filename_prefix"], "h3_bridge_x")
+        self.assertEqual(workflow["91"]["inputs"]["images"], ["312", 0])
+        self.assertEqual(workflow["91"]["inputs"]["audio"], ["312", 2])
+
+    def test_model_chain_and_int8_stay_as_the_single_pass(self):
+        workflow = self.build()
+        attention = next(key for key, node in workflow.items() if node["class_type"] == "ModelAttentionBackend")
+        turbo = next(key for key, node in workflow.items() if node["class_type"] == "MiniMaxH3TurboLoRA")
+        self.assertEqual(workflow[attention]["inputs"]["model"], [turbo, 0])
+        self.assertEqual(workflow["130"]["inputs"]["model"], [attention, 0])
+        self.assertEqual(workflow["16"]["inputs"]["model"], ["130", 0])
+        self.assertEqual(workflow["16"]["inputs"]["conditioning"], ["306", 0])
+
+    def test_every_link_points_at_a_node(self):
+        for include_audio in (True, False):
+            workflow = self.build(include_audio=include_audio)
+            dangling = [(key, name) for key, node in workflow.items() for name, value in node["inputs"].items()
+                        if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str) and value[0] not in workflow]
+            with self.subTest(include_audio=include_audio):
+                self.assertEqual(dangling, [])
+        silent = self.build(include_audio=False)
+        self.assertNotIn("audio", silent["91"]["inputs"])
+        self.assertEqual(silent["300"]["inputs"]["audio_profile"], "No final audio")
+
+    def test_two_parts(self):
+        plan = json.loads(self.build(parts=["one", "two"])["301"]["inputs"]["plan_json"])
+        self.assertEqual([shot["length"] for shot in plan["shots"]], [124, 141])
+
+    def test_only_the_reference_graph_can_be_wrapped(self):
+        opening = singularity_workflow("x", 5, 1, "p", "skin_god", 928, 1632, [], mode="opening", steps=8, first_frame_name="a.png")
+        with self.assertRaises(ValueError):
+            long_take_workflow(opening, ["a", "b"], 1, 8, 928, 1632, "run")
 
 
 class OfficialLtxTemplateTests(unittest.TestCase):

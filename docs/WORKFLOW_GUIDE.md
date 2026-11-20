@@ -662,6 +662,18 @@ T8 opened on the back of his head. Text mode, two characters, same seeds: T8 473
 different take of each (same description, different face and framing) and softer, less defined hands on the
 fisherman. One seed per case. App flow keeps its own Turbo sampler.
 
+**Singularity long take** (issue #65, skin option `parts` 2 or 3, reference mode): 10 or 15 s as 2 or 3 continuous
+~5 s parts through Context-Loop (ethanfel/ComfyUI-MiniMaxH3-Context-Loop @ 43afeff). Each part is the normal
+Singularity graph (same tier, LoRAs, sampler, attention, VAE and references); "Visual continuity" guides every later part
+with the previous part's last 22 frames of picture and generated sound, so parts 2+ render 141 frames and keep ~5 s.
+Write one full prompt per part in the prompt box, separated by a line with only `---` (each part can be a structured H3
+prompt with blank lines inside; without `---`, blank lines separate the parts). Lab 2026-11-20 (God, int8, 1.5 MP 9:16,
+3 parts, the redhead vlog): 15.08 s, 928x1632, 29 min (73.7 s/step), joins invisible (frame-to-frame change at both joins
+1.1-2.5 against a clip median of 2.75); user: "It actually looks good with context loop". Only that case was tested;
+16:9, 10 s and the other tiers are allowed by the user's choice and the form says so. A single 15 s pass does not fit
+10 GB: the same setup with sol-attn sparse attention never finished its first step in 25 min (spilling at 9.96 GB).
+A held prop can be duplicated if a part asks for it (the lab's "glances at her phone" added a second phone).
+
 **Pika** (engine `pika`, action): H3's own pruned base + the matching Pika H3 Flex LoRA, Pika's fixed 6 knots, ref size
 `match`. 1.5 MP, 9:16 or 16:9, 2-7 s. Standard attention by default: a 5 s job takes about 10.5-13 min (reference 630 s,
 text 667 s, lip-sync 713 s, opening 692-734 s, first + last 780 s). Clearly ahead of LTX for fights (keeper `620f17b2`), but
