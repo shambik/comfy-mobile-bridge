@@ -183,6 +183,15 @@ same seeds: with the node Pika Sage first + last 516 s and opening 468 s at 9.17
 at 9.64-9.72 GB. Singularity God peaks at only 9.19 GB and is faster without the node (572 s against 633 s), with the same
 decoded video and audio either way, so Singularity does not get it. LTX and Turbo do not get it either.
 
+**Long clips: Context-Loop instead of one long pass (issue #65).** Attention cost grows with the square of the frame
+count, so one 15 s pass at 1.5 MP is not usable on 10 GB: Singularity God int8 with sol-attn sparse attention, 362
+frames at 928x1632, sat at 9.96 GB and about 108 W and never finished its first of 8 steps in 25 min (lab 2026-11-20,
+PCIe was running at gen 3). The Singularity long take renders 2-3 parts of 124/141 frames instead, each at the
+single-pass footprint (9.9 GB peak, 73.7 s per step at 1.5 MP), so time grows with the length: 15.08 s in 29 min.
+Context-Loop keeps each part as a scene MP4 plus a ~0.4 GB latent checkpoint under `output/h3_chains/bridge_<job id>`;
+the app asks Assemble to delete the checkpoints once the final MP4 exists, so a finished long take leaves only the
+scene videos and metadata.
+
 Tried without effect on the stall: unloading before sampling, the fp16 VAE, `--reserve-vram 1.5` and `3`,
 `--disable-nvml-pressure`, `empty_cache` on slowdown, a preallocated pool, a 0.2 GB VBAR cap, async offload off alone, and
 waits only after each block. Sparse attention stays refused for Pika opening and first + last: it was not retested.

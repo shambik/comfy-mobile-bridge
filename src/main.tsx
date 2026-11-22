@@ -18,7 +18,9 @@ type PikaSpeed = 'direct' | 'turbo4'
 type SkinTier = 'skin_god' | 'skin_balanced' | 'skin_max' | 'skin_app'
 type SkinMegapixels = 1 | 1.5
 type OmniMegapixels = 0.6 | 1 | 1.5
-type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number }
+type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number; parts?: LongTakeParts }
+// Singularity long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop; 1 = one normal pass.
+type LongTakeParts = 1 | 2 | 3
 type LtxQuality = 'balanced' | 'high'
 type LtxReferenceModel = '2.5' | '2.3'
 type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
@@ -1136,7 +1138,9 @@ function App() {
   const effectiveSkinTier: SkinTier = mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier
   // Pika sampler (lcm on Pika's 6 fixed sigmas): steps, scheduler, shift and tail steps do not apply.
   const skinPikaFlow = effectiveEngine === 'singularity' && effectiveSkinTier !== 'skin_app' && preferences.skinOptions.flow === 'pika'
-  const effectiveSkinOptions: SkinOptions = { ...preferences.skinOptions, flow: skinPikaFlow ? 'pika' : 't8' }
+  const longTakeAllowed = effectiveEngine === 'singularity' && mode === 'reference' && effectiveSkinTier !== 'skin_app'
+  const longTakeParts: LongTakeParts = longTakeAllowed ? (preferences.skinOptions.parts ?? 1) : 1
+  const effectiveSkinOptions: SkinOptions = { ...preferences.skinOptions, flow: skinPikaFlow ? 'pika' : 't8', parts: longTakeParts }
   const omniMegapixels: OmniMegapixels = preferences.omniMegapixels
   const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
   const generationSteps = effectiveEngine === 'omni'
@@ -1693,7 +1697,12 @@ function App() {
     if (effectiveEngine === 'omni' && (duration < OMNI_DURATION[0] || duration > OMNI_DURATION[1])) return setMainError('generation', `Omni תומך ב־${OMNI_DURATION[0]}–${OMNI_DURATION[1]} שניות`)
     if (effectiveEngine === 'omni' && referenceVideos.length > 1) return setMainError('generation', 'Omni נבדק עם סרטון רפרנס אחד')
     if (pikaTurbo && duration > PIKA_TURBO_MAX_SECONDS) return setMainError('generation', `Pika Turbo נבדק עד ${PIKA_TURBO_MAX_SECONDS} שניות`)
-    if (effectiveEngine === 'singularity' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Singularity תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
+    if (effectiveEngine === 'singularity' && longTakeParts > 1) {
+      if (duration !== longTakeParts * LONG_TAKE_PART_SECONDS) return setMainError('generation', `טייק ארוך של ${longTakeParts} חלקים הוא ${longTakeParts * LONG_TAKE_PART_SECONDS} שניות`)
+      const found = longTakePromptParts(prompt).length
+      if (found !== longTakeParts) return setMainError('generation', `טייק ארוך: כתבו ${longTakeParts} חלקים, מופרדים בשורה שיש בה רק --- (נמצאו ${found})`)
+      if (batch) return setMainError('generation', 'טייק ארוך הוא עבודה אחת: בטלו את מצב הבאץ׳')
+    } else if (effectiveEngine === 'singularity' && (duration < SKIN_DURATION[0] || duration > SKIN_DURATION[1])) return setMainError('generation', `Singularity תומך ב־${SKIN_DURATION[0]}–${SKIN_DURATION[1]} שניות — רק זה נבדק`)
     if (seedEnabled && !seedInput.trim()) return setMainError('generation', 'יש להזין מספר Seed או לבטל את הסימון')
     if (batch && paragraphCount > 20) return setMainError('generation', 'אפשר להוסיף עד 20 פרומפטים יחד')
     if (connected && (!batch || mode !== 'text' || paragraphCount < 2)) return setMainError('generation', 'רצף מחובר דורש לפחות שני פרומפטים במצב טקסט')
@@ -2074,6 +2083,13 @@ function App() {
               <div className="turbo-profile-toggle">
                 {([1, 1.5] as SkinMegapixels[]).map(value => <button key={value} type="button" className={preferences.skinMegapixels === value ? 'active' : ''} aria-pressed={preferences.skinMegapixels === value} onClick={() => setPreferences(current => ({ ...current, skinMegapixels: value }))}><strong dir="ltr">{value.toFixed(1)} MP · {SKIN_SIZES[value][skinAspect].join('×')}</strong><small>{value === 1 ? 'נבדק · ≈5.5–8 דק׳' : 'בבדיקה · עור חד יותר, איטי יותר'}</small></button>)}
               </div>
+              {longTakeAllowed && <>
+                <div className="setting-title turbo-profile-title"><span>טייק ארוך</span><small>Context-Loop · חלקים רציפים של 5 שנ׳</small></div>
+                <div className="turbo-profile-toggle">
+                  {([1, 2, 3] as LongTakeParts[]).map(parts => <button key={parts} type="button" className={longTakeParts === parts ? 'active' : ''} aria-pressed={longTakeParts === parts} onClick={() => { setSkinOption('parts', parts); setDuration(parts > 1 ? parts * LONG_TAKE_PART_SECONDS : Math.min(duration, SKIN_DURATION[1])) }}><strong dir="ltr">{parts === 1 ? 'Off' : `${parts * LONG_TAKE_PART_SECONDS} s · ${parts} parts`}</strong><small>{parts === 1 ? 'מעבר אחד, 2–7 שנ׳' : parts === 3 ? 'נבדק: 9:16 · God · int8 · ≈29 דק׳' : 'לא נבדק עדיין · ≈20 דק׳'}</small></button>)}
+                </div>
+                {longTakeParts > 1 && <p className="setting-note">כתבו {longTakeParts} פרומפטים מלאים בתיבה אחת, אחד לכל חלק, מופרדים בשורה שיש בה רק <span dir="ltr">---</span>. כל חלק ממשיך בדיוק מסוף הקודם (22 פריימים של תמונה וסאונד), כך שהטייק רציף. רק 9:16 · 15 שנ׳ · God · int8 נבדק במעבדה; 16:9, 10 שנ׳ ושאר הרמות לא נבדקו.</p>}
+              </>}
               <details className="skin-advanced">
                 <summary>הגדרות מתקדמות</summary>
                 <div className="skin-advanced-grid">
@@ -2606,6 +2622,7 @@ const SKIN_SIZES: Record<SkinMegapixels, Record<'9:16' | '16:9', [number, number
   1.5: { '9:16': [928, 1632], '16:9': [1632, 928] },
 }
 const SKIN_DURATION: [number, number] = [2, 7]
+const LONG_TAKE_PART_SECONDS = 5
 // Mirrors backend/generation.py OMNI_SIZES and OMNI_DURATION_RANGE.
 const OMNI_SIZES: Record<OmniMegapixels, Record<'9:16' | '16:9', [number, number]>> = {
   0.6: { '9:16': [576, 1024], '16:9': [1024, 576] },
@@ -2645,7 +2662,24 @@ function skinSetupParts(job: { workflow_variant?: string; mode?: string; skin_op
   const tail = options.tail_steps ? `, +${options.tail_steps} tail steps` : ''
   const sampler = options.flow === 'pika' ? `Sampler: Pika, ${job.steps ?? 6} steps`
     : `Sampler: T8 Dual-Clock ${options.scheduler || 'beta'}, ${job.steps ?? 8} steps${shift}${tail}`
-  return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, 'Not Fused']
+  const longTake = (options.parts ?? 1) > 1 ? [`Long take: ${options.parts} × ${LONG_TAKE_PART_SECONDS} s (Context-Loop)`] : []
+  return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, ...longTake, 'Not Fused']
+}
+
+// Mirrors long_take_parts() in backend/workflows.py: '---' lines separate parts; without them, blank lines do.
+function longTakePromptParts(prompt: string): string[] {
+  const text = prompt.replace(/\r\n/g, '\n').trim()
+  const lines = text.split('\n')
+  if (lines.some(line => line.trim() === '---')) {
+    const parts: string[] = []
+    let current: string[] = []
+    for (const line of lines) {
+      if (line.trim() === '---') { parts.push(current.join('\n').trim()); current = [] } else current.push(line)
+    }
+    parts.push(current.join('\n').trim())
+    return parts.filter(Boolean)
+  }
+  return text.split('\n\n').map(part => part.trim()).filter(Boolean)
 }
 
 function pikaSetupParts(job: { mode?: string; steps?: number; workflow_variant?: string }): string[] {

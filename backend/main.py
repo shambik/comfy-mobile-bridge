@@ -39,9 +39,10 @@ from .config import (OMNI_FILES, PIKA_FILES, PIKA_TURBO4_FILES, PIKA_REF2VA_LORA
                      SPECTRUM_NODE_DIR, SPECTRUM_NODE_VERSION, TURBO_LORAS, visual_enhancer_ready)
 from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revision, list_jobs,
                  list_sequences, next_position, now_iso)
-from .generation import (LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION, OMNI_DURATION_RANGE, PIKA_TURBO4_MAX_DURATION, SKIN_DURATION_RANGE,
+from .generation import (LONG_TAKE_PART_SECONDS, LONG_TAKE_PROMPT_LIMIT, LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION,
+                         OMNI_DURATION_RANGE, PIKA_TURBO4_MAX_DURATION, SKIN_DURATION_RANGE,
                          normalize_generation_settings, normalize_skin_options)
-from .workflows import SKIN_PEOPLE_LORA, skin_loras, skin_prompt
+from .workflows import LONG_TAKE_SEPARATOR, SKIN_PEOPLE_LORA, long_take_parts, skin_loras, skin_prompt
 from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
 from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
                          get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
@@ -2846,7 +2847,18 @@ async def create_jobs(
             raise HTTPException(409, "The full Singularity model is not downloaded yet")
         if not singularity_ready():
             raise HTTPException(409, "The Singularity skin engine is not fully installed yet")
-        if not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
+        long_parts = skin_options_value["parts"]
+        if long_parts > 1:
+            # Long take (issue #65): Context-Loop renders `long_parts` continuous ~5 s parts.
+            if mode != "reference":
+                raise HTTPException(400, "The Singularity long take runs in reference mode only")
+            if generation.workflow_variant == "skin_app":
+                raise HTTPException(400, "The long take uses the T8 tiers (God, Balanced, Max), not App flow")
+            if batch:
+                raise HTTPException(400, "A long take is one job: write its parts in one prompt")
+            if duration != long_parts * LONG_TAKE_PART_SECONDS:
+                raise HTTPException(400, f"A {long_parts}-part long take is {long_parts * LONG_TAKE_PART_SECONDS:g} seconds")
+        elif not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
             raise HTTPException(400, "The Singularity skin engine supports 2 to 7 seconds")
         if skin_options_value["flow"] == "pika" and (generation.steps != PIKA_STEPS or generation.workflow_variant == "skin_app"):
             raise HTTPException(400, f"The Pika flow runs {PIKA_STEPS} steps in the T8 tiers")
@@ -2939,12 +2951,24 @@ async def create_jobs(
         raise HTTPException(409, "Turbo v4 is not installed yet")
     if mode == "reference" and generation.engine == "turbo" and not (MODELS / "loras" / REF2VA_TURBO_LORA).exists():
         raise HTTPException(409, "Ref2VA Turbo LoRA is not installed yet")
-    prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
+    long_take = generation.engine == "singularity" and skin_options_value["parts"] > 1
+    if long_take:
+        parts = long_take_parts(prompt or "")
+        if len(parts) != skin_options_value["parts"]:
+            raise HTTPException(400, f"Write {skin_options_value['parts']} parts separated by a line with only "
+                                     f"'{LONG_TAKE_SEPARATOR}' (found {len(parts)})")
+        if any(len(part) > LONG_TAKE_PROMPT_LIMIT for part in parts):
+            raise HTTPException(400, f"Each long-take part is limited to {LONG_TAKE_PROMPT_LIMIT:,} characters")
+        prompts = parts
+    else:
+        prompts = parse_prompts(prompt or "The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.", batch)
     if generation.engine == "singularity":
         # Store the prompt as the model gets it, with the People LoRA trigger when that LoRA is on.
         people = (skin_options_value["people_strength"] > 0 if generation.workflow_variant == "skin_app"
                   else any(lora == SKIN_PEOPLE_LORA for lora, _ in skin_loras(generation.workflow_variant, skin_options_value)))
         prompts = [skin_prompt(text, people) for text in prompts]
+        if long_take:  # one job: its parts stored in order, separated as the user wrote them
+            prompts = [f"\n{LONG_TAKE_SEPARATOR}\n".join(prompts)]
     if connected and len(prompts) < 2:
         raise HTTPException(400, "Connected generation requires at least two prompts")
     stored_audio_start = audio_original_start if audio_pretrimmed and audio_original_start is not None else audio_start

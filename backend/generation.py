@@ -67,7 +67,7 @@ SKIN_STEP_RANGE = (4, 16)
 SKIN_OPTION_DEFAULTS = {
     "model": "pruned", "speed_lora": "tier", "speed_strength": 1.0, "people_strength": 1.0,
     "shift_video": 12.0, "shift_audio": 3.0, "scheduler": "beta", "tail_steps": 0,
-    "flow": "t8", "ref_size": "max",
+    "flow": "t8", "ref_size": "max", "parts": 1,
 }
 # model "base" is H3's own pruned Ref2VA (reference) or FL2VA (other modes); speed_lora "pika" is the
 # matching Pika H3 Flex LoRA; flow "pika" samples with Pika's 6 knots instead of the T8 sampler.
@@ -77,7 +77,13 @@ SKIN_OPTION_CHOICES = {
     "scheduler": ("beta", "beta57", "native_flow"),
     "flow": ("t8", "pika"),
     "ref_size": ("max", "match"),
+    # Long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop, reference mode only.
+    # Lab-tested: 3 parts, God, int8, 1.5 MP 9:16 (15.08 s in 29 min). The other tiers, 16:9 and 2 parts
+    # are allowed by the user's choice and flagged as untested in the form.
+    "parts": (1, 2, 3),
 }
+LONG_TAKE_PART_SECONDS = 5
+LONG_TAKE_PROMPT_LIMIT = 4000  # per part
 SKIN_OPTION_RANGES = {
     "speed_strength": (0.0, 2.0), "people_strength": (0.0, 2.0),
     "shift_video": (1.0, 30.0), "shift_audio": (1.0, 30.0), "tail_steps": (0, 4),
@@ -403,8 +409,9 @@ def normalize_skin_options(raw: str | dict | None) -> dict:
         raise ValueError("Unknown Singularity options: " + ", ".join(unknown))
     options = {**SKIN_OPTION_DEFAULTS, **values}
     for key, choices in SKIN_OPTION_CHOICES.items():
-        if options[key] not in choices:
-            raise ValueError(f"Singularity {key} must be one of: " + ", ".join(choices))
+        # bool is an int subclass: true/false must not pass as 1/0 parts
+        if options[key] not in choices or isinstance(options[key], bool):
+            raise ValueError(f"Singularity {key} must be one of: " + ", ".join(map(str, choices)))
     for key, (low, high) in SKIN_OPTION_RANGES.items():
         value = options[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:

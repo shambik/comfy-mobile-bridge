@@ -866,6 +866,119 @@ def singularity_workflow(
     return deepcopy(nodes)
 
 
+# Singularity long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop (ethanfel/ComfyUI-MiniMaxH3-
+# Context-Loop, pinned 43afeff). "Visual continuity" guides each later part with the previous part's last 22 frames of
+# picture and generated sound (LONG_TAKE_OVERLAP), which those parts then drop, so parts 2+ render 141 frames to deliver
+# ~5 s. Lab 2026-11-20: 3 parts, God int8, 1.5 MP 9:16 -> 15.08 s in 29 min, joins invisible; one 15 s pass on 10 GB
+# never finished a step in 25 min.
+LONG_TAKE_PART_SECONDS = 5
+LONG_TAKE_OVERLAP = 22
+LONG_TAKE_FIRST_FRAMES = 124
+LONG_TAKE_LATER_FRAMES = 141
+LONG_TAKE_SEPARATOR = "---"
+LONG_TAKE_NODE_CLASSES = {
+    "MiniMaxH3GenerationProfile", "MiniMaxH3ChainPlanModern", "MiniMaxH3ChainScenePromptEditor",
+    "MiniMaxH3ChainPreflight", "MiniMaxH3ChainLoopStart", "MiniMaxH3ChainCurrent", "MiniMaxH3ChainContext",
+    "MiniMaxH3LoopTrim", "MiniMaxH3ChainSegmentSave", "MiniMaxH3ChainReview", "MiniMaxH3ChainLoopEnd",
+    "MiniMaxH3ChainAssemble", "VHS_LoadVideoPath",
+}
+
+
+def long_take_parts(prompt: str) -> list[str]:
+    """Split a long-take prompt into its parts: lines holding only '---' separate parts (each part may be a full
+    structured H3 prompt with blank lines inside); a prompt without '---' is split on blank lines instead."""
+    text = prompt.replace("\r\n", "\n").strip()
+    lines = text.split("\n")
+    if any(line.strip() == LONG_TAKE_SEPARATOR for line in lines):
+        parts, current = [], []
+        for line in lines:
+            if line.strip() == LONG_TAKE_SEPARATOR:
+                parts.append("\n".join(current).strip())
+                current = []
+            else:
+                current.append(line)
+        parts.append("\n".join(current).strip())
+    else:
+        parts = [part.strip() for part in text.split("\n\n")]
+    return [part for part in parts if part]
+
+
+def long_take_frames(parts: int) -> list[int]:
+    return [LONG_TAKE_FIRST_FRAMES] + [LONG_TAKE_LATER_FRAMES] * (parts - 1)
+
+
+def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, width: int, height: int,
+                       run_name: str, include_audio: bool = True) -> dict:
+    """Wrap a Singularity reference graph (singularity_workflow, mode "reference") in Context-Loop's scene loop.
+
+    The model chain, LoRAs, sampler, attention, VAEs and references stay exactly as built; per part, Chain Current
+    feeds the prompt, size, length and seed, Chain Context adds the carried frames, and the decoded part is trimmed
+    and checkpointed. After the last part Assemble writes one MP4, which the job's own CreateVideo/SaveVideo save
+    under the job prefix. Review Gate is off (unattended)."""
+    if "136" not in nodes:
+        raise ValueError("The long take wraps the Singularity reference graph")
+    nodes = deepcopy(nodes)
+    frames = long_take_frames(len(prompts))
+    shots = [{"id": f"part_{index + 1}", "prompt": text, "length": length,
+              "seed": str((seed + index * 7919) % 2**48)}
+             for index, (text, length) in enumerate(zip(prompts, frames))]
+    nodes["300"] = {"class_type": "MiniMaxH3GenerationProfile", "inputs": {
+        "scene_continuity": "Visual continuity",
+        "audio_profile": "Generate audio" if include_audio else "No final audio"}}
+    nodes["301"] = {"class_type": "MiniMaxH3ChainPlanModern", "inputs": {
+        "plan_json": json.dumps({"shots": shots}, ensure_ascii=False), "chain_policy": ["300", 0],
+        "run_name": run_name, "generation_fingerprint": "singularity-long-take", "width": width, "height": height,
+        "encode_mode": "video", "crop": "disabled", "default_duration_seconds": float(LONG_TAKE_PART_SECONDS),
+        "default_steps": steps, "base_seed": 0, "segment_crf": 12, "video_blend_frames": 0}}
+    nodes["302"] = {"class_type": "MiniMaxH3ChainScenePromptEditor", "inputs": {"plan": ["301", 0]}}
+    nodes["303"] = {"class_type": "MiniMaxH3ChainPreflight", "inputs": {
+        "plan": ["302", 0], "start_clip": 1, "scene_range": "", "verify_resume_history": True}}
+    nodes["304"] = {"class_type": "MiniMaxH3ChainLoopStart", "inputs": {
+        "plan": ["303", 0], "start_clip": 1, "scene_range": "", "verify_resume_history": True}}
+    nodes["305"] = {"class_type": "MiniMaxH3ChainCurrent", "inputs": {"state": ["304", 1], "align_audio_reference": False}}
+    nodes["136"]["inputs"].update(prompt=["305", 4], width=["305", 8], height=["305", 9], length=["305", 6])
+    nodes["15"]["inputs"]["noise_seed"] = ["305", 5]
+    nodes["306"] = {"class_type": "MiniMaxH3ChainContext", "inputs": {
+        "state": ["305", 0], "conditioning": ["136", 0], "vae": ["11", 0], "latent": ["136", 1]}}
+    nodes["16"]["inputs"]["conditioning"] = ["306", 0]
+    nodes["14"]["inputs"]["latent_image"] = ["306", 3]
+    if nodes["130"]["class_type"] == "MiniMaxH3DualClockSamplerT8":
+        nodes["130"]["inputs"]["av_latent"] = ["306", 3]
+    trim = {"images": ["10", 0], "trim_frames": ["306", 1], "fps": FPS, "match_tail": True, "state": ["305", 0],
+            "audio_trim_mode": "sync_with_video"}
+    if include_audio:
+        trim["audio"] = ["23", 0]
+    nodes["307"] = {"class_type": "MiniMaxH3LoopTrim", "inputs": trim}
+    save = {"state": ["305", 0], "images": ["307", 0], "sampled_latent": ["14", 0], "images_with_overlap": ["307", 2]}
+    review = {"state": ["305", 0], "segment": ["308", 0], "enabled": False, "play_notification_sound": False,
+              "auto_continue_timeout_minutes": 0.0, "unload_models_while_waiting": False,
+              "assemble_partial_on_stop": True, "partial_audio_source": "checkpointed" if include_audio else "none",
+              "candidate_count": 1, "review_each_candidate": False}
+    if include_audio:
+        save["audio"] = ["307", 1]
+        review["audio"] = ["307", 1]
+    nodes["308"] = {"class_type": "MiniMaxH3ChainSegmentSave", "inputs": save}
+    nodes["309"] = {"class_type": "MiniMaxH3ChainReview", "inputs": review}
+    nodes["310"] = {"class_type": "MiniMaxH3ChainLoopEnd", "inputs": {
+        "flow": ["304", 0], "state": ["305", 0], "images": ["307", 0], "sampled_latent": ["14", 0],
+        "segment": ["309", 0], "between_scene_cleanup": "off", "execution_mode": "recursive"}}
+    nodes["311"] = {"class_type": "MiniMaxH3ChainAssemble", "inputs": {
+        "manifest": ["310", 0], "audio_source": "plan" if include_audio else "none", "filename": "final",
+        "audio_bitrate": 256, "copy_to_output": False, "output_subfolder": "", "blend_schedule": "plan",
+        # The app never resumes a chain: drop the ~0.4 GB-per-part latent checkpoints once the MP4 exists
+        # (scene videos, prompts and metadata stay in output/h3_chains/<run>).
+        "boundary_tone_match": "off", "color_stabilization": "off", "delete_checkpoints_after_assembly": True,
+        "generated_audio_join": "av_overlap"}}
+    nodes["312"] = {"class_type": "VHS_LoadVideoPath", "inputs": {
+        "video": ["311", 0], "force_rate": 0, "custom_width": 0, "custom_height": 0, "frame_load_cap": 0,
+        "skip_first_frames": 0, "select_every_nth": 1}}
+    nodes["91"]["inputs"]["images"] = ["312", 0]
+    if include_audio:
+        nodes["91"]["inputs"]["audio"] = ["312", 2]
+    else:
+        nodes["91"]["inputs"].pop("audio", None)
+    return nodes
+
 
 def omni_workflow(
     prompt: str,

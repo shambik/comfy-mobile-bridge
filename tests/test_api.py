@@ -79,6 +79,43 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("v4", 6))
 
+    def test_singularity_long_take_is_one_job_with_its_parts(self):
+        # Issue #65: 2 or 3 parts separated by '---' lines, reference mode, length = parts x 5 s.
+        files = {"reference_images": ("sheet.png", b"image-placeholder", "image/png")}
+        parts = "summary:\nshe starts\n\nmore of part one\n---\nsummary:\nshe goes on\n---\nsummary:\nshe ends"
+        data = {"prompt": parts, "mode": "reference", "engine": "singularity", "workflow_variant": "skin_god",
+                "steps": "8", "attention_mode": "int8", "aspect_ratio": "9:16", "megapixels": "1.5",
+                "skin_options": '{"parts": 3}'}
+        with patch("backend.main.singularity_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/sheet.png", "sheet.png"))):
+            refusals = {
+                "wrong length": self.client.post("/api/jobs", data={**data, "duration": "10"}, files=files, headers={"X-CSRF-Token": self.token}),
+                "two parts written": self.client.post("/api/jobs", data={**data, "duration": "15", "prompt": "a\n---\nb"}, files=files, headers={"X-CSRF-Token": self.token}),
+                "batch": self.client.post("/api/jobs", data={**data, "duration": "15", "batch": "true"}, files=files, headers={"X-CSRF-Token": self.token}),
+                "part too long": self.client.post("/api/jobs", data={**data, "duration": "15", "prompt": "a\n---\nb\n---\n" + "c" * 4001}, files=files, headers={"X-CSRF-Token": self.token}),
+            }
+            opening = self.client.post("/api/jobs", data={**data, "mode": "opening", "duration": "15"},
+                                       files={"image": ("face.png", b"image-placeholder", "image/png")}, headers={"X-CSRF-Token": self.token})
+            response = self.client.post("/api/jobs", data={**data, "duration": "15"}, files=files, headers={"X-CSRF-Token": self.token})
+        for name, refused in refusals.items():
+            with self.subTest(name):
+                self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(opening.status_code, 400, opening.text)
+        self.assertIn("reference mode only", opening.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["created"]), 1)
+        connection = sqlite3.connect(self.path)
+        try:
+            prompt, duration, options = connection.execute("SELECT prompt,duration,skin_options_json FROM jobs").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(duration, 15)
+        self.assertIn('"parts": 3', options)
+        stored = prompt.split("\n---\n")
+        self.assertEqual(len(stored), 3)
+        self.assertTrue(all(part.startswith("r34l1sm\n\n") for part in stored))  # People trigger on every part
+        self.assertIn("she starts\n\nmore of part one", stored[0])
+
     def test_pika_turbo_is_persisted_and_keeps_its_tested_length(self):
         files = {"image": ("face.png", b"image-placeholder", "image/png")}
         data = {"prompt": "A fighter turns to camera", "mode": "opening", "engine": "pika", "workflow_variant": "turbo4",

@@ -39,7 +39,8 @@ from .workflows import (graph_spec_workflow, official_ltx_template_workflow, wor
                         native_audio_lock_workflow,
                         official_fused_workflow, omni_workflow,
                         reference_workflow, singularity_app_workflow, singularity_workflow,
-                        spectrum_workflow, standard_workflow, turbo_workflow)
+                        spectrum_workflow, standard_workflow, turbo_workflow,
+                        LONG_TAKE_NODE_CLASSES, LONG_TAKE_PART_SECONDS, long_take_parts, long_take_workflow)
 
 
 SAMPLER_NODE_ID = "14"
@@ -897,6 +898,8 @@ class QueueWorker:
                     required.add("LoadAudio")
                 if json.loads(job.get("reference_videos_json") or "[]"):
                     required |= {"LoadVideo", "GetVideoComponents"}
+                if not pika and int(json.loads(job.get("skin_options_json") or "{}").get("parts") or 1) > 1:
+                    required |= LONG_TAKE_NODE_CLASSES  # Context-Loop pack + VHS path loader (issue #65)
             elif job["mode"] == "lip_sync":
                 required |= {"LoadAudio", "MiniMaxH3NativeAudioLock"}
                 if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
@@ -1077,8 +1080,10 @@ class QueueWorker:
                     steps=job["steps"], options=skin_options,
                 )
             else:
+                long_parts = 1 if pika else int((skin_options or {}).get("parts") or 1)
                 workflow = singularity_workflow(
-                    job["prompt"], job["duration"], seed, prefix, "skin_max" if pika else job.get("workflow_variant") or "skin_god",
+                    job["prompt"], LONG_TAKE_PART_SECONDS if long_parts > 1 else job["duration"], seed, prefix,
+                    "skin_max" if pika else job.get("workflow_variant") or "skin_god",
                     job["width"], job["height"], reference_images, mode=job["mode"],
                     first_frame_name=first_frame_name, last_frame_name=last_frame_name,
                     video_names=json.loads(job.get("reference_videos_json") or "[]"),
@@ -1086,6 +1091,15 @@ class QueueWorker:
                     include_audio=not bool(job.get("no_audio")),
                     steps=job["steps"], options=skin_options,
                 )
+                if long_parts > 1:
+                    # Issue #65: the same graph, run part by part through Context-Loop.
+                    workflow_builder = "singularity_long_take_workflow"
+                    parts = long_take_parts(job["prompt"])
+                    if len(parts) != long_parts:
+                        raise RuntimeError(f"Long take needs {long_parts} prompt parts, found {len(parts)}")
+                    workflow = long_take_workflow(
+                        workflow, parts, seed, job["steps"], job["width"], job["height"],
+                        run_name=f"bridge_{job['id']}", include_audio=not bool(job.get("no_audio")))
         elif job["mode"] == "lip_sync":
             if job["engine"] == "fused_sla":
                 workflow_builder = "fused_sla_audio_lock_workflow"
