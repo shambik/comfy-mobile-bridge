@@ -39,7 +39,8 @@ FUSED_FIXED_VARIANTS = {"i2v_fl2v", "derope", "dyrope"}
 ATTENTION_MODES = ("standard", "sage", "sla", "sage_sla", "int8")
 INT8_ATTENTION_TESTED = {
     "turbo": ("opening", "lip_sync", "frames"),
-    "singularity": ("reference", "opening"),
+    # lip_sync: lab 2026-11-20 (issue #67), God 1.5 MP 9:16 5 s, same seed: Sage 584 s, int8 432 s, same frames.
+    "singularity": ("reference", "opening", "lip_sync"),
     "ltx": ("lip_sync", "opening", "frames"),
 }
 ENGINE_ATTENTION_MODES = {

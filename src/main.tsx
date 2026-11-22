@@ -2606,7 +2606,7 @@ const ATTENTION_MODES_BY_ENGINE: Record<Engine, AttentionMode[]> = {
 // Mirrors backend/generation.py INT8_ATTENTION_TESTED: int8 is offered only where the lab tested it.
 const INT8_MODES_BY_ENGINE: Partial<Record<Engine, string[]>> = {
   turbo: ['opening', 'lip_sync', 'frames'],
-  singularity: ['reference', 'opening'],
+  singularity: ['reference', 'opening', 'lip_sync'],
   ltx: ['lip_sync', 'opening', 'frames'],
 }
 

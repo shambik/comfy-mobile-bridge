@@ -69,6 +69,7 @@ class AttentionSettingsTests(unittest.TestCase):
         tested = [("turbo", "opening", 6, {}), ("turbo", "lip_sync", 6, {}), ("turbo", "frames", 6, {}),
                   ("singularity", "reference", 8, {"megapixels": 1.5, "aspect_ratio": "9:16"}),
                   ("singularity", "opening", 8, {"megapixels": 1.5, "aspect_ratio": "9:16"}),
+                  ("singularity", "lip_sync", 8, {"megapixels": 1.5, "aspect_ratio": "9:16"}),
                   ("ltx", "lip_sync", None, {}), ("ltx", "opening", None, {}), ("ltx", "frames", None, {})]
         for engine, mode, steps, extra in tested:
             settings = normalize_generation_settings(mode, engine, steps, attention_mode="int8", **extra)
@@ -149,6 +150,15 @@ class AttentionWorkflowTests(unittest.TestCase):
         chain = model_chain(skin)
         self.assertEqual(chain[-1], "ModelAttentionBackend")
         self.assertNotIn("PathchSageAttentionKJ", chain)
+        # Singularity lip-sync (issue #67): int8 sits after the tier LoRAs and feeds Native AudioLock, the same place
+        # the lab's int8 override put it (God 1.5 MP: Sage 584 s, int8 432 s, same frames).
+        lips = apply_attention_mode(singularity_workflow("test", 5, 1, "p", "skin_god", 928, 1632, [], mode="lip_sync",
+                                                         first_frame_name="f.png", audio_name="a.wav"), "int8")
+        attention = next(key for key, n in lips.items() if n["class_type"] == "ModelAttentionBackend")
+        turbo = next(key for key, n in lips.items() if n["class_type"] == "MiniMaxH3TurboLoRA")
+        self.assertEqual(lips[attention]["inputs"]["model"], [turbo, 0])
+        lock = next(n for n in lips.values() if n["class_type"] == "MiniMaxH3NativeAudioLock")
+        self.assertEqual(lock["inputs"]["model"], [attention, 0])
         ltx = apply_attention_mode(ltx_lipsync_workflow(prompt="close-up", duration=5.0, seed=4, prefix="p",
                                                         audio_name="a.wav", first_frame_name="f.png",
                                                         width=896, height=1600), "int8")
