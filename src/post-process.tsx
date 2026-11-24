@@ -86,7 +86,8 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
   job?: SourceJob; operation: PostSheetOperation; csrf: string; visualEnhancer?: boolean; onClose: () => void; onQueued: () => void
 }) {
   const external = !job
-  const detailSheet = !!job && initialOperation === 'detail'
+  const [externalDetail, setExternalDetail] = useState(false)   // H3 detail on an uploaded video (issue #69)
+  const detailSheet = (!!job && initialOperation === 'detail') || (!job && externalDetail)
   const [operation, setOperation] = useState<PostOperation>(initialOperation === 'detail' ? 'upscale' : initialOperation)
   const [method, setMethod] = useState(detailSheet ? 'h3detail' : METHODS[initialOperation === 'detail' ? 'upscale' : initialOperation][0].id)
   const [detailLevel, setDetailLevel] = useState('s45')
@@ -118,7 +119,10 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
     return () => { video.removeAttribute('src'); URL.revokeObjectURL(url) }
   }, [file])
 
-  const chooseOperation = (next: PostOperation) => { setOperation(next); setMethod(METHODS[next][0].id); setFpsTarget(0); setError('') }
+  const chooseOperation = (next: PostOperation | 'detail') => {
+    setExternalDetail(next === 'detail'); setError(''); setFpsTarget(0)
+    if (next !== 'detail') { setOperation(next); setMethod(METHODS[next][0].id) }
+  }
   const showRates = operation === 'interpolate' && method === 'rife' && !detailSheet
 
   const submit = async (event: FormEvent) => {
@@ -136,8 +140,9 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
       } else {
         const form = new FormData()
         form.append('video', file as File)
-        form.append('operation', operation)
-        form.append('method', method)
+        form.append('operation', detailSheet ? 'upscale' : operation)
+        form.append('method', detailSheet ? 'h3detail' : method)
+        if (detailSheet) { form.append('detail', detailLevel); if (detailPrompt.trim()) form.append('prompt', detailPrompt.trim()) }
         if (operation === 'upscale') form.append('long_side', String(longSide))
         if (showRates && fpsTarget) form.append('fps_target', String(fpsTarget))
         response = await fetch('/api/post-process', { method: 'POST', headers: { 'X-CSRF-Token': csrf }, body: form })
@@ -165,10 +170,10 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
         <span>{file ? file.name : 'בחר וידאו (MP4, MOV, WebM, MKV · עד 500MB)'}</span>
       </label>}
       {external && <div className="post-sheet-options post-sheet-sizes" role="radiogroup" aria-label="פעולה">
-        {(['upscale', 'interpolate'] as PostOperation[]).map(item => <button key={item} type="button" role="radio" aria-checked={operation === item}
-          className={operation === item ? 'active' : ''} onClick={() => chooseOperation(item)} disabled={busy}>
-          <strong>{item === 'upscale' ? 'הגדלה' : 'החלקת תנועה'}</strong><small>{item === 'upscale' ? 'לגודל 1920 או 2560' : 'פי 2 פריימים'}</small>
-        </button>)}
+        {(['upscale', 'interpolate', 'detail'] as const).map(item => { const active = item === 'detail' ? externalDetail : !externalDetail && operation === item; return <button key={item} type="button" role="radio" aria-checked={active}
+          className={active ? 'active' : ''} onClick={() => chooseOperation(item)} disabled={busy}>
+          <strong>{item === 'upscale' ? 'הגדלה' : item === 'interpolate' ? 'החלקת תנועה' : 'פרטים H3'}</strong><small>{item === 'upscale' ? 'לגודל 1920 או 2560' : item === 'interpolate' ? 'פי 2 פריימים' : 'ציור פרטים מחדש'}</small>
+        </button> })}
       </div>}
       {source && <p dir="ltr" className="post-sheet-source">{source.width}×{source.height} · {source.duration.toFixed(2)} s</p>}
       {detailSheet ? <div className="post-sheet-options" role="radiogroup" aria-label="עוצמת פרטים">

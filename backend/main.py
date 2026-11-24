@@ -3689,8 +3689,9 @@ swap_lab.set_job_queue(_queue_swap_job)
 @app.post("/api/post-process")
 async def post_process_upload(request: Request, video: UploadFile = File(...), operation: str = Form(...),
                               method: str = Form(...), long_side: int | None = Form(None),
-                              fps_target: int | None = Form(None)):
-    """Queue an upscale or interpolation of an uploaded video (same tested limits as finished jobs)."""
+                              fps_target: int | None = Form(None), detail: str | None = Form(None),
+                              prompt: str | None = Form(None)):
+    """Queue an upscale, interpolation or H3 detail pass (issue #69) of an uploaded video."""
     require_csrf(request)
     require_visual_enhancer(method)
     if video.content_type not in UPLOAD_TYPES:
@@ -3706,14 +3707,24 @@ async def post_process_upload(request: Request, video: UploadFile = File(...), o
                 if size > UPLOAD_MAX_BYTES:
                     raise HTTPException(400, "The video is larger than 500 MB")
                 handle.write(chunk)
+        prepared = INPUT / f".post_{new_id}_prepared.mp4"
         try:
-            probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
-            options = plan_post_process(probe, operation, method, long_side, fps_target)
+            if method == H3_DETAIL:   # issue #69: uploads too, fitted like any clip (24 fps, 17n+5 frames)
+                probe = await asyncio.to_thread(prepare_upload, raw, prepared)
+                options = plan_h3_detail(probe, None, detail, prompt)
+                out = await asyncio.to_thread(subprocess.run, h3_detail_input_command(options, prepared, INPUT / input_name),
+                                              capture_output=True, text=True, timeout=600)
+                if out.returncode or not (INPUT / input_name).is_file():
+                    raise ValueError("The video could not be prepared for H3 detail")
+            else:
+                probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
+                options = plan_post_process(probe, operation, method, long_side, fps_target)
         except ValueError as exc:
             (INPUT / input_name).unlink(missing_ok=True)
             raise HTTPException(400, str(exc)) from exc
     finally:
         raw.unlink(missing_ok=True)
+        prepared.unlink(missing_ok=True)
     filename = Path(video.filename or "video").name[:120]
     options["source_filename"] = filename
     return _queue_post_job(new_id, input_name, options, f"External video: {filename}",

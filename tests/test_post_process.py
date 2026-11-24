@@ -439,6 +439,23 @@ class UploadTests(ApiBase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(list(self.input.iterdir()), [])
 
+    def test_upload_takes_h3_detail(self):
+        # Issue #69: H3 detail on an uploaded video: 30 fps -> 24 fps, 17n+5 frames, neutral prompt, typed prompt.
+        clip = self.root / "phone30.mp4"
+        make_clip(clip, 640, 360, 30, 2)
+        response = self.upload(clip, {"operation": "upscale", "method": "h3detail", "detail": "s45"})
+        self.assertEqual(response.status_code, 200, response.text)
+        options = response.json()["options"]
+        self.assertEqual((options["method"], options["chain"], options["fps"], options["frames"], options["width"]),
+                         ("h3detail", "pika", 24.0, 39, 640))
+        self.assertTrue(options["prompt"])
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (response.json()["created"][0],)).fetchone())
+        self.assertEqual([p.name for p in self.input.iterdir()], [row["input_name"]])   # only the prepared clip
+        typed = self.upload(clip, {"operation": "upscale", "method": "h3detail", "detail": "s30", "prompt": "A dog."})
+        self.assertEqual(typed.json()["options"]["prompt"], "A dog.")
+        self.assertEqual(self.upload(clip, {"operation": "upscale", "method": "h3detail"}).status_code, 400)
+
     def test_wrong_type_is_refused(self):
         clip = self.root / "clip.gif"
         clip.write_bytes(b"GIF89a")
