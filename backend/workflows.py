@@ -877,6 +877,12 @@ LONG_TAKE_OVERLAP = 22
 LONG_TAKE_FIRST_FRAMES = 124
 LONG_TAKE_LATER_FRAMES = 141
 LONG_TAKE_SEPARATOR = "---"
+# The user's choice per long take (issue #80). Lab A/B 2026-11-24, same seed: text mode 2 x 5 s, both joins invisible
+# (sharpness change +4.0 % vs +3.1 %), part 2 moved ~30 % less with Hard picture, 612 s vs 592 s; the PRISM beast
+# 2 x 10 s jumped +97 % in sharpness at the join with Visual continuity and +41 % with Hard picture. Hard picture
+# carries 39 frames, so later parts render 158 frames (17n+5) and still deliver 119.
+LONG_TAKE_CONTINUITY = {"visual": ("Visual continuity", LONG_TAKE_OVERLAP),
+                        "hard": ("Hard picture + protected audio", 39)}
 LONG_TAKE_NODE_CLASSES = {
     "MiniMaxH3GenerationProfile", "MiniMaxH3ChainPlanModern", "MiniMaxH3ChainScenePromptEditor",
     "MiniMaxH3ChainPreflight", "MiniMaxH3ChainLoopStart", "MiniMaxH3ChainCurrent", "MiniMaxH3ChainContext",
@@ -904,8 +910,9 @@ def long_take_parts(prompt: str) -> list[str]:
     return [part for part in parts if part]
 
 
-def long_take_frames(parts: int) -> list[int]:
-    return [LONG_TAKE_FIRST_FRAMES] + [LONG_TAKE_LATER_FRAMES] * (parts - 1)
+def long_take_frames(parts: int, continuity: str = "visual") -> list[int]:
+    carried = LONG_TAKE_CONTINUITY[continuity][1]
+    return [LONG_TAKE_FIRST_FRAMES] + [LONG_TAKE_LATER_FRAMES - LONG_TAKE_OVERLAP + carried] * (parts - 1)
 
 
 _LONG_TAKE_RUN = re.compile(r"[A-Za-z0-9_.-]{1,120}")
@@ -978,7 +985,7 @@ def long_take_saved_count(saved: list[Path], start_clip: int, since: float) -> i
 
 
 def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, width: int, height: int,
-                       run_name: str, include_audio: bool = True) -> dict:
+                       run_name: str, include_audio: bool = True, continuity: str = "visual") -> dict:
     """Wrap a Singularity reference graph (singularity_workflow, mode "reference") in Context-Loop's scene loop.
 
     The model chain, LoRAs, sampler, attention, VAEs and references stay exactly as built; per part, Chain Current
@@ -988,12 +995,14 @@ def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, w
     if "136" not in nodes:
         raise ValueError("The long take wraps the Singularity reference graph")
     nodes = deepcopy(nodes)
-    frames = long_take_frames(len(prompts))
+    if continuity not in LONG_TAKE_CONTINUITY:
+        raise ValueError("Long-take continuity must be visual or hard")
+    frames = long_take_frames(len(prompts), continuity)
     shots = [{"id": f"part_{index + 1}", "prompt": text, "length": length,
               "seed": str((seed + index * 7919) % 2**48)}
              for index, (text, length) in enumerate(zip(prompts, frames))]
     nodes["300"] = {"class_type": "MiniMaxH3GenerationProfile", "inputs": {
-        "scene_continuity": "Visual continuity",
+        "scene_continuity": LONG_TAKE_CONTINUITY[continuity][0],
         "audio_profile": "Generate audio" if include_audio else "No final audio"}}
     nodes["301"] = {"class_type": "MiniMaxH3ChainPlanModern", "inputs": {
         "plan_json": json.dumps({"shots": shots}, ensure_ascii=False), "chain_policy": ["300", 0],

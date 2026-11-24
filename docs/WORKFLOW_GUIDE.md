@@ -680,6 +680,16 @@ prompt with blank lines inside; without `---`, blank lines separate the parts). 
 10 GB: the same setup with sol-attn sparse attention never finished its first step in 25 min (spilling at 9.96 GB).
 A held prop can be duplicated if a part asks for it (the lab's "glances at her phone" added a second phone).
 
+**Long-take continuity** (issue #80, skin option `continuity`, the user's choice per job; "המשכיות בין החלקים" under
+the long-take buttons): **Visual continuity** (default) guides each later part with the previous part's last 22 frames
+of picture and sound and lets it move freely; **Hard picture** (Context-Loop "Hard picture + protected audio") locks the
+last 39 frames of picture and sound, so later parts render 158 frames and still deliver 119. Lab A/B 2026-11-24, same
+seed, Singularity God int8, 1344x768, 2 x 5 s (text mode, `b08f8802` vs `d2a3e0ae`): part 1 identical, both joins
+invisible (sharpness change at the join +4.0 % vs +3.1 %, brightness step -0.09 vs +0.46), part 2 moved about 30 % less
+with Hard picture, 612 s vs 592 s, 9.5 GB each. On the PRISM beast (2 x 10 s, heavy fur and grade) Visual continuity
+jumped +97 % in sharpness at the join and Hard picture +41 %. So: keep Visual continuity for normal scenes; switch to
+Hard picture when a join visibly jumps. One seed per setting.
+
 **Realism reference** (keeper `a6331f7f`, 2026-11-20; user 2026-11-24: "This one is very good"). Start realistic
 people from this flow and change one thing at a time:
 

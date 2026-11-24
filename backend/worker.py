@@ -1099,7 +1099,8 @@ class QueueWorker:
                         raise RuntimeError(f"Long take needs {long_parts} prompt parts, found {len(parts)}")
                     workflow = long_take_workflow(
                         workflow, parts, seed, job["steps"], job["width"], job["height"],
-                        run_name=f"bridge_{job['id']}", include_audio=not bool(job.get("no_audio")))
+                        run_name=f"bridge_{job['id']}", include_audio=not bool(job.get("no_audio")),
+                        continuity=(skin_options or {}).get("continuity") or "visual")
         elif job["mode"] == "lip_sync":
             if job["engine"] == "fused_sla":
                 workflow_builder = "fused_sla_audio_lock_workflow"

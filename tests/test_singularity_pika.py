@@ -238,6 +238,25 @@ class LongTakeTests(unittest.TestCase):
         plan = json.loads(self.build(parts=["one", "two"])["301"]["inputs"]["plan_json"])
         self.assertEqual([shot["length"] for shot in plan["shots"]], [124, 141])
 
+    def test_continuity_is_the_users_choice(self):
+        # Issue #80: Visual continuity (default, 22 guide frames) or Hard picture (39 locked frames, later parts 158)
+        visual = self.build()
+        self.assertEqual(visual["300"]["inputs"]["scene_continuity"], "Visual continuity")
+        base = singularity_workflow(self.PROMPT, LONG_TAKE_PART_SECONDS, 7, "h3_bridge_x", "skin_god", 928, 1632,
+                                    ["ref.png"], mode="reference", steps=8)
+        hard = long_take_workflow(base, long_take_parts(self.PROMPT), 7, 8, 928, 1632, "bridge_x", continuity="hard")
+        self.assertEqual(hard["300"]["inputs"]["scene_continuity"], "Hard picture + protected audio")
+        lengths = [shot["length"] for shot in json.loads(hard["301"]["inputs"]["plan_json"])["shots"]]
+        self.assertEqual(lengths, [124, 158, 158])
+        self.assertTrue(all((length - 5) % 17 == 0 for length in lengths))  # H3's 17n+5 frame lattice
+        self.assertEqual(124 + 2 * (158 - 39), 124 + 2 * (141 - 22))  # the same take length either way
+        with self.assertRaises(ValueError):
+            long_take_workflow(base, ["a", "b"], 7, 8, 928, 1632, "run", continuity="loose")
+        self.assertEqual(normalize_skin_options('{"parts": 2, "continuity": "hard"}')["continuity"], "hard")
+        self.assertEqual(normalize_skin_options('{"parts": 2}')["continuity"], "visual")
+        with self.assertRaises(ValueError):
+            normalize_skin_options('{"parts": 2, "continuity": "loose"}')
+
     def test_only_the_reference_graph_can_be_wrapped(self):
         opening = singularity_workflow("x", 5, 1, "p", "skin_god", 928, 1632, [], mode="opening", steps=8, first_frame_name="a.png")
         with self.assertRaises(ValueError):
