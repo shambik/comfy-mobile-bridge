@@ -1,3 +1,4 @@
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -97,6 +98,7 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(second.status_code, 404)
         self.assertEqual(db_module.get_job(job_id)["runtime"]["long_take"]["parts"], 4)
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_long_take_part_is_played_with_its_sound(self):
         # Context-Loop keeps a part's picture and sound apart until assembly; the card gets them joined.
         job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
@@ -120,6 +122,7 @@ class JobApiTests(unittest.TestCase):
         self.assertEqual(sorted(streams), ["audio", "video"])
         self.assertEqual(response.content, joined.read_bytes())
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "needs FFmpeg")
     def test_failed_long_take_is_assembled_from_its_saved_parts(self):
         # 2026-11-22: Context-Loop refused a damaged checkpoint after part 4; the saved parts still make the video.
         job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
