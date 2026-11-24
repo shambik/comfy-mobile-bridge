@@ -33,6 +33,7 @@ type Phase = 'queued' | 'starting' | 'sampling' | 'processing' | 'verifying' | '
 type Page = 'studio' | 'production' | 'comfy' | 'video_vault' | 'h3_still' | 'bot_images'
 type RuntimeMetadata = {
   swap?: { window_now?: number }   // character swap: the window being sampled
+  long_take?: { run: string; parts: number; saved?: number }   // Context-Loop long take: parts saved so far
   captured_at?: string
   capture_error?: string
   bridge?: { python?: string; pid?: number }
@@ -2425,6 +2426,10 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
   const shownPrompt = swapPrompt(job) || job.prompt
   const swapWindows = job.swap_options?.windows || 0
   const swapWindow = swapWindows > 1 ? `${Math.max(1, job.runtime?.swap?.window_now || 1)}/${swapWindows}` : ''
+  // Context-Loop long take: the step counter restarts every part, so the card names the part and plays the saved ones
+  const longTake = job.runtime?.long_take && job.runtime.long_take.parts > 1 ? job.runtime.long_take : undefined
+  const longTakeSaved = Math.min(longTake?.parts || 0, longTake?.saved || 0)
+  const longTakePart = longTake ? `${Math.min(longTake.parts, longTakeSaved + 1)}/${longTake.parts}` : ''
   const phaseLabels: Record<Phase, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', sampling: 'יוצר פריימים', processing: 'מעבד וידאו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const active = ['starting', 'running', 'verifying'].includes(job.status)
   const engine = job.engine || (job.mode === 'reference' ? 'standard' : 'turbo')
@@ -2436,6 +2441,9 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
   const [promptExpanded, setPromptExpanded] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [openPart, setOpenPart] = useState<number | null>(null)
+  const [assembling, setAssembling] = useState(false)
+  const [assembleError, setAssembleError] = useState('')
   useEffect(() => {
     if (!active) return
     setNow(Date.now())
@@ -2486,10 +2494,30 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         <div className="progress-meta">
           {swap ? (phase === 'sampling' ? <span dir="ltr">{`Swapping${swapWindow ? ` · window ${swapWindow}` : ''}${hasStepProgress ? ` · step ${job.step || 0}/${job.total_steps}` : ''}`}</span>
             : <span>{phaseLabels[phase as Phase] || labels[job.status]}{swapWindow && active ? <bdi dir="ltr"> · window {swapWindow}</bdi> : ''}</span>)
-          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}</span>}
+          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{longTakePart && phase === 'sampling' ? <> · חלק <bdi dir="ltr">{longTakePart}</bdi></> : ''}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}</span>}
           <span>{elapsedSeconds !== undefined ? `עבר ${formatDuration(elapsedSeconds)}` : ''}{job.eta_seconds !== null && job.eta_seconds !== undefined ? ` · נשאר ~${formatDuration(job.eta_seconds)}` : ''}</span>
         </div>
       </div>}
+      {longTake && longTakeSaved > 0 && <div className="long-take-parts" dir="ltr">
+        <span>Parts</span>
+        {Array.from({ length: longTakeSaved }, (_, index) => index + 1).map(part => <button type="button" key={part}
+          className={openPart === part ? 'active' : ''} aria-pressed={openPart === part}
+          onClick={() => setOpenPart(current => current === part ? null : part)}><Play size={11} /> {part}</button>)}
+        {active && longTakeSaved < longTake.parts && <small>{longTakeSaved}/{longTake.parts} saved</small>}
+        {/* Context-Loop's own assembly did not finish (power cut, cancel after the last part, refused checkpoint):
+            join the saved parts so the card becomes a normal video with upscale / smoothing */}
+        {!job.video_url && ['failed', 'canceled'].includes(job.status) && longTakeSaved === longTake.parts && <button type="button"
+          className="long-take-assemble" disabled={assembling} onClick={async () => {
+            setAssembling(true); setAssembleError('')
+            try {
+              const response = await fetch(`/api/jobs/${job.id}/assemble-parts`, { method: 'POST', headers: { 'X-CSRF-Token': csrf || '' } })
+              if (!response.ok) setAssembleError((await response.json().catch(() => null))?.detail || `Error ${response.status}`)
+            } catch { setAssembleError('No connection') } finally { setAssembling(false) }
+          }}><Combine size={12} /> {assembling ? 'Joining…' : `Join all ${longTake.parts} parts`}</button>}
+        {assembleError && <small className="long-take-assemble-error">{assembleError}</small>}
+      </div>}
+      {longTake && openPart && openPart <= longTakeSaved && <video key={openPart} className="long-take-part-video"
+        src={`/api/jobs/${job.id}/parts/${openPart}`} controls autoPlay playsInline preload="metadata" />}
       {job.error && <div className="job-error">{job.error}</div>}
       <button className="advanced-log-toggle" type="button" onClick={() => setAdvancedOpen(current => !current)} aria-expanded={advancedOpen}><Terminal size={13} /> {advancedOpen ? 'הסתר פרטי ריצה' : 'פרטי ריצה מתקדמים'}</button>
       {advancedOpen && <div className="advanced-log" dir="ltr">

@@ -32,7 +32,7 @@ from .post_process import (H3_DETAIL, VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut
                            chunk_keep, decimate_command, h3_detail_workflow, post_node_classes, post_required_files,
                            post_process_workflow, uses_visual_enhancer, visual_enhancer_command,
                            visual_enhancer_finish_command)
-from .workflows import (graph_spec_workflow, official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
+from .workflows import (long_take_info, long_take_saved_count, long_take_saved_parts, long_take_start_clip, graph_spec_workflow, official_ltx_template_workflow, workflow_node_values, apply_attention_mode, apply_steady_memory, attention_node_classes, steady_memory_needed, STEADY_MEMORY_NODE,
                         apply_int8_decode, int8_decode_needed,
                         fused_sla_audio_lock_workflow, ltx_lipsync_workflow,
                         ltx_node_classes, ltx_reference_workflow, ltx_video_workflow,
@@ -1195,6 +1195,13 @@ class QueueWorker:
             workflow = apply_int8_decode(workflow)
         if steady_memory_needed(job["engine"], attention_mode):
             workflow = apply_steady_memory(workflow)
+        # Context-Loop long takes: the card shows "Part k/N" and plays each part as soon as
+        # Context-Loop saves it (user 2026-11-22: the card only said "step x/8", which restarts every part).
+        long_take = long_take_info(workflow)
+        if long_take:
+            long_take_start, long_take_since = long_take_start_clip(workflow), time.time()
+            runtime["long_take"] = {**long_take, "saved": long_take_saved_count(
+                long_take_saved_parts(OUTPUT, long_take["run"]), long_take_start, long_take_since)}
         runtime["workflow"] = {
             "builder": workflow_builder,
             "attention_mode": attention_mode,
@@ -1337,6 +1344,12 @@ class QueueWorker:
             while True:
                 if job["id"] in self.cancelled:
                     raise RuntimeError("Generation canceled")
+                if long_take:
+                    saved = long_take_saved_count(await asyncio.to_thread(long_take_saved_parts, OUTPUT, long_take["run"]),
+                                                  long_take_start, long_take_since)
+                    if saved != runtime["long_take"]["saved"]:
+                        runtime["long_take"]["saved"] = saved
+                        update_job(job["id"], runtime=runtime)
                 history, history_error = await self._read_comfy_history(prompt_id)
                 if history_error is not None:
                     consecutive_history_failures += 1
