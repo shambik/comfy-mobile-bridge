@@ -72,6 +72,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | More real detail in any finished shot | **RTX VSR** to 1920, then **פרטים H3** on that card (the button is on every finished video since issue #69) | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s at 1920; best results on Pika and Turbo v4 lip-sync shots (see "H3 detail" below) |
 | Change clothes, style or a head in a finished or uploaded video | **עריכה** on its card, or **עריכת וידאו** in the results header | 480×864 (default, ~2 min per 5 s) or 704×1280 (~5.5 min, sharper); 10 s at 480 only; outfit from photos at 480 only (see "H3 video edit" below) |
 | A character doing the moves of a video in a new place | **עריכה** → **העברת תנועה** | A library character or a sheet photo, three short boxes (character, what they do, new place); 480 (~3.5 min) or 704 (~6.5 min), 5 s (see "Motion transfer" below) |
+| The most realistic person on camera (skin, tears, talking to the lens) | **Singularity** reference, God tier, int8 attention, from a photo-style character sheet | Keeper `a6331f7f`: 1.5 MP, 8 steps, the official structured prompt; about 7 min per 5 s (see "Realism reference" below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
 
 ## H3 engines
@@ -679,6 +680,49 @@ prompt with blank lines inside; without `---`, blank lines separate the parts). 
 10 GB: the same setup with sol-attn sparse attention never finished its first step in 25 min (spilling at 9.96 GB).
 A held prop can be duplicated if a part asks for it (the lab's "glances at her phone" added a second phone).
 
+**Realism reference** (keeper `a6331f7f`, 2026-11-20; user 2026-11-24: "This one is very good"). Start realistic
+people from this flow and change one thing at a time:
+
+| What | Setting |
+| --- | --- |
+| Engine and mode | Singularity, **reference** mode, tier **God** (People realism LoRA `h3-realism-people-t2v-i2v-r2v` 1.0 + Turbo v4 step-600 EMA 1.0 on `Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8`) |
+| Sampler | T8 Dual-Clock, **8 steps**, scheduler `beta`, shift 12 video / 3 audio, no tail steps |
+| Attention | **int8** (opt-in, Comfy Kitchen backend) |
+| Size | **1.5 MP**, 16:9 = 1632x928, 5 s (124 frames), 24 fps, native generated sound; reference size `max` |
+| Reference | One **photo-style character sheet**: Image Lab, Krea text-to-image (`krea_t2i_workflow.json`, Flux Krea dev fp8, 20 steps, euler/simple, guidance 3.5) at 1344x768, four views of the same man on a plain light grey studio background, prompt ending "Shot on a 50mm lens, soft even studio light, natural unretouched skin with visible pores, true-to-life colour, high detail, no text, no labels, no watermark." |
+| Prompt | The official structured format below: `r34l1sm` trigger first, the subject defined from his picture with his full look, one shot with lens, light and small physical beats on a timeline, the line in `<d>[English] ...</d>` at a set time, a skin sentence at the end, and a short soundscape |
+| Seed | 8230861506706621414 |
+| Measured | 417 s generation, peak 9.48 GB VRAM, 49 GB RAM, no spill (ComfyUI 0.44, PyTorch 2.11) |
+
+The same prompt and sheet with Sage attention (`fd55f3f2`, another seed) took 503 s. The AI Brief dual-sampling graph in
+the lab (`3956c1bf`, `b0a4c50b`, Turbo-based, 1344x736) made the same scene; the user picked this one. One seed per
+setting, so this is a keeper, not a measured quality ranking.
+
+```text
+r34l1sm
+
+subject_definitions:
+<Subject 1> is the man from <Picture 1>, preserving his facial identity: a man in his early thirties with shoulder-length straight dark brown hair parted in the middle, a short dark stubble beard and moustache, brown eyes and olive skin, wearing a plain black crew-neck t-shirt. His identity and appearance remain consistent throughout.
+
+summary:
+[reference generation] A five-second cinematic close-up of <Subject 1> sitting by a window at golden hour, fighting back tears as he quietly admits something painful.
+
+retention_analysis:
+<Subject 1>: fully_preserved - facial identity, dark shoulder-length hair, stubble beard and moustache, brown eyes, black t-shirt remain consistent.
+<Picture 1>: fully_preserved - visual identity reference.
+
+detailed_description:
+[Shot 1] From 00:00.000, a locked-off cinematic close-up, the face of <Subject 1> filling the frame, shot on an 85mm lens with shallow depth of field. Warm golden sunlight comes through a window behind him, rimming his hair and shoulders with glowing light and leaving soft blurred window blinds in the background. His eyes are red and wet; a single tear runs slowly down his left cheek. He swallows, his jaw tightens, and his lower lip trembles. At 00:01.500 he looks straight into the lens and says quietly, his voice breaking:
+<d>[English] I didn't mean to leave like that.</d>
+At 00:04.000 he blinks slowly, another tear falls, and he takes an unsteady breath. Natural unretouched skin with visible pores, fine stubble and real tear tracks; true-to-life colour.
+
+overall_soundscape:
+Quiet room tone, a faint breeze through the window, his shaky breathing and a soft sniff.
+
+non_diegetic_music:
+N/A
+```
+
 **Pika** (engine `pika`, action): H3's own pruned base + the matching Pika H3 Flex LoRA, Pika's fixed 6 knots, ref size
 `match`. 1.5 MP, 9:16 or 16:9, 2-7 s. Standard attention by default: a 5 s job takes about 10.5-13 min (reference 630 s,
 text 667 s, lip-sync 713 s, opening 692-734 s, first + last 780 s). Clearly ahead of LTX for fights (keeper `620f17b2`), but
@@ -724,6 +768,68 @@ Fluffies shots; official first + last was rejected in review.
 LTX group dances: LTX moves everyone in a group with one shared motion, so give each of 2-3 characters a physically
 different move; a character drawn mid-air floats for the whole clip; a dense far crowd freezes, so draw a few big close
 extras; low-passed lip-sync audio makes characters freeze, so always send the real track.
+
+## H3 Context Loop audio choices on the RTX 3080
+
+Use **Generate audio** in the three-part Singularity Reference Context Loop when
+H3 should speak new dialogue in the reference voice and generate the surrounding
+sound during the same take. Attach the character image and an **Audio reference**,
+and use `<Audio 1>` for the speaker's voice in each part. Put the exact dialogue
+in the prompt and describe location sound in `overall_soundscape`. Review the
+result for pronunciation, accent, voice consistency, and A/V sync.
+
+The Lab Bridge's **Locked soundtrack** is useful when a delivered performance
+must keep its original voice, words, and timing, such as ADR or vocals. The audio
+starts at frame zero and must cover the full 362-frame, 15.083-second output for
+the three-part preset. Mix any known ambience into that soundtrack in advance or
+mix an effects track with it at finishing. The Context Loop's optional vocal
+mask can open gaps for audio denoising, while stock locked assembly still exports
+the source soundtrack. Generated effects under protected dialogue would need
+their own pass and a mix. See the [Context Loop audio guide](https://github.com/ethanfel/ComfyUI-MiniMaxH3-Context-Loop/blob/main/docs/AUDIO_AND_CONTINUITY.md).
+
+The original generated-audio job `3d77d3c7` finished in 32:49. The locked-audio
+hiker job `15f30218` kept the same 928×1632, 24 fps, eight-step, INT8 God settings,
+seed, and 22-frame overlaps. The character image and prompts changed as well as
+the audio profile, so this is a diagnostic comparison. Middle-part sampling went
+from 9:52 to 33:20, with median VRAM rising from 9,643 to 9,889 MiB and median GPU
+power falling from 326 W to 168 W. The locked path encodes each source window
+before sampling. The measurements show the slowdown coincided with memory
+pressure. They do not isolate the contribution of the audio encoder. The user
+canceled the run after 1:57 at step 7 of the third part. The first two parts were
+fully decoded and a 10.125-second preview was verified with the dialogue and a
+separately mixed forest and footstep track.
+
+After a ComfyUI restart, Lab Bridge job `a9d1c645` replayed the original
+30-node graph with only the character image and prompts changed. It used the
+original generated-audio profile with one image input. It completed in 36:18
+with sampling times of 7:22, 11:51, and 12:05 across the three parts. The
+15.083-second MP4 contained 362 frames at 928×1632 and stereo AAC, and passed
+ffprobe and full FFmpeg decode.
+
+For a 35-minute budget on the same GPU, the English pool vlog was retried at
+1.0 MP (768×1344) with the reference size set to `match`. H3 scaled the same
+photo proportionally to the output pixel area. The English prompts, seed,
+God INT8 tier, eight steps, overlaps, and native generated audio were preserved.
+Lab job `29b946df` finished in 16:48 wall time (16:44 generation). Its sampler
+times were 3:23, 5:16, and 5:17. The 362-frame MP4 and stereo AAC passed ffprobe
+and full FFmpeg decode. The original 1.5 MP attempt was canceled after it crossed
+the budget. These timings describe this run on the 10 GB RTX 3080.
+
+The 1.5 MP repeat used the same English prompt, uploaded image, seed, and
+sampler. It kept `match` and encoded the portrait reference at 992×1504. At
+928×1632 output, Lab job `e9339ffc` finished in 30:17 wall time (30:12
+generation), with 6:17, 9:57, and 9:57 of sampling across the three parts. The
+original 1.5 MP attempt used `max` and encoded the image at 1696×2528. The
+completed repeat passed ffprobe and full FFmpeg decode.
+
+With the same 1.5 MP `match` setup, Lab job `a19f9d0d` added a 4.74-second
+voice reference from a Hebrew recording to guide newly generated English speech.
+It kept the English lines and location sounds in the prompt. H3's native audio
+profile generated the soundtrack. The job finished in 30:41 wall time (30:35
+generation) with sampler times of 6:23, 10:06, and 10:07. The MP4 passed ffprobe
+and full FFmpeg decode. The automated English transcript recovered all three
+lines and flagged extra syllables around both joins, so review the voice and
+joins before using this take.
 
 ## Not tested yet
 
