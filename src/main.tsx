@@ -2494,7 +2494,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         <div className="progress-meta">
           {swap ? (phase === 'sampling' ? <span dir="ltr">{`Swapping${swapWindow ? ` · window ${swapWindow}` : ''}${hasStepProgress ? ` · step ${job.step || 0}/${job.total_steps}` : ''}`}</span>
             : <span>{phaseLabels[phase as Phase] || labels[job.status]}{swapWindow && active ? <bdi dir="ltr"> · window {swapWindow}</bdi> : ''}</span>)
-          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{longTakePart && phase === 'sampling' ? <bdi dir="ltr"> · חלק {longTakePart}</bdi> : ''}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}</span>}
+          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{longTakePart && phase === 'sampling' ? <> · חלק <bdi dir="ltr">{longTakePart}</bdi></> : ''}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}</span>}
           <span>{elapsedSeconds !== undefined ? `עבר ${formatDuration(elapsedSeconds)}` : ''}{job.eta_seconds !== null && job.eta_seconds !== undefined ? ` · נשאר ~${formatDuration(job.eta_seconds)}` : ''}</span>
         </div>
       </div>}
