@@ -1600,11 +1600,16 @@ class QueueWorker:
         shutil.rmtree(work, ignore_errors=True)
         work.mkdir(parents=True)
         output = OUTPUT / f"{prefix}_00001_.mp4"
-        runtime = {"job": {"mode": job["mode"], "engine": job["engine"], "method": options["method"],
-                           "width": job["width"], "height": job["height"], "duration": job["duration"],
-                           "seed": job.get("seed"), "no_audio": bool(job.get("no_audio"))},
-                   "chunks": {"count": len(chunks), "frames": [c["count"] for c in chunks],
-                              "borrowed_next_frame": any(c["borrow"] for c in chunks)}}
+        # The run-details panel reads the same runtime record as every other job: ComfyUI / PyTorch / CUDA versions,
+        # the workflow and its nodes, the prompt ID (issue #78: the panel was empty on every upscale).
+        runtime = {} if ve else await self.comfy.runtime_metadata()
+        runtime.update({"job": {"mode": job["mode"], "engine": job["engine"], "method": options["method"],
+                                "width": job["width"], "height": job["height"], "duration": job["duration"],
+                                "seed": job.get("seed"), "no_audio": bool(job.get("no_audio"))},
+                        "chunks": {"count": len(chunks), "frames": [c["count"] for c in chunks],
+                                   "borrowed_next_frame": any(c["borrow"] for c in chunks)}})
+        if ve:
+            runtime["workflow"] = {"builder": f"visual_enhancer_cli ({options['method']}), {len(chunks)} chunks"}
         update_job(job["id"], status="running", phase="sampling", progress=0, step=0, total_steps=len(chunks),
                    runtime=runtime, eta_seconds=round(estimated_total, 1) if estimated_total else None)
         started = time.monotonic()
@@ -1648,9 +1653,17 @@ class QueueWorker:
                     shutil.copyfile(piece, INPUT / name)
                     leftovers.append(INPUT / name)
                     chunk_prefix = f"{prefix}_chunk{index}"
-                    prompt_id = await self.comfy.submit(post_process_workflow(piece_options, name, chunk_prefix),
-                                                        str(uuid.uuid4()))
+                    chunk_workflow = post_process_workflow(piece_options, name, chunk_prefix)
+                    if "workflow" not in runtime:
+                        runtime["workflow"] = {
+                            "builder": f"post_process_workflow ({options['method']}), {len(chunks)} chunks",
+                            "node_count": len(chunk_workflow),
+                            "node_classes": sorted({str(node.get("class_type")) for node in chunk_workflow.values()}),
+                            "nodes": workflow_node_values(chunk_workflow),
+                            "nodes_note": "Chunk 1's graph; later chunks differ only in their input clip and frame count."}
+                    prompt_id = await self.comfy.submit(chunk_workflow, str(uuid.uuid4()))
                     runtime.setdefault("comfy", {}).setdefault("prompt_ids", []).append(prompt_id)
+                    runtime["comfy"]["prompt_id"] = prompt_id
                     update_job(job["id"], prompt_id=prompt_id, runtime=runtime)
                     while True:
                         if job["id"] in self.cancelled:
