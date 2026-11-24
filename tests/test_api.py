@@ -81,6 +81,46 @@ class JobApiTests(unittest.TestCase):
             connection.close()
         self.assertEqual(row, ("v4", 6))
 
+    def test_whole_history_loads_past_500_jobs(self):
+        # Issue #76: "load all" asks for every job; the old cap of 500 left "N remaining" forever.
+        first = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        connection = sqlite3.connect(self.path)
+        try:
+            columns = [row[1] for row in connection.execute("PRAGMA table_info(jobs)")]
+            row = connection.execute(f"SELECT {','.join(columns)} FROM jobs WHERE id=?", (first,)).fetchone()
+            copies = []
+            for index in range(1, 620):
+                values = dict(zip(columns, row))
+                values.update(id=f"{index:032x}", position=index + 1, status="completed")
+                copies.append(tuple(values[column] for column in columns))
+            connection.executemany(f"INSERT INTO jobs ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                                   copies)
+            connection.commit()
+        finally:
+            connection.close()
+        page = self.client.get("/api/jobs?limit=620&include_library=false&include_sequences=false").json()
+        self.assertEqual(page["jobs_total"], 620)
+        self.assertEqual(len(page["jobs"]), 620)
+
+    def test_job_list_leaves_full_run_details_to_the_job_route(self):
+        # Issue #76: the list carries only what a card shows; the run-details panel loads the rest per job.
+        job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        plain = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        runtime = {"comfy": {"version": "0.44.0", "command_line": "python main.py"},
+                   "workflow": {"builder": "turbo_workflow", "nodes": [{"id": "1", "class_type": "X", "inputs": {}}]},
+                   "long_take": {"run": "bridge_x", "parts": 2, "saved": 1}, "swap": {"window_now": 2}}
+        db_module.update_job(job_id, runtime=runtime)
+        listed = {job["id"]: job for job in self.client.get("/api/jobs?limit=10&include_library=false").json()["jobs"]}
+        self.assertEqual(listed[job_id]["runtime"], {"long_take": runtime["long_take"], "swap": runtime["swap"]})
+        self.assertTrue(listed[job_id]["runtime_details"])
+        self.assertIsNone(listed[plain]["runtime"])
+        self.assertFalse(listed[plain]["runtime_details"])
+        detail = self.client.get(f"/api/jobs/{job_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["runtime"], runtime)
+        self.assertEqual(self.client.get("/api/jobs/not-a-job").status_code, 404)
+        self.assertEqual(self.client.get("/api/jobs/revision").status_code, 200)  # still its own route
+
     def test_long_take_parts_play_while_the_job_renders(self):
         job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
         self.assertEqual(self.client.get(f"/api/jobs/{job_id}/parts/1").status_code, 404)  # not a long take

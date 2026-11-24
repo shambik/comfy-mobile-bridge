@@ -53,7 +53,7 @@ type Job = {
   engine: Engine; workflow_variant?: FusedWorkflow | string; turbo_profile?: TurboProfile; attention_mode?: AttentionMode | string; ltx_reference_model?: LtxReferenceModel | null; ltx_sharp_decode?: boolean | number; ltx_calm_sampler?: boolean | number; skin_options_json?: string | null; ltx_recipe?: string | null; post_options?: PostOptions | null; encoder: Encoder; steps: number; width: number; height: number; megapixels?: number; aspect_ratio?: string; seed?: string; position?: number;
   phase?: Phase; step?: number; total_steps?: number; eta_seconds?: number | null;
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
-  metrics?: { generation_seconds?: number; ffprobe?: { streams?: { codec_type?: string; width?: number; height?: number }[] } }; runtime?: RuntimeMetadata | null;
+  metrics?: { generation_seconds?: number; ffprobe?: { streams?: { codec_type?: string; width?: number; height?: number }[] } }; runtime?: RuntimeMetadata | null; runtime_details?: boolean;
   swap_options?: { windows?: number; steps?: number; card?: { kind?: string; tags?: string[]; variant?: string };
     graph?: { set?: Record<string, unknown>; add?: Record<string, { class_type?: string; inputs?: Record<string, unknown> }> } } | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
 }
@@ -2441,6 +2441,18 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
   const [promptExpanded, setPromptExpanded] = useState(false)
   const [promptCopied, setPromptCopied] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  // The job list leaves out the full run details (issue #76); the panel loads them for this job when it opens
+  const [runDetails, setRunDetails] = useState<RuntimeMetadata | null | undefined>(undefined)
+  useEffect(() => {
+    if (!advancedOpen || !job.runtime_details) return
+    let alive = true
+    fetch(`/api/jobs/${job.id}`, { cache: 'no-store' })
+      .then(response => response.ok ? response.json() : null)
+      .then(data => { if (alive) setRunDetails(data?.runtime ?? null) })
+      .catch(() => { if (alive) setRunDetails(current => current ?? null) })
+    return () => { alive = false }
+  }, [advancedOpen, job.id, job.runtime_details, job.status, job.step])
+  const panelRuntime: RuntimeMetadata | null | undefined = job.runtime_details ? runDetails : (job.runtime ?? null)
   const [openPart, setOpenPart] = useState<number | null>(null)
   const [assembling, setAssembling] = useState(false)
   const [assembleError, setAssembleError] = useState('')
@@ -2521,12 +2533,13 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       {job.error && <div className="job-error">{job.error}</div>}
       <button className="advanced-log-toggle" type="button" onClick={() => setAdvancedOpen(current => !current)} aria-expanded={advancedOpen}><Terminal size={13} /> {advancedOpen ? 'הסתר פרטי ריצה' : 'פרטי ריצה מתקדמים'}</button>
       {advancedOpen && <div className="advanced-log" dir="ltr">
-        {!job.runtime && <p>אין נתוני runtime שמורים עבור עבודה זו.</p>}
-        {job.runtime && <>
-          <div className="advanced-log-summary"><b>{job.runtime.comfy?.version || 'ComfyUI לא ידוע'}</b><span>{job.runtime.comfy?.pytorch || 'PyTorch לא ידוע'}</span><span>CUDA {job.runtime.comfy?.cuda || 'לא ידוע'}</span><span>{job.runtime.comfy?.commit?.commit?.slice(0, 12) || 'commit לא ידוע'}</span></div>
-          <dl><dt>ComfyUI root</dt><dd>{job.runtime.comfy?.root || '—'}</dd><dt>ComfyUI Python</dt><dd>{job.runtime.comfy?.python || '—'}</dd><dt>Bridge Python</dt><dd>{job.runtime.bridge?.python || '—'}</dd><dt>Command line</dt><dd>{job.runtime.comfy?.command_line || '—'}</dd><dt>Workflow</dt><dd>{job.runtime.workflow?.builder || '—'} · {job.runtime.workflow?.node_count ?? '—'} nodes</dd><dt>Prompt ID</dt><dd>{job.runtime.comfy?.prompt_id || '—'}</dd></dl>
-          {job.runtime.workflow?.nodes && <details open><summary>Nodes and values ({job.runtime.workflow.nodes.length})</summary>{job.runtime.workflow.nodes_note && <p className="node-note">{job.runtime.workflow.nodes_note}</p>}<table className="node-values"><tbody>{job.runtime.workflow.nodes.map(node => <tr key={node.id}><td>#{node.id}</td><td><b>{node.class_type}</b></td><td>{Object.entries(node.inputs).map(([key, value]) => <div key={key}><span>{key}</span> {nodeValueText(value)}</div>)}</td></tr>)}</tbody></table></details>}
-          <details><summary>Full runtime JSON</summary><pre>{JSON.stringify(job.runtime, null, 2)}</pre></details>
+        {panelRuntime === undefined && <p>טוען פרטי ריצה…</p>}
+        {panelRuntime === null && <p>אין נתוני runtime שמורים עבור עבודה זו.</p>}
+        {panelRuntime && <>
+          <div className="advanced-log-summary"><b>{panelRuntime.comfy?.version || 'ComfyUI לא ידוע'}</b><span>{panelRuntime.comfy?.pytorch || 'PyTorch לא ידוע'}</span><span>CUDA {panelRuntime.comfy?.cuda || 'לא ידוע'}</span><span>{panelRuntime.comfy?.commit?.commit?.slice(0, 12) || 'commit לא ידוע'}</span></div>
+          <dl><dt>ComfyUI root</dt><dd>{panelRuntime.comfy?.root || '—'}</dd><dt>ComfyUI Python</dt><dd>{panelRuntime.comfy?.python || '—'}</dd><dt>Bridge Python</dt><dd>{panelRuntime.bridge?.python || '—'}</dd><dt>Command line</dt><dd>{panelRuntime.comfy?.command_line || '—'}</dd><dt>Workflow</dt><dd>{panelRuntime.workflow?.builder || '—'} · {panelRuntime.workflow?.node_count ?? '—'} nodes</dd><dt>Prompt ID</dt><dd>{panelRuntime.comfy?.prompt_id || '—'}</dd></dl>
+          {panelRuntime.workflow?.nodes && <details open><summary>Nodes and values ({panelRuntime.workflow.nodes.length})</summary>{panelRuntime.workflow.nodes_note && <p className="node-note">{panelRuntime.workflow.nodes_note}</p>}<table className="node-values"><tbody>{panelRuntime.workflow.nodes.map(node => <tr key={node.id}><td>#{node.id}</td><td><b>{node.class_type}</b></td><td>{Object.entries(node.inputs).map(([key, value]) => <div key={key}><span>{key}</span> {nodeValueText(value)}</div>)}</td></tr>)}</tbody></table></details>}
+          <details><summary>Full runtime JSON</summary><pre>{JSON.stringify(panelRuntime, null, 2)}</pre></details>
         </>}
       </div>}
       <div className="job-actions">

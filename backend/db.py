@@ -420,6 +420,11 @@ def row_dict(row):
     return item
 
 
+# The Studio asks for its whole history when you load it all (issue #76: the old cap of 500 left "N remaining"
+# forever on a 1,581-job history).
+LIST_LIMIT = 5000
+
+
 def list_jobs(
     include_sequence_children: bool = False,
     *,
@@ -438,7 +443,7 @@ def list_jobs(
     limit_clause = ""
     if limit is not None:
         limit_clause = " LIMIT ? OFFSET ?"
-        params.append(max(1, min(int(limit), 500)))
+        params.append(max(1, min(int(limit), LIST_LIMIT)))
         params.append(max(0, int(offset)))
     with connect() as db:
         rows = db.execute(f"""
