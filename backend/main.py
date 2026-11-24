@@ -1016,6 +1016,19 @@ async def lock_system(request: Request):
 ACTIVE_JOB_STATUSES = {"queued", "starting", "running", "verifying"}
 
 
+# The job list carries only the run details a card shows (long-take parts, swap window). The full record (ComfyUI
+# versions, command line, every node and value) was ~75 % of the list: 4.5 of 5.9 MB for 500 jobs, re-sent on every
+# change. The run-details panel loads it per job from /api/jobs/{id} (issue #76).
+LIST_RUNTIME_KEYS = ("long_take", "swap")
+
+
+def job_list_view(job: dict) -> dict:
+    runtime = job.get("runtime") or None
+    job["runtime_details"] = bool(runtime)
+    job["runtime"] = {key: runtime[key] for key in LIST_RUNTIME_KEYS if key in runtime} if runtime else None
+    return job
+
+
 @app.get("/api/jobs")
 async def jobs(
     limit: int | None = None,
@@ -1038,7 +1051,7 @@ async def jobs(
     else:
         listed = list_jobs(limit=limit, offset=offset, statuses=requested_statuses or None)
     payload: dict[str, Any] = {
-        "jobs": listed,
+        "jobs": [job_list_view(job) for job in listed],
         "jobs_total": count_jobs(statuses=requested_statuses or None),
         "revision": jobs_revision(),
         **public_health(),
@@ -1054,6 +1067,15 @@ async def jobs(
 async def job_catalog_revision():
     """Lightweight polling endpoint used between full Studio refreshes."""
     return {"revision": jobs_revision(), **public_health()}
+
+
+@app.get("/api/jobs/{job_id}")
+async def job_detail(job_id: str):
+    """One job with its full run details, for the card's "פרטי ריצה מתקדמים" panel (the list leaves them out)."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 @app.get("/api/library")
