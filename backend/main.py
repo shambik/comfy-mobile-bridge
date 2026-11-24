@@ -42,7 +42,9 @@ from .db import (connect, count_jobs, get_job, get_sequence, init_db, jobs_revis
 from .generation import (LONG_TAKE_PART_SECONDS, LONG_TAKE_PROMPT_LIMIT, LTX_DURATION_RANGE, LTX_REFERENCE_MAX_DURATION,
                          OMNI_DURATION_RANGE, PIKA_TURBO4_MAX_DURATION, SKIN_DURATION_RANGE,
                          normalize_generation_settings, normalize_skin_options)
-from .workflows import LONG_TAKE_SEPARATOR, SKIN_PEOPLE_LORA, long_take_parts, skin_loras, skin_prompt
+from .workflows import (LONG_TAKE_SEPARATOR, SKIN_PEOPLE_LORA, long_take_parts, long_take_saved_parts, skin_loras,
+                        skin_prompt)
+from .config import OUTPUT as COMFY_OUTPUT
 from .h3_still import H3StillError, delete_h3_still, get_h3_still, has_active_h3_still, inspect_h3_still, start_h3_still
 from .bot_images import (BotImageError, catalog as bot_image_catalog, compatibility as bot_image_compatibility, delete_run as delete_bot_image_run,
                          get_run as get_bot_image_run, has_active_run as has_active_bot_image_run,
@@ -3941,6 +3943,122 @@ def _job_input_asset_path(job: dict, asset_key: str) -> Path | None:
         return None
     path = Path(path_value).resolve()
     return path if path.is_file() else None
+
+
+@app.get("/api/jobs/{job_id}/parts/{part}")
+async def job_long_take_part(job_id: str, part: int):
+    """One saved part of a Context-Loop long take, playable while the job still renders. The run folder comes from
+    the job's own runtime record (written by the worker from its graph), never from the client."""
+    job = get_job(job_id)
+    long_take = ((job or {}).get("runtime") or {}).get("long_take") or {}
+    run = str(long_take.get("run") or "")
+    if not job or not run:
+        raise HTTPException(404, "Not a long take")
+    saved = await asyncio.to_thread(long_take_saved_parts, COMFY_OUTPUT, run)
+    if not 1 <= part <= len(saved):
+        raise HTTPException(404, "That part is not saved yet")
+    video = saved[part - 1]
+    # Context-Loop saves each part's picture (segments/*.mp4, no audio track) and sound (generated_audio/*.wav)
+    # separately and only joins them at assembly; join them here so the card plays the part with its sound.
+    audio = video.parent.parent / "generated_audio" / f"{video.stem}.wav"
+    if audio.is_file():
+        preview = STATE / "long_take_parts" / run / video.name
+        if not preview.is_file() or preview.stat().st_mtime < max(video.stat().st_mtime, audio.stat().st_mtime):
+            await asyncio.to_thread(_mux_long_take_part, video, audio, preview)
+        video = preview
+    return FileResponse(video, media_type="video/mp4", filename=f"{job_id[:8]}_part{part}.mp4")
+
+
+def _mux_long_take_part(video: Path, audio: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(".partial.mp4")
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-shortest", "-movflags", "+faststart", str(partial)],
+        capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        partial.unlink(missing_ok=True)
+        raise HTTPException(500, f"Could not join the part's picture and sound: {result.stderr.strip()[:300]}")
+    partial.replace(target)
+
+
+@app.post("/api/jobs/{job_id}/assemble-parts")
+async def assemble_long_take_parts(job_id: str, request: Request):
+    """Join a long take's saved parts into the job's video when Context-Loop's own assembly did not finish (the PC lost
+    power, the job was canceled after the last part, or assembly refused a checkpoint as on 2026-11-22). Uses only the
+    saved part videos and their generated sound, the files the card already plays, so the job becomes a normal finished
+    video with upscale / interpolation. Every part must be saved."""
+    require_csrf(request)
+    from .comfy import media_probe
+    from .db import update_job
+    from .library import finalize_completed_asset
+
+    job = get_job(job_id)  # the public view carries the parsed runtime record
+    if not job:
+        raise HTTPException(404, "Job not found")
+    long_take = (job.get("runtime") or {}).get("long_take") or {}
+    run, parts = str(long_take.get("run") or ""), int(long_take.get("parts") or 0)
+    if not run or parts < 2:
+        raise HTTPException(400, "Not a long take")
+    if job["status"] not in ("failed", "canceled"):
+        raise HTTPException(409, "Only a failed or canceled long take is assembled from its saved parts")
+    saved = await asyncio.to_thread(long_take_saved_parts, COMFY_OUTPUT, run)
+    if len(saved) != parts:
+        raise HTTPException(409, f"{len(saved)} of {parts} parts are saved; every part is needed")
+    audio = [video.parent.parent / "generated_audio" / f"{video.stem}.wav" for video in saved]
+    with_audio = not job.get("no_audio")
+    if with_audio and not all(path.is_file() for path in audio):
+        raise HTTPException(409, "A saved part is missing its sound")
+    target = COMFY_OUTPUT / f"h3_bridge_{job_id}_00001_.mp4"
+    if target.exists():
+        raise HTTPException(409, "This job already has a video")
+    await asyncio.to_thread(_concat_long_take_parts, saved, audio if with_audio else [], target)
+    try:
+        probe = await asyncio.to_thread(media_probe, target, require_audio=with_audio)
+    except Exception as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(500, f"The joined video failed its check: {exc}") from exc
+    with connect() as db:
+        row = db.execute("SELECT metrics_json FROM jobs WHERE id=?", (job_id,)).fetchone()
+    metrics = json.loads((row["metrics_json"] if row else None) or "{}")
+    metrics.update({"ffprobe": probe, "assembled_from_parts": {
+        "parts": [path.name for path in saved], "previous_error": job.get("error"), "at": now_iso()}})
+    update_job(job_id, status="completed", phase="completed", progress=1, eta_seconds=0, output_path=str(target),
+               metrics=metrics, error=None)
+    await asyncio.to_thread(finalize_completed_asset, "job", job_id)
+    return get_job(job_id)
+
+
+def _concat_entry(path: Path) -> str:
+    """One line of an ffmpeg concat list; a quote inside the path is closed, escaped and reopened."""
+    quoted = path.resolve().as_posix().replace("'", "'\\''")
+    return f"file '{quoted}'\n"
+
+
+def _concat_long_take_parts(videos: list[Path], audio: list[Path], target: Path) -> None:
+    """Context-Loop saves trimmed parts (no overlap), so they join end to end: picture stream-copied, sound re-encoded."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(".partial.mp4")
+    lists = []
+    try:
+        command = ["ffmpeg", "-v", "error", "-y"]
+        for files in (videos, audio):
+            if not files:
+                continue
+            listing = target.with_name(f".{target.stem}.{len(lists)}.concat.txt")
+            listing.write_text("".join(_concat_entry(path) for path in files), encoding="utf-8")
+            lists.append(listing)
+            command += ["-f", "concat", "-safe", "0", "-i", str(listing)]
+        command += ["-map", "0:v:0"] + (["-map", "1:a:0", "-c:a", "aac", "-b:a", "256k"] if audio else [])
+        command += ["-c:v", "copy", "-movflags", "+faststart", str(partial)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise HTTPException(500, f"Could not join the parts: {result.stderr.strip()[:300]}")
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
+        for listing in lists:
+            listing.unlink(missing_ok=True)
 
 
 @app.get("/api/jobs/{job_id}/input/{asset_key}")

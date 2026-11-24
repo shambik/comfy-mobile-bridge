@@ -9,7 +9,7 @@ from backend.generation import (PIKA_OPTIONS, PIKA_TURBO4_MODES, PIKA_TURBO4_OPT
                                 normalize_generation_settings, normalize_skin_options, pika_options)
 from backend.worker import history_retry_phase
 from backend.workflows import (LONG_TAKE_NODE_CLASSES, LONG_TAKE_PART_SECONDS, apply_attention_mode, apply_steady_memory,
-                               long_take_parts, long_take_workflow, official_ltx_template_workflow, singularity_app_workflow,
+                               long_take_info, long_take_parts, long_take_saved_parts, long_take_workflow, official_ltx_template_workflow, singularity_app_workflow,
                                singularity_workflow, steady_memory_needed,
                                skin_loras, skin_prompt, turbo_workflow, workflow_node_values)
 
@@ -182,6 +182,57 @@ class LongTakeTests(unittest.TestCase):
         silent = self.build(include_audio=False)
         self.assertNotIn("audio", silent["91"]["inputs"])
         self.assertEqual(silent["300"]["inputs"]["audio_profile"], "No final audio")
+
+    def test_info_reads_run_and_part_count_from_the_plan(self):
+        self.assertEqual(long_take_info(self.build()), {"run": "bridge_x", "parts": 3})
+        self.assertEqual(long_take_info(self.build(parts=["a", "b", "c", "d"])), {"run": "bridge_x", "parts": 4})
+        plain = singularity_workflow("x", 5, 1, "p", "skin_god", 928, 1632, ["ref.png"], mode="reference", steps=8)
+        self.assertIsNone(long_take_info(plain))
+        unsafe = self.build()
+        unsafe["301"]["inputs"]["run_name"] = "../escape"
+        self.assertIsNone(long_take_info(unsafe))
+
+    def test_saved_parts_are_the_newest_revision_of_each_part_in_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            segments = root / "h3_chains" / "bridge_x" / "segments"
+            segments.mkdir(parents=True)
+            self.assertEqual(long_take_saved_parts(root, "bridge_x"), [])
+            (segments / "clip_0001.aaaa.mp4").write_bytes(b"old")
+            (segments / "clip_0001.aaaa.prompt.txt").write_text("prompt")
+            newer = segments / "clip_0001.bbbb.mp4"
+            newer.write_bytes(b"new")
+            import os
+            os.utime(segments / "clip_0001.aaaa.mp4", (1, 1))
+            (segments / "clip_0003.cccc.mp4").write_bytes(b"gap")  # part 2 missing: stop at part 1
+            self.assertEqual(long_take_saved_parts(root, "bridge_x"), [newer])
+            (segments / "clip_0002.dddd.mp4").write_bytes(b"two")
+            self.assertEqual([path.name for path in long_take_saved_parts(root, "bridge_x")],
+                             ["clip_0001.bbbb.mp4", "clip_0002.dddd.mp4", "clip_0003.cccc.mp4"])
+            self.assertEqual(long_take_saved_parts(root, ".."), [])
+            self.assertEqual(long_take_saved_parts(root, "missing_run"), [])
+
+    def test_saved_count_ignores_old_revisions_of_parts_a_resumed_job_redoes(self):
+        import os
+        from backend.workflows import long_take_saved_count, long_take_start_clip
+        with tempfile.TemporaryDirectory() as temp:
+            parts = []
+            for index in range(1, 5):
+                path = Path(temp) / f"clip_000{index}.aaaa.mp4"
+                path.write_bytes(b"x")
+                os.utime(path, (100, 100))  # all four saved by an earlier, cancelled job
+                parts.append(path)
+            self.assertEqual(long_take_saved_count(parts, 1, 50), 4)  # fresh job, files newer than its start
+            self.assertEqual(long_take_saved_count(parts, 3, 200), 2)  # redo from part 3: old 3 and 4 do not count
+            os.utime(parts[2], (300, 300))  # this job saved its part 3
+            self.assertEqual(long_take_saved_count(parts, 3, 200), 3)
+            self.assertEqual(long_take_saved_count(parts[:1], 3, 200), 1)  # fewer files than start_clip - 1
+        graph = self.build()
+        self.assertEqual(long_take_start_clip(graph), 1)
+        loop_start = next(n for n in graph.values() if n.get("class_type") == "MiniMaxH3ChainLoopStart")
+        loop_start["inputs"]["start_clip"] = 3
+        self.assertEqual(long_take_start_clip(graph), 3)
+        self.assertEqual(long_take_start_clip({}), 1)
 
     def test_two_parts(self):
         plan = json.loads(self.build(parts=["one", "two"])["301"]["inputs"]["plan_json"])

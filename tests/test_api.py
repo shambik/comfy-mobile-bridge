@@ -1,4 +1,5 @@
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,91 @@ class JobApiTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(row, ("v4", 6))
+
+    def test_long_take_parts_play_while_the_job_renders(self):
+        job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}/parts/1").status_code, 404)  # not a long take
+        root = Path(self.temp.name) / "output"
+        segments = root / "h3_chains" / "velora_ad_1" / "segments"
+        segments.mkdir(parents=True)
+        (segments / "clip_0001.ab12.mp4").write_bytes(b"part-one")
+        db_module.update_job(job_id, runtime={"long_take": {"run": "velora_ad_1", "parts": 4, "saved": 1}})
+        with patch("backend.main.COMFY_OUTPUT", root):
+            first = self.client.get(f"/api/jobs/{job_id}/parts/1")
+            second = self.client.get(f"/api/jobs/{job_id}/parts/2")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.content, b"part-one")
+        self.assertEqual(first.headers["content-type"], "video/mp4")
+        self.assertEqual(second.status_code, 404)
+        self.assertEqual(db_module.get_job(job_id)["runtime"]["long_take"]["parts"], 4)
+
+    def test_long_take_part_is_played_with_its_sound(self):
+        # Context-Loop keeps a part's picture and sound apart until assembly; the card gets them joined.
+        job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        root = Path(self.temp.name) / "output"
+        run = root / "h3_chains" / "velora_ad_2"
+        (run / "segments").mkdir(parents=True)
+        (run / "generated_audio").mkdir()
+        video = run / "segments" / "clip_0001.ab12.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=24:d=1", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", str(video)], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        str(run / "generated_audio" / "clip_0001.ab12.wav")], check=True)
+        db_module.update_job(job_id, runtime={"long_take": {"run": "velora_ad_2", "parts": 2, "saved": 1}})
+        state = Path(self.temp.name) / "state"
+        with patch("backend.main.COMFY_OUTPUT", root), patch("backend.main.STATE", state):
+            response = self.client.get(f"/api/jobs/{job_id}/parts/1")
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        joined = state / "long_take_parts" / "velora_ad_2" / "clip_0001.ab12.mp4"
+        streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+                                  str(joined)], capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(sorted(streams), ["audio", "video"])
+        self.assertEqual(response.content, joined.read_bytes())
+
+    def test_failed_long_take_is_assembled_from_its_saved_parts(self):
+        # 2026-11-22: Context-Loop refused a damaged checkpoint after part 4; the saved parts still make the video.
+        job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        root = Path(self.temp.name) / "output"
+        run = root / "h3_chains" / "velora_ad_3"
+        (run / "segments").mkdir(parents=True)
+        (run / "generated_audio").mkdir()
+        for index, colour in ((1, "red"), (2, "blue")):
+            stem = f"clip_000{index}.ab{index}c"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c={colour}:s=64x64:r=24:d=1",
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(run / "segments" / f"{stem}.mp4")], check=True)
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                            str(run / "generated_audio" / f"{stem}.wav")], check=True)
+        headers = {"X-CSRF-Token": self.token}
+        db_module.update_job(job_id, status="failed", error="H3 chain clip 2 checkpoint failed its SHA-256 integrity check.",
+                             runtime={"long_take": {"run": "velora_ad_3", "parts": 3, "saved": 2}})
+        with patch("backend.main.COMFY_OUTPUT", root), patch("backend.library.finalize_completed_asset", return_value=None):
+            missing = self.client.post(f"/api/jobs/{job_id}/assemble-parts", headers=headers)
+            self.assertEqual(missing.status_code, 409, missing.text)  # part 3 not saved
+            db_module.update_job(job_id, runtime={"long_take": {"run": "velora_ad_3", "parts": 2, "saved": 2}})
+            joined = self.client.post(f"/api/jobs/{job_id}/assemble-parts", headers=headers)
+            self.assertEqual(joined.status_code, 200, joined.text)
+            again = self.client.post(f"/api/jobs/{job_id}/assemble-parts", headers=headers)
+            self.assertEqual(again.status_code, 409, again.text)  # already completed
+        job = db_module.get_job(job_id, public=False)
+        self.assertEqual(job["status"], "completed")
+        self.assertIsNone(job["error"])
+        output = Path(job["output_path"])
+        self.assertEqual(output, root / f"h3_bridge_{job_id}_00001_.mp4")
+        probe = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                                "stream=codec_type,nb_read_frames", "-of", "csv=p=0", str(output)],
+                               capture_output=True, text=True, check=True).stdout.split()
+        self.assertIn("video,48", probe)  # 24 + 24 frames end to end
+        self.assertTrue(any(line.startswith("audio") for line in probe))
+
+    def test_only_a_stopped_long_take_is_assembled(self):
+        job_id = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        db_module.update_job(job_id, runtime={"long_take": {"run": "velora_ad_4", "parts": 2, "saved": 2}})
+        refused = self.client.post(f"/api/jobs/{job_id}/assemble-parts", headers={"X-CSRF-Token": self.token})
+        self.assertEqual(refused.status_code, 409, refused.text)  # still queued
+        plain = self.post(engine="turbo", steps="4", resolution="512x288").json()["created"][0]
+        db_module.update_job(plain, status="failed")
+        self.assertEqual(self.client.post(f"/api/jobs/{plain}/assemble-parts",
+                                          headers={"X-CSRF-Token": self.token}).status_code, 400)
 
     def test_singularity_long_take_is_one_job_with_its_parts(self):
         # Issue #65: 2 or 3 parts separated by '---' lines, reference mode, length = parts x 5 s.

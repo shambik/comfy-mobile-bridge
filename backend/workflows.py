@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from copy import deepcopy
 
@@ -905,6 +906,75 @@ def long_take_parts(prompt: str) -> list[str]:
 
 def long_take_frames(parts: int) -> list[int]:
     return [LONG_TAKE_FIRST_FRAMES] + [LONG_TAKE_LATER_FRAMES] * (parts - 1)
+
+
+_LONG_TAKE_RUN = re.compile(r"[A-Za-z0-9_.-]{1,120}")
+_LONG_TAKE_CLIP = re.compile(r"clip_(\d{4})\.[0-9a-f]+\.mp4")
+
+
+def long_take_info(workflow: dict) -> dict | None:
+    """The Context-Loop long take in a graph (the form's long takes, or any graph with a Context-Loop plan): its run
+    folder under <output>/h3_chains and its part count, read from the plan node. None for anything else."""
+    for node in workflow.values():
+        if node.get("class_type") != "MiniMaxH3ChainPlanModern":
+            continue
+        inputs = node.get("inputs") or {}
+        run = str(inputs.get("run_name") or "")
+        try:
+            parts = len(json.loads(inputs.get("plan_json") or "{}").get("shots") or [])
+        except (TypeError, ValueError, AttributeError):
+            parts = 0
+        if parts > 1 and _LONG_TAKE_RUN.fullmatch(run) and run not in (".", ".."):
+            return {"run": run, "parts": parts}
+    return None
+
+
+def long_take_saved_parts(output_root: Path, run: str) -> list[Path]:
+    """The part clips Context-Loop has saved so far, in order: the newest revision of segments/clip_0001.<rev>.mp4,
+    clip_0002..., stopping at the first missing part."""
+    if not _LONG_TAKE_RUN.fullmatch(run) or run in (".", ".."):
+        return []
+    folder = output_root / "h3_chains" / run / "segments"
+    latest: dict[int, Path] = {}
+    try:
+        for path in folder.iterdir():
+            match = _LONG_TAKE_CLIP.fullmatch(path.name)
+            if match and path.is_file():
+                index = int(match.group(1))
+                if index not in latest or path.stat().st_mtime > latest[index].stat().st_mtime:
+                    latest[index] = path
+    except OSError:
+        return []
+    saved = []
+    while len(saved) + 1 in latest:
+        saved.append(latest[len(saved) + 1])
+    return saved
+
+
+def long_take_start_clip(workflow: dict) -> int:
+    """The part a long-take job starts at (Loop Start's start_clip: 1, or later when it resumes saved parts)."""
+    for node in workflow.values():
+        if node.get("class_type") == "MiniMaxH3ChainLoopStart":
+            try:
+                return max(1, int((node.get("inputs") or {}).get("start_clip") or 1))
+            except (TypeError, ValueError):
+                return 1
+    return 1
+
+
+def long_take_saved_count(saved: list[Path], start_clip: int, since: float) -> int:
+    """How many parts of this job's take are done: the parts before start_clip (reused from earlier jobs) plus the
+    parts this job has saved since it started. Older revisions of a part this job redoes do not count (2026-11-23:
+    a redo of part 3 showed "part 4" because the cancelled run's part 3 was still on disk)."""
+    count = min(start_clip - 1, len(saved))
+    for path in saved[count:]:
+        try:
+            if path.stat().st_mtime < since:
+                break
+        except OSError:
+            break
+        count += 1
+    return count
 
 
 def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, width: int, height: int,

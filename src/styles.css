@@ -972,3 +972,13 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .swap-split input[type=range] { flex: 1 1 160px; }
 .swap-split small { flex-basis: 100%; color: #8f9b92; }
 .swap-split-open { justify-self: start; font-size: 12px; }
+/* Context-Loop long take: play each saved part from the card while the rest renders */
+.long-take-parts { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 8px 0 4px; color: #8fa095; font-size: 10px; }
+.long-take-parts > span { margin-right: 2px; }
+.long-take-parts button { height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px; border: 1px solid #343b36; border-radius: 8px; background: #1a201c; color: #b8d5bd; font-size: 11px; cursor: pointer; }
+.long-take-parts button.active { border-color: #9dc8a6; background: #24302a; }
+.long-take-parts small { color: #6f7d74; }
+.long-take-part-video { display: block; width: 100%; max-height: 60vh; margin: 4px 0 6px; border-radius: 9px; background: #050605; object-fit: contain; }
+.long-take-parts .long-take-assemble { border-color: #526b58; color: #d6ecd9; background: #22302a; }
+.long-take-parts .long-take-assemble:disabled { opacity: .6; }
+.long-take-parts .long-take-assemble-error { color: #e9aaa2; flex: 1 1 100%; }
