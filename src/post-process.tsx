@@ -5,6 +5,8 @@ import { Gauge, Sparkles, Upload, X } from 'lucide-react'
 // measurements on the RTX 3080 10 GB; the server enforces the same limits and answers with a clear reason when a clip
 // is outside them.
 export type PostOperation = 'interpolate' | 'upscale'
+// 'detail' opens the H3 detail sheet (issue #50; on any finished video since #69)
+export type PostSheetOperation = PostOperation | 'detail'
 export type PostOptions = {
   operation: PostOperation | 'edit'; method: string; source_job_id?: string | null; source_filename?: string
   source_width: number; source_height: number; source_fps: number; source_frames: number; source_duration: number
@@ -30,7 +32,7 @@ const METHODS: Record<PostOperation, { id: string; label: string; detail: string
     { id: 'rtx', label: 'RTX VSR', detail: 'הכי מהיר · כ־12 שניות לשוט · עור טבעי · Visual Enhancer', visualEnhancer: true },
   ],
 }
-export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2', rtx: 'RTX VSR', fsr3: 'FSR 3', h3detail: 'RTX VSR + H3 detail' }
+export const POST_METHOD_LABELS: Record<string, string> = { rife: 'RIFE 4.26', film: 'FILM', lanczos: 'Lanczos', gan: 'Real-ESRGAN ×2', rtx: 'RTX VSR', fsr3: 'FSR 3', h3detail: 'H3 detail' }
 // RTX VSR + H3 detail (issue #50): a short H3 pass with the original clip's prompt and model. Only the strengths the
 // lab tested on the RTX 3080 (all rated good); the server enforces the same list and the tested sources.
 const H3_DETAIL_LEVELS = [
@@ -40,10 +42,17 @@ const H3_DETAIL_LEVELS = [
   { id: 's60x3', label: 'חזק · 0.60 · 3 צעדים', detail: 'קצת יותר חד מ־2 צעדים' },
   { id: 's75x3', label: 'הכי חזק · 0.75 · 3 צעדים', detail: 'הכי חד · דוגמאות צבועות מתחילות להשתנות' },
 ]
-// An RTX VSR card at 1920 can take the H3 detail pass.
-export function canAddH3Detail(job: { engine?: string; workflow_variant?: string | null; width: number; height: number }) {
-  return job.engine === 'post' && job.workflow_variant === 'rtx'
-    && ((job.width === 1920 && job.height === 1080) || (job.width === 1080 && job.height === 1920))
+// User decision 2026-11-24 (issue #69): H3 detail on every finished video, no conditions; the sheet warns instead.
+export function canAddH3Detail(job: { status?: string; video_url?: string | null }) {
+  return job.status === 'completed' && !!job.video_url
+}
+// Measured on the RTX 3080 10 GB: 1920 on the long side fits; 15 s peaked at 61 GB of 64 GB RAM.
+function h3DetailWarnings(source: SourceSize | null) {
+  if (!source) return []
+  const warnings: string[] = []
+  if (Math.max(source.width, source.height) > 1920) warnings.push('מעל 1920 בצד הארוך: לא נכנס ל־10GB, גולש ל־RAM ורץ לאט מאוד')
+  if (source.duration > 15.1) warnings.push('מעל 15 שניות: זיכרון ה־RAM נהיה צפוף (נמדד עד 15 שניות, 61GB מתוך 64)')
+  return warnings
 }
 const LONG_SIDES = [1920, 2560]
 // RIFE 60 / 120 fps (issue #52): RIFE x5, 60 keeps every second frame. Tested on 24 fps clips of up to 5.2 s at 1632x928;
@@ -74,13 +83,14 @@ export function cropPercent(width: number, height: number, target: { width: numb
 
 // Pass `job` for a finished video card, or leave it out to upload an external video.
 export function PostProcessSheet({ job, operation: initialOperation, csrf, visualEnhancer = false, onClose, onQueued }: {
-  job?: SourceJob; operation: PostOperation; csrf: string; visualEnhancer?: boolean; onClose: () => void; onQueued: () => void
+  job?: SourceJob; operation: PostSheetOperation; csrf: string; visualEnhancer?: boolean; onClose: () => void; onQueued: () => void
 }) {
   const external = !job
-  const detailSheet = job?.method === 'rtx'
-  const [operation, setOperation] = useState<PostOperation>(initialOperation)
-  const [method, setMethod] = useState(detailSheet ? 'h3detail' : METHODS[initialOperation][0].id)
+  const detailSheet = !!job && initialOperation === 'detail'
+  const [operation, setOperation] = useState<PostOperation>(initialOperation === 'detail' ? 'upscale' : initialOperation)
+  const [method, setMethod] = useState(detailSheet ? 'h3detail' : METHODS[initialOperation === 'detail' ? 'upscale' : initialOperation][0].id)
   const [detailLevel, setDetailLevel] = useState('s45')
+  const [detailPrompt, setDetailPrompt] = useState('')
   const [fpsTarget, setFpsTarget] = useState(0)
   const [longSide, setLongSide] = useState(2560)
   const [file, setFile] = useState<File | null>(null)
@@ -120,7 +130,7 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
       if (job) {
         response = await fetch(`/api/jobs/${job.id}/post-process`, {
           method: 'POST', headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' },
-          body: JSON.stringify(detailSheet ? { operation: 'upscale', method: 'h3detail', detail: detailLevel }
+          body: JSON.stringify(detailSheet ? { operation: 'upscale', method: 'h3detail', detail: detailLevel, prompt: detailPrompt.trim() || null }
             : { operation, method, long_side: operation === 'upscale' ? longSide : null, fps_target: showRates && fpsTarget ? fpsTarget : null }),
         })
       } else {
@@ -189,7 +199,13 @@ export function PostProcessSheet({ job, operation: initialOperation, csrf, visua
           </button>
         })}
       </div>}
-      {detailSheet ? <p className="post-sheet-note">H3 מצייר מחדש פרטים (בד, עור, עיניים, שיער) עם הפרומפט והמודל של הקליפ המקורי, ושומר על התנועה, הפנים, השפתיים והסאונד. כ־5.5 דקות לשוט של 5 שניות, עד 15 שניות. נבדק על קליפים של Pika (פריים פתיחה) ושל Turbo v4 (ליפ־סינק). H3 צריך 17n+5 פריימים, אז לפעמים כמה פריימים בסוף נחתכים.</p>
+      {detailSheet && <label className="post-sheet-prompt">
+        <span>פרומפט (ריק = הפרומפט של הקליפ המקורי)</span>
+        <textarea value={detailPrompt} onChange={event => setDetailPrompt(event.target.value)} rows={4} disabled={busy} dir="auto"
+          placeholder="ריק = הפרומפט שהקליפ נוצר איתו. לסרטון שהועלה בלי פרומפט: תיאור קצר של מה שרואים" />
+      </label>}
+      {detailSheet && h3DetailWarnings(source).map(text => <p key={text} className="post-sheet-error" role="note">⚠ {text}</p>)}
+      {detailSheet ? <p className="post-sheet-note">H3 מצייר מחדש פרטים (בד, עור, עיניים, שיער) ושומר על התנועה, הפנים, השפתיים והסאונד. עובד על כל וידאו: הכי טוב אחרי הגדלה ל־1920 (RTX VSR). כ־5.5 דקות לשוט של 5 שניות ב־1920. קצב פריימים אחר מומר ל־24fps, ו־H3 צריך 17n+5 פריימים, אז לפעמים כמה פריימים בסוף נחתכים. מודל: Pika (Turbo v4 לקליפי ליפ־סינק של Turbo v4).</p>
       : <p className="post-sheet-note">קליפים ארוכים עוברים בחלקים בתוך עבודה אחת ומחוברים בסוף (RTX VSR ו־FSR 3 בלי חלוקה). מקורות עד 30fps: הגדלה עד 1080p, החלקה עם RIFE ו־FSR 3 גם על קליפים מוגדלים עד 2560 (FILM עד 1.5MP; Lanczos גם על 60fps). אפשר להגדיל קליפ אחרי החלקת תנועה: Lanczos, או Real-ESRGAN עד 1.5MP.{visualEnhancer && ' RTX VSR ו־FSR 3 רצים ב־Visual Enhancer שלך, על קליפים מקוריים בלבד (לא אחרי החלקה).'}</p>}
       {error && <p className="post-sheet-error" role="alert">{error}</p>}
       <div className="app-modal-actions"><button type="button" onClick={onClose} disabled={busy}>ביטול</button><button type="submit" className="confirm" disabled={busy}>{busy ? (external ? 'מעלה…' : 'מוסיף…') : 'הוסף לתור'}</button></div>

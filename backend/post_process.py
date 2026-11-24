@@ -33,7 +33,7 @@ UPSCALE_MODELS = {"gan": "RealESRGAN_x2plus.pth"}
 METHODS = {"interpolate": ("rife", "film", "fsr3"), "upscale": ("lanczos", "gan", "rtx")}
 METHOD_LABELS = {"rife": "RIFE 4.26", "film": "FILM", "lanczos": "Lanczos", "gan": "Real-ESRGAN x2",
                  "rtx": "RTX Video Super Resolution", "fsr3": "FSR 3 frame generation",
-                 "h3detail": "RTX VSR + H3 detail", "h3edit": "H3 edit"}
+                 "h3detail": "H3 detail", "h3edit": "H3 edit"}
 # Methods the worker runs through Visual Enhancer's VE_CLI.exe instead of a ComfyUI graph.
 VISUAL_ENHANCER_METHODS = ("rtx", "fsr3")
 VISUAL_ENHANCER_TIMEOUT_SECONDS = 15 * 60  # the lab runs took 5-19 s; a hung run must not hold the queue
@@ -359,8 +359,8 @@ def post_process_workflow(options: dict, video_name: str, prefix: str) -> dict:
     return g
 
 
-# --- RTX VSR + H3 detail (issue #50) -----------------------------------------------------------------------------
-# A short second H3 pass over an RTX VSR 1920 clip redraws real detail (fabric, skin, eyes, hair, background) with the
+# --- H3 detail (issue #50, any video since #69) ------------------------------------------------------------------
+# A short second H3 pass over an upscaled clip (measured on RTX VSR 1920 clips) redraws real detail (fabric, skin, eyes, hair, background) with the
 # source clip's own prompt and model, through bbaudio-2025/Comfyui-MMH3-UltimateUpscale (time chunks, audio carried
 # through). Lab A/B on the RTX 3080 10 GB, 2026-11-10 (D:/h3-omnilab/tests/h3_detail_pass/RESULTS.md); the user rated
 # every one of these good: Missed Bus face and The Package rooftop jump (Singularity Pika flow, 1632x928, 124 frames,
@@ -375,36 +375,38 @@ H3_DETAIL_LEVELS = {
     "s60x3": ("0.6, 0.4, 0.2, 0.0", "strong, 0.60, 3 steps"),
     "s75x3": ("0.75, 0.5, 0.25, 0.0", "strongest, 0.75, 3 steps"),   # painted patterns start to change
 }
-H3_DETAIL_SIZES = ((1920, 1080), (1080, 1920))   # the RTX VSR 1920 outputs that were tested
-H3_DETAIL_FPS = 24.0
-H3_DETAIL_MIN_FRAMES = 107                       # the shortest tested clip (4.5 s)
-H3_DETAIL_MAX_FRAMES = 362                       # The Last Fold, 15 s (peak RAM 61 GB of 64)
+H3_DETAIL_FPS = 24.0                             # H3's rate; other clips are converted (issue #69)
+H3_DETAIL_MAX_FRAMES = 362                       # longest measured: The Last Fold, 15 s (peak RAM 61 GB of 64); a warning
 H3_DETAIL_CHUNK = (68, 17, 0.99)                 # time chunk, overlap (frames), frame-0 anchor strength
 H3_DETAIL_SEED_MOD = 2 ** 50
 
 
-def h3_detail_chain(source: dict) -> tuple[str | None, str]:
-    """The model chain the H3 detail pass uses for this source clip, or None and why it is not offered.
+# User decision 2026-11-24 (issue #69): H3 detail is an independent tool with no conditions. Any finished video (any
+# engine, mode, size, length or upload) is accepted and fitted automatically; the sheet warns where it will be slow
+# instead of refusing. Do not re-add the RTX-1920 / tested-source limits. Measured on the RTX 3080 10 GB: 1920x1080
+# fits (9.5-9.7 GB); larger frames spill into system RAM (very slow); 362 frames peaked at 61 GB RAM of 64.
+H3_DETAIL_WARN_LONG_SIDE = 1920
+H3_DETAIL_WARN_FRAMES = H3_DETAIL_MAX_FRAMES
+H3_DETAIL_DEFAULT_PROMPT = ("Keep this video exactly as it is: the same people, faces, expressions, clothes, places, "
+                            "motion, camera and sound, with sharper, natural fine detail.")
 
-    Only what the lab ran: the Pika flow (FL2VA int8 + Pika Flex LoRA: the Pika engine, or Singularity with the Pika
-    speed LoRA on the base model) on opening-frame clips, and Turbo v4 on lip-sync clips."""
+
+def h3_detail_chain(source: dict | None) -> tuple[str, str]:
+    """The model chain for the detail pass: Turbo v4 for Turbo v4 lip-sync clips (as tested), the Pika flow (FL2VA int8
+    + Pika Flex LoRA) for everything else; the second value says when the source is not one of the tested kinds."""
+    source = source or {}
     engine, mode = source.get("engine"), source.get("mode")
+    if engine == "turbo" and (source.get("turbo_profile") or "v1") == "v4" and mode == "lip_sync":
+        return "turbo_v4", ""
     try:
         skin = json.loads(source.get("skin_options_json") or "{}")
     except json.JSONDecodeError:
         skin = {}
     pika = (engine == "pika" and source.get("workflow_variant") != "turbo4") or (
         engine == "singularity" and skin.get("speed_lora") == "pika" and skin.get("model") == "base")
-    if pika:
-        if mode == "opening":
-            return "pika", ""
-        return None, "H3 detail was tested on Pika-flow opening-frame clips only"
-    if engine == "turbo" and (source.get("turbo_profile") or "v1") == "v4":
-        if mode == "lip_sync":
-            return "turbo_v4", ""
-        return None, "H3 detail was tested on Turbo v4 lip-sync clips only"
-    return None, ("H3 detail was tested on Pika-flow opening-frame clips and Turbo v4 lip-sync clips; "
-                  "this clip comes from another engine")
+    if pika and mode == "opening":
+        return "pika", ""
+    return "pika", "the Pika flow is used; it was tested on Pika-flow opening-frame and Turbo v4 lip-sync clips"
 
 
 def h3_detail_frames(frames: int) -> int:
@@ -412,41 +414,53 @@ def h3_detail_frames(frames: int) -> int:
     return (frames - 5) // 17 * 17 + 5 if frames >= 5 else 0
 
 
-def plan_h3_detail(rtx: dict, original: dict, level: str | None) -> dict:
-    """Check an RTX VSR clip and its original H3 clip against the tested limits; return the stored options.
+def h3_detail_warnings(width: int, height: int, frames: int, fps: float, note: str = "") -> list[str]:
+    warnings = []
+    if max(width, height) > H3_DETAIL_WARN_LONG_SIDE:
+        warnings.append(f"{width}x{height} is above {H3_DETAIL_WARN_LONG_SIDE} on the long side: it does not fit in "
+                        "10 GB of VRAM and spills into system RAM, so it runs very slowly")
+    if frames > H3_DETAIL_WARN_FRAMES:
+        warnings.append(f"{frames} frames is longer than the 15 s ({H3_DETAIL_WARN_FRAMES} frames) that were measured; "
+                        "system RAM gets tight (61 GB of 64 at 15 s)")
+    if abs(fps - H3_DETAIL_FPS) > 0.01:
+        warnings.append(f"the {fps:g} fps clip is converted to 24 fps (H3's rate)")
+    if note:
+        warnings.append(note)
+    return warnings
 
-    `rtx` is the probe of the RTX VSR output, `original` the job row the RTX VSR job was made from (raises ValueError).
-    """
+
+def plan_h3_detail(clip: dict, original: dict | None, level: str | None, prompt: str | None = None) -> dict:
+    """Options for an H3 detail pass over any video (issue #69): `clip` is the probe of the video to detail,
+    `original` the generation job it comes from when the app knows it (prompt and model chain), `prompt` an optional
+    prompt typed in the sheet. Only an unknown strength or a clip too short for H3 (under 5 frames) is refused."""
     if level not in H3_DETAIL_LEVELS:
         raise ValueError("Choose a detail strength: " + ", ".join(label for _, label in H3_DETAIL_LEVELS.values()))
-    chain, why = h3_detail_chain(original)
-    if not chain:
-        raise ValueError(why)
-    width, height, fps, frames = rtx["width"], rtx["height"], rtx["fps"], rtx["frames"]
-    if (width, height) not in H3_DETAIL_SIZES:
-        raise ValueError(f"H3 detail runs on RTX VSR 1920 clips (1920x1080 or 1080x1920); this one is {width}x{height}")
-    if abs(fps - H3_DETAIL_FPS) > 0.01:
-        raise ValueError(f"H3 detail was tested on 24 fps clips; this one is {fps:g} fps")
+    chain, note = h3_detail_chain(original)
+    width, height, fps = clip["width"], clip["height"], float(clip["fps"] or H3_DETAIL_FPS)
+    convert = abs(fps - H3_DETAIL_FPS) > 0.01
+    frames = round(float(clip["duration"]) * H3_DETAIL_FPS) if convert else int(clip["frames"])
     keep = h3_detail_frames(frames)
-    if keep < H3_DETAIL_MIN_FRAMES:
-        raise ValueError(f"H3 detail was tested on clips of {H3_DETAIL_MIN_FRAMES} frames or more; this one has {frames}")
-    if keep > H3_DETAIL_MAX_FRAMES:
-        raise ValueError(f"H3 detail was tested on clips of up to {H3_DETAIL_MAX_FRAMES} frames (15 s); "
-                         f"this one has {frames}")
+    if keep < 5:
+        raise ValueError("The clip is too short for H3 (it needs at least 5 frames)")
+    text = (prompt or "").strip() or ((original or {}).get("prompt") or "").strip() or H3_DETAIL_DEFAULT_PROMPT
     sigmas, label = H3_DETAIL_LEVELS[level]
     return {"operation": "upscale", "method": H3_DETAIL, "detail": level, "detail_label": label, "sigmas": sigmas,
-            "chain": chain, "prompt": original.get("prompt") or "", "original_job_id": original["id"],
-            "source_width": width, "source_height": height, "source_frames": frames, "source_fps": round(fps, 3),
-            "source_duration": round(rtx["duration"], 3), "audio": bool(rtx["audio"]),
-            "width": width, "height": height, "fps": round(fps, 3), "frames": keep, "trimmed_frames": frames - keep,
-            "long_side": max(width, height), "crop_percent": 0.0}
+            "chain": chain, "prompt": text, "original_job_id": (original or {}).get("id"),
+            "source_width": width, "source_height": height, "source_frames": int(clip["frames"]),
+            "source_fps": round(fps, 3), "source_duration": round(float(clip["duration"]), 3),
+            "audio": bool(clip["audio"]), "width": width, "height": height, "fps": H3_DETAIL_FPS, "frames": keep,
+            "trimmed_frames": frames - keep, "convert_fps": convert, "long_side": max(width, height),
+            "crop_percent": 0.0, "warnings": h3_detail_warnings(width, height, keep, fps, note)}
 
 
 def h3_detail_input_command(options: dict, source: Path, out: Path) -> list[str]:
-    """Copy the RTX VSR clip for the job, trimmed to the 17n+5 frames H3 takes (sound cut to the same length)."""
+    """Copy the clip for the job at 24 fps, trimmed to the 17n+5 frames H3 takes (sound cut to the same length)."""
     frames, fps = options["frames"], float(options["fps"])
-    command = ["ffmpeg", "-v", "error", "-y", "-i", str(source), "-frames:v", str(frames), "-t", f"{frames / fps:.6f}",
-               "-c:v", "libx264", "-crf", "8", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    command = ["ffmpeg", "-v", "error", "-y", "-i", str(source)]
+    if options.get("convert_fps"):
+        command += ["-vf", f"fps={fps:g}"]
+    command += ["-frames:v", str(frames), "-t", f"{frames / fps:.6f}",
+                "-c:v", "libx264", "-crf", "8", "-preset", "medium", "-pix_fmt", "yuv420p"]
     command += ["-c:a", "aac", "-b:a", "320k"] if options.get("audio") else ["-an"]
     return [*command, "-movflags", "+faststart", str(out)]
 

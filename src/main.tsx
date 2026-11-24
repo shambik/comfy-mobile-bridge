@@ -6,7 +6,7 @@ import { ProductionStudio } from './production'
 import { AppModal, useAppModal, type AppModalRequest } from './app-modal'
 import { FeedbackToast, useFeedback } from './feedback'
 import { BotImagesPage } from './bot-images'
-import { PostProcessSheet, POST_METHOD_LABELS, canAddH3Detail, type PostOperation, type PostOptions } from './post-process'
+import { PostProcessSheet, POST_METHOD_LABELS, canAddH3Detail, type PostSheetOperation, type PostOptions } from './post-process'
 import { VideoEditSheet } from './video-edit'
 import { SwapSheet } from './swap'
 import { skinJobTag, skinTierLabel } from './skinLabels'
@@ -693,7 +693,7 @@ function App() {
   const [closingPreview, setClosingPreview] = useState('')
   const [sending, setSending] = useState(false)
   const [rerunLoading, setRerunLoading] = useState<string | null>(null)
-  const [postSheet, setPostSheet] = useState<{ job?: Job; operation: PostOperation } | null>(null)
+  const [postSheet, setPostSheet] = useState<{ job?: Job; operation: PostSheetOperation } | null>(null)
   const [swapSheet, setSwapSheet] = useState<{ jobId?: string } | null>(null)
   const [editSheet, setEditSheet] = useState<{ job?: Job } | null>(null)
   const [mainErrors, setMainErrors] = useState<Partial<Record<MainErrorScope, string>>>({})
@@ -2419,7 +2419,7 @@ function swapPrompt(job: Job) {
   return typeof text === 'string' && text.trim() ? text : undefined
 }
 
-function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, onPostProcess, onSwap, onEdit, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; onPostProcess?: (operation: PostOperation) => void; onSwap?: () => void; onEdit?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
+function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect, onManage, onUp, onDown, onDelete, onCancel, onRerun, onUseSeed, onPostProcess, onSwap, onEdit, rerunLoading, bulkMode, bulkSelected, onToggleBulk }: { job: Job; assignment?: AssetAssignment; csrf?: string; index?: number; total?: number; selectedOrder?: number; onSelect?: () => void; onManage?: () => void; onUp?: () => void; onDown?: () => void; onDelete?: () => void; onCancel?: () => void; onRerun?: () => void; onUseSeed?: () => void; onPostProcess?: (operation: PostSheetOperation) => void; onSwap?: () => void; onEdit?: () => void; rerunLoading?: boolean; bulkMode?: boolean; bulkSelected?: boolean; onToggleBulk?: () => void }) {
   const labels: Record<Status, string> = { queued: 'ממתין', starting: 'מפעיל מנוע', running: 'יוצר עכשיו', verifying: 'בודק וידאו', completed: 'מוכן', failed: 'נכשל', canceled: 'בוטל' }
   const swap = swapDisplay(job)
   const shownPrompt = swapPrompt(job) || job.prompt
@@ -2507,7 +2507,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         {job.status === 'completed' && <LastFrameControl sourceType="job" sourceId={job.id} csrf={csrf} videoUrl={job.video_url} />}
         {onPostProcess && (engine !== 'post' || job.mode === 'upscale' || job.mode === 'edit') && <button className="post-button" onClick={() => onPostProcess('interpolate')}><Gauge size={15} /> החלקת תנועה</button>}
         {onPostProcess && (engine !== 'post' || job.mode === 'interpolate' || job.mode === 'edit' || job.workflow_variant === 'h3detail') && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> הגדלה</button>}
-        {onPostProcess && canAddH3Detail(job) && <button className="post-button" onClick={() => onPostProcess('upscale')}><Sparkles size={15} /> פרטים H3</button>}
+        {onPostProcess && canAddH3Detail(job) && <button className="post-button" onClick={() => onPostProcess('detail')}><Sparkles size={15} /> פרטים H3</button>}
         {onSwap && <button className="post-button" onClick={onSwap}><Users size={15} /> החלפת דמות</button>}
         {onEdit && <button className="post-button" onClick={onEdit}><Wand2 size={15} /> עריכה</button>}
         {onSelect && <button className={`select-result ${selectedOrder ? 'active' : ''}`} onClick={onSelect}><Check size={16} /> {selectedOrder ? `נבחר ${selectedOrder}` : 'בחר לחיבור'}</button>}

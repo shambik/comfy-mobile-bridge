@@ -69,7 +69,7 @@ Anything marked **untested** is a reasonable default, not a measured result.
 | A vertical clip of characters from a sheet | Make a vertical still from the sheet (any image tool), then **LTX opening frame** | LTX reference does not do vertical (see below) |
 | Several clips that must continue one another (only when you ask for continuity) | **Connected sequence** (2–20 text prompts, H3 engines only) | From the second clip on, each starts from the previous clip's last frame. Independent clips do not need this |
 | A bigger or smoother copy of a finished shot | The **הגדלה** / **החלקת תנועה** buttons on its card | RIFE for 48/60 fps, Lanczos, Real-ESRGAN ×2 or RTX VSR for 2560 px; sources up to 1080p, any length (long clips run in chunks inside one job), uploads too (see below) |
-| More real detail in a finished Pika or Turbo v4 lip-sync shot | **RTX VSR** to 1920, then **פרטים H3** on that card | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s, up to 15 s (see "RTX VSR + H3 detail" below) |
+| More real detail in any finished shot | **RTX VSR** to 1920, then **פרטים H3** on that card (the button is on every finished video since issue #69) | Strength 0.45 (recommended) or 0.30-0.75; about 5.5 min per 5 s at 1920; best results on Pika and Turbo v4 lip-sync shots (see "H3 detail" below) |
 | Change clothes, style or a head in a finished or uploaded video | **עריכה** on its card, or **עריכת וידאו** in the results header | 480×864 (default, ~2 min per 5 s) or 704×1280 (~5.5 min, sharper); 10 s at 480 only; outfit from photos at 480 only (see "H3 video edit" below) |
 | A character doing the moves of a video in a new place | **עריכה** → **העברת תנועה** | A library character or a sheet photo, three short boxes (character, what they do, new place); 480 (~3.5 min) or 704 (~6.5 min), 5 s (see "Motion transfer" below) |
 | Still images | **Image Lab** or **H3 still** | Recipes listed per workflow in the Image Lab page |
@@ -545,10 +545,10 @@ For comparison on the same 1632×928 shots: Real-ESRGAN takes about 232 s and RI
 - Not offered: DLSS frame generation (refused on RTX 30 cards), PeakMagnetar (about 2.5 hours per shot),
   DLSS Super Resolution (its modes fix the output at 2× or more, so it needs another resize).
 
-## RTX VSR + H3 detail (2026-11-10, issue #50)
+## H3 detail (2026-11-10, issue #50; on any video since issue #69)
 
-RTX VSR, Real-ESRGAN and Lanczos only sharpen what is in the clip. On an **RTX VSR 1920** card the **פרטים H3**
-button runs a short second H3 pass that redraws real detail (fabric, skin, eyes, hair, background) with the original
+RTX VSR, Real-ESRGAN and Lanczos only sharpen what is in the clip. The **פרטים H3** button (on every finished video
+card since issue #69; best on an **RTX VSR 1920** card) runs a short second H3 pass that redraws real detail (fabric, skin, eyes, hair, background) with the original
 clip's prompt and model, keeping its motion, face, lips and sound. It uses bbaudio-2025's MMH3 Ultimate Upscale node
 (time chunks of 68 frames with 17 frames of overlap; the sound passes through untouched).
 
@@ -567,14 +567,18 @@ Peak VRAM was 9.5-9.7 GB in every run, peak RAM 47-58 GB for 5 s and 61 GB of 64
 Strengths (explicit noise levels; a scheduler "denoise" at shift 6 starts much higher and redrew mouths in the lab):
 **0.30** (light), **0.45** (recommended), **0.60**, and with 3 steps **0.60** or **0.75** (the sharpest).
 
-Limits, enforced by the server:
+**No limits (user decision 2026-11-24, issue #69).** The button is on every finished video card, uploads included;
+nothing is refused except an unknown strength or a clip under 5 frames. The sheet warns instead:
 
-- Only on RTX VSR 1920 clips (1920×1080 or 1080×1920, 24 fps), made from a **Pika-flow opening-frame** clip (the
-  Pika engine, or Singularity with the Pika speed LoRA on the base model) or a **Turbo v4 lip-sync** clip. Those are
-  the sources that were tested; other engines, other modes and uploads are refused with the reason.
-- 107 to 362 frames (4.5-15 s). H3 needs 17n+5 frames, so up to 16 frames at the end are trimmed; the card says how
-  many (RTX VSR returned 360 of The Last Fold's 362 frames, so 15 were trimmed).
-- 1920 only: 2560 would need spatial tiles, which were not tested.
+- **Size:** measured at 1920×1080 / 1080×1920. Above 1920 on the long side the frames do not fit in 10 GB and spill
+  into system RAM, so it runs very slowly; upscale to 1920 with RTX VSR first for the tested result.
+- **Length:** measured up to 362 frames (15 s, 61 GB of 64 GB RAM); longer clips are accepted with a RAM warning.
+  H3 needs 17n+5 frames, so up to 16 frames at the end are trimmed; the card says how many.
+- **Frame rate:** clips that are not 24 fps (for example smoothed 48 fps cards) are converted to 24 fps first.
+- **Model:** the Pika flow (FL2VA int8 + Pika Flex LoRA) for every clip, Turbo v4 for Turbo v4 lip-sync clips. It was
+  measured on Pika-flow opening-frame and Turbo v4 lip-sync clips; other engines and uploads get a note on the card.
+- **Prompt:** the original clip's prompt (followed back through upscale and smoothing cards), or the one typed in the
+  sheet; uploads without one get a neutral "keep everything, sharper detail" prompt.
 - **To 2560:** press **הגדלה** on the H3 detail card and choose RTX VSR (about 17 s, 2.3 GB). Lab 2026-11-10, same two
   clips: H3 detail at 1920 then RTX VSR to 2560 took about 6 min and added almost no flicker (+0.014 on the face, against
   +0.12 for native 2560 with 512 px tiles, which also left a blue streak on the rooftop arm). Native 2560 is not offered:
