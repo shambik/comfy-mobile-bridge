@@ -439,6 +439,23 @@ class UploadTests(ApiBase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(list(self.input.iterdir()), [])
 
+    def test_upload_takes_h3_detail(self):
+        # Issue #69: H3 detail on an uploaded video: 30 fps -> 24 fps, 17n+5 frames, neutral prompt, typed prompt.
+        clip = self.root / "phone30.mp4"
+        make_clip(clip, 640, 360, 30, 2)
+        response = self.upload(clip, {"operation": "upscale", "method": "h3detail", "detail": "s45"})
+        self.assertEqual(response.status_code, 200, response.text)
+        options = response.json()["options"]
+        self.assertEqual((options["method"], options["chain"], options["fps"], options["frames"], options["width"]),
+                         ("h3detail", "pika", 24.0, 39, 640))
+        self.assertTrue(options["prompt"])
+        with connect() as db:
+            row = dict(db.execute("SELECT * FROM jobs WHERE id=?", (response.json()["created"][0],)).fetchone())
+        self.assertEqual([p.name for p in self.input.iterdir()], [row["input_name"]])   # only the prepared clip
+        typed = self.upload(clip, {"operation": "upscale", "method": "h3detail", "detail": "s30", "prompt": "A dog."})
+        self.assertEqual(typed.json()["options"]["prompt"], "A dog.")
+        self.assertEqual(self.upload(clip, {"operation": "upscale", "method": "h3detail"}).status_code, 400)
+
     def test_wrong_type_is_refused(self):
         clip = self.root / "clip.gif"
         clip.write_bytes(b"GIF89a")
@@ -654,49 +671,59 @@ SKIN_PIKA = json.dumps({"model": "base", "speed_lora": "pika", "flow": "pika"})
 
 
 class H3DetailPlanTests(unittest.TestCase):
-    def test_only_the_tested_sources(self):
+    def test_chain_for_every_source(self):
+        # Issue #69: every source gets a chain; untested kinds get the Pika flow and a note (shown as a warning).
         cases = [
-            (PIKA_OPENING, "pika"),
-            ({"engine": "singularity", "mode": "opening", "skin_options_json": SKIN_PIKA}, "pika"),
-            ({"engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync"}, "turbo_v4"),
-            ({"engine": "pika", "workflow_variant": "turbo4", "mode": "opening"}, None),        # Pika Turbo 4-step
-            ({"engine": "pika", "workflow_variant": "direct", "mode": "reference"}, None),
-            ({"engine": "singularity", "mode": "opening",
-              "skin_options_json": json.dumps({"model": "pruned", "speed_lora": "tier"})}, None),
-            ({"engine": "turbo", "turbo_profile": "v4", "mode": "opening"}, None),
-            ({"engine": "turbo", "turbo_profile": "v1", "mode": "lip_sync"}, None),
-            ({"engine": "ltx", "mode": "opening"}, None),
+            (PIKA_OPENING, "pika", False),
+            ({"engine": "singularity", "mode": "opening", "skin_options_json": SKIN_PIKA}, "pika", False),
+            ({"engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync"}, "turbo_v4", False),
+            ({"engine": "pika", "workflow_variant": "turbo4", "mode": "opening"}, "pika", True),
+            ({"engine": "turbo", "turbo_profile": "v4", "mode": "opening"}, "pika", True),
+            ({"engine": "ltx", "mode": "opening"}, "pika", True),
+            (None, "pika", True),                                                   # an uploaded video
         ]
-        for source, chain in cases:
-            self.assertEqual(h3_detail_chain(source)[0], chain, source)
-        self.assertIn("tested", h3_detail_chain({"engine": "ltx", "mode": "opening"})[1])
+        for source, chain, noted in cases:
+            got, note = h3_detail_chain(source)
+            self.assertEqual((got, bool(note)), (chain, noted), source)
 
     def test_frames_snap_down_to_17n_plus_5(self):
         for frames, keep in ((124, 124), (362, 362), (360, 345), (117, 107), (243, 243), (4, 0)):
             self.assertEqual(h3_detail_frames(frames), keep)
 
-    def test_plan_keeps_the_tested_limits(self):
+    def test_plan_accepts_any_clip_with_warnings(self):
         options = plan_h3_detail({**RTX_1920, "frames": 360, "duration": 15.0}, PIKA_OPENING, "s45")
         self.assertEqual((options["method"], options["chain"], options["frames"], options["trimmed_frames"],
-                          options["sigmas"], options["width"], options["height"]),
-                         (H3_DETAIL, "pika", 345, 15, "0.45, 0.2, 0.0", 1920, 1080))
+                          options["sigmas"], options["width"], options["height"], options["warnings"]),
+                         (H3_DETAIL, "pika", 345, 15, "0.45, 0.2, 0.0", 1920, 1080, []))
         self.assertEqual(options["original_job_id"], "orig")
         portrait = plan_h3_detail({**RTX_1920, "width": 1080, "height": 1920, "frames": 117},
                                   {"id": "o", "engine": "turbo", "turbo_profile": "v4", "mode": "lip_sync"}, "s75x3")
         self.assertEqual((portrait["frames"], portrait["chain"], portrait["sigmas"]),
                          (107, "turbo_v4", "0.75, 0.5, 0.25, 0.0"))
-        refused = [
-            ({**RTX_1920}, PIKA_OPENING, "s90"),                                     # untested strength
-            ({**RTX_1920, "width": 2560, "height": 1440}, PIKA_OPENING, "s45"),      # 2560 needs tiles: not tested
-            ({**RTX_1920, "fps": 48.0}, PIKA_OPENING, "s45"),                        # smoothed clip
-            ({**RTX_1920, "frames": 100}, PIKA_OPENING, "s45"),                      # shorter than tested
-            ({**RTX_1920, "frames": 400}, PIKA_OPENING, "s45"),                      # longer than The Last Fold
-            ({**RTX_1920}, {"id": "x", "engine": "ltx", "mode": "opening"}, "s45"),  # untested engine
-        ]
-        for rtx, original, level in refused:
-            with self.assertRaises(ValueError):
-                plan_h3_detail(rtx, original, level)
+        # User decision 2026-11-24 (issue #69): what used to be refused is now accepted, with warnings.
+        big = plan_h3_detail({**RTX_1920, "width": 2560, "height": 1440}, PIKA_OPENING, "s45")
+        self.assertEqual((big["width"], big["height"], len(big["warnings"])), (2560, 1440, 1))
+        smooth = plan_h3_detail({**RTX_1920, "fps": 48.0, "frames": 248, "duration": 5.167}, PIKA_OPENING, "s45")
+        self.assertEqual((smooth["fps"], smooth["frames"], smooth["convert_fps"]), (24.0, 124, True))
+        self.assertTrue(any("24 fps" in text for text in smooth["warnings"]))
+        self.assertEqual(plan_h3_detail({**RTX_1920, "frames": 100}, PIKA_OPENING, "s45")["frames"], 90)
+        long = plan_h3_detail({**RTX_1920, "frames": 610, "duration": 25.4}, PIKA_OPENING, "s45")
+        self.assertEqual((long["frames"], len(long["warnings"])), (600, 1))
+        upload = plan_h3_detail({**RTX_1920, "width": 1280, "height": 720}, None, "s30")
+        self.assertEqual((upload["chain"], upload["original_job_id"]), ("pika", None))
+        self.assertTrue(upload["prompt"])                                       # the neutral default prompt
+        self.assertEqual(plan_h3_detail(dict(RTX_1920), PIKA_OPENING, "s45", prompt="  A new prompt. ")["prompt"],
+                         "A new prompt.")
+        for clip, level in (({**RTX_1920}, "s90"), ({**RTX_1920, "frames": 4, "duration": 0.15}, "s45")):
+            with self.assertRaises(ValueError):                                 # unknown strength, under 5 frames
+                plan_h3_detail(clip, PIKA_OPENING, level)
         self.assertEqual(set(H3_DETAIL_LEVELS), {"s30", "s45", "s60", "s60x3", "s75x3"})
+
+    def test_other_frame_rates_are_converted(self):
+        options = plan_h3_detail({**RTX_1920, "fps": 30.0, "frames": 150, "duration": 5.0}, PIKA_OPENING, "s45")
+        command = h3_detail_input_command(options, Path("in.mp4"), Path("out.mp4"))
+        self.assertEqual(command[command.index("-vf") + 1], "fps=24")
+        self.assertEqual(command[command.index("-frames:v") + 1], "107")
 
     def test_input_is_trimmed_with_its_sound(self):
         options = plan_h3_detail({**RTX_1920, "frames": 360}, PIKA_OPENING, "s30")
@@ -783,7 +810,8 @@ class H3DetailApiTests(ApiBase):
         self.assertEqual(options["prompt"], "A laundromat, two friends fold clothes.")
         self.assertTrue((self.input / row["input_name"]).is_file())
 
-    def test_refusals_say_why(self):
+    def test_any_finished_video_is_accepted(self):
+        # Issue #69: an original clip, a 2560 RTX card, a Real-ESRGAN card, an LTX clip, a card whose source is gone.
         self.add_original("orig")
         self.add_original("ltx_orig", engine="ltx")
         self.add_rtx("rtx2560", "orig", long_side=2560)
@@ -791,18 +819,17 @@ class H3DetailApiTests(ApiBase):
         self.add_rtx("rtx_ltx", "ltx_orig")
         self.add_rtx("rtx_gone", "deleted")
         body = {"operation": "upscale", "method": "h3detail", "detail": "s45"}
-        with patch("backend.main.probe_video", return_value=dict(RTX_1920)):
-            self.assertEqual(self.post("orig", body).status_code, 400)       # not an RTX VSR clip
-            self.assertEqual(self.post("rtx2560", body).status_code, 400)
-            self.assertEqual(self.post("gan", body).status_code, 400)
-            response = self.post("rtx_ltx", body)
-            self.assertEqual(response.status_code, 400)
-            self.assertIn("tested", response.json()["detail"])
-            self.assertEqual(self.post("rtx_gone", body).status_code, 409)
-        self.add_rtx("rtx", "orig")
-        with patch("backend.main.probe_video", return_value=dict(RTX_1920)):
-            self.assertEqual(self.post("rtx", {**body, "detail": None}).status_code, 400)
-        self.assertEqual(list(self.input.iterdir()), [])
+        with patch("backend.main.probe_video", return_value=dict(RTX_1920)),                 patch("backend.main.subprocess.run", side_effect=self.fake_ffmpeg):
+            for job_id, original in (("orig", "orig"), ("rtx2560", "orig"), ("gan", "orig"),
+                                     ("rtx_ltx", "ltx_orig"), ("rtx_gone", None)):
+                response = self.post(job_id, body)
+                self.assertEqual(response.status_code, 200, (job_id, response.text))
+                options = response.json()["options"]
+                self.assertEqual((options["original_job_id"], options["chain"], options["source_job_id"]),
+                                 (original, "pika", job_id))
+            typed = self.post("orig", {**body, "prompt": "Two friends fold laundry."}).json()["options"]
+            self.assertEqual(typed["prompt"], "Two friends fold laundry.")
+            self.assertEqual(self.post("orig", {**body, "detail": None}).status_code, 400)   # strength still required
 
 
 # --- RIFE 60 / 120 fps (issue #52) -------------------------------------------------------------------------------

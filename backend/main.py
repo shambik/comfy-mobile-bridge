@@ -3227,6 +3227,7 @@ class PostProcessBody(BaseModel):
     long_side: int | None = None
     fps_target: int | None = None   # RIFE 60 or 120 fps (issue #52)
     detail: str | None = None   # H3 detail strength (issue #50): s30, s45, s60, s60x3 or s75x3
+    prompt: str | None = None   # H3 detail prompt (issue #69); empty = the original clip's prompt
 
 
 @app.post("/api/jobs/{job_id}/post-process")
@@ -3243,7 +3244,7 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
     if not source_path or not Path(source_path).is_file():
         raise HTTPException(409, "The source video file is missing")
     if body.method == H3_DETAIL:
-        return await _queue_h3_detail_job(source, Path(source_path), body.detail)
+        return await _queue_h3_detail_job(source, Path(source_path), body.detail, body.prompt)
     try:
         probe = await asyncio.to_thread(probe_video, Path(source_path))
         options = plan_post_process(probe, body.operation, body.method, body.long_side, body.fps_target)
@@ -3257,34 +3258,40 @@ async def post_process_job(request: Request, job_id: str, body: PostProcessBody)
                            source.get("aspect_ratio") or aspect_label(probe["width"], probe["height"]), job_id)
 
 
-async def _queue_h3_detail_job(rtx_job: dict, rtx_path: Path, level: str | None) -> dict:
-    """RTX VSR + H3 detail (issue #50): only on a finished RTX VSR 1920 clip whose original is a tested H3 clip."""
+def h3_detail_original(job: dict) -> dict | None:
+    """The generation job a video comes from: the job itself, or followed back through post-process cards
+    (upscale, smoothing, an earlier detail pass). None for an uploaded video."""
+    seen = set()
+    while job and job.get("engine") == "post" and job["id"] not in seen:
+        seen.add(job["id"])
+        try:
+            options = json.loads(job.get("post_options_json") or "null") or {}
+        except json.JSONDecodeError:
+            return None
+        parent = options.get("source_job_id")
+        job = get_job(parent, public=False) if parent else None
+    return job
+
+
+async def _queue_h3_detail_job(source: dict, source_path: Path, level: str | None, prompt: str | None) -> dict:
+    """H3 detail (issue #50) on any finished video (issue #69, user decision: no conditions, warnings only)."""
+    original = h3_detail_original(source)
     try:
-        rtx_options = json.loads(rtx_job.get("post_options_json") or "null") or {}
-    except json.JSONDecodeError:
-        rtx_options = {}
-    if rtx_job.get("engine") != "post" or rtx_options.get("method") != "rtx" or rtx_options.get("long_side") != 1920:
-        raise HTTPException(400, "H3 detail runs on an RTX VSR 1920 clip: upscale the video with RTX VSR to 1920 first")
-    original_id = rtx_options.get("source_job_id")
-    original = get_job(original_id, public=False) if original_id else None
-    if not original:
-        raise HTTPException(409, "H3 detail needs the original H3 clip this RTX VSR video was made from (its prompt and "
-                                 "model); it is no longer in the app")
-    try:
-        probe = await asyncio.to_thread(probe_video, rtx_path)
-        options = plan_h3_detail(probe, original, level)
+        probe = await asyncio.to_thread(probe_video, source_path)
+        options = plan_h3_detail(probe, original, level, prompt)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    options["source_job_id"] = rtx_job["id"]
+    options["source_job_id"] = source["id"]
     new_id = uuid.uuid4().hex
     input_name = f"post_{new_id}_source.mp4"
-    out = await asyncio.to_thread(subprocess.run, h3_detail_input_command(options, rtx_path, INPUT / input_name),
+    out = await asyncio.to_thread(subprocess.run, h3_detail_input_command(options, source_path, INPUT / input_name),
                                   capture_output=True, text=True, timeout=600)
     if out.returncode or not (INPUT / input_name).is_file():
         (INPUT / input_name).unlink(missing_ok=True)
-        raise HTTPException(500, "The RTX VSR clip could not be prepared for H3 detail")
-    return _queue_post_job(new_id, input_name, options, original["prompt"],
-                           rtx_job.get("aspect_ratio") or aspect_label(options["width"], options["height"]), rtx_job["id"])
+        raise HTTPException(500, "The clip could not be prepared for H3 detail")
+    response = _queue_post_job(new_id, input_name, options, (original or source)["prompt"],
+                               source.get("aspect_ratio") or aspect_label(options["width"], options["height"]), source["id"])
+    return {**response, "warnings": options["warnings"]}
 
 
 @app.post("/api/edit")
@@ -3682,8 +3689,9 @@ swap_lab.set_job_queue(_queue_swap_job)
 @app.post("/api/post-process")
 async def post_process_upload(request: Request, video: UploadFile = File(...), operation: str = Form(...),
                               method: str = Form(...), long_side: int | None = Form(None),
-                              fps_target: int | None = Form(None)):
-    """Queue an upscale or interpolation of an uploaded video (same tested limits as finished jobs)."""
+                              fps_target: int | None = Form(None), detail: str | None = Form(None),
+                              prompt: str | None = Form(None)):
+    """Queue an upscale, interpolation or H3 detail pass (issue #69) of an uploaded video."""
     require_csrf(request)
     require_visual_enhancer(method)
     if video.content_type not in UPLOAD_TYPES:
@@ -3699,14 +3707,24 @@ async def post_process_upload(request: Request, video: UploadFile = File(...), o
                 if size > UPLOAD_MAX_BYTES:
                     raise HTTPException(400, "The video is larger than 500 MB")
                 handle.write(chunk)
+        prepared = INPUT / f".post_{new_id}_prepared.mp4"
         try:
-            probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
-            options = plan_post_process(probe, operation, method, long_side, fps_target)
+            if method == H3_DETAIL:   # issue #69: uploads too, fitted like any clip (24 fps, 17n+5 frames)
+                probe = await asyncio.to_thread(prepare_upload, raw, prepared)
+                options = plan_h3_detail(probe, None, detail, prompt)
+                out = await asyncio.to_thread(subprocess.run, h3_detail_input_command(options, prepared, INPUT / input_name),
+                                              capture_output=True, text=True, timeout=600)
+                if out.returncode or not (INPUT / input_name).is_file():
+                    raise ValueError("The video could not be prepared for H3 detail")
+            else:
+                probe = await asyncio.to_thread(prepare_upload, raw, INPUT / input_name)
+                options = plan_post_process(probe, operation, method, long_side, fps_target)
         except ValueError as exc:
             (INPUT / input_name).unlink(missing_ok=True)
             raise HTTPException(400, str(exc)) from exc
     finally:
         raw.unlink(missing_ok=True)
+        prepared.unlink(missing_ok=True)
     filename = Path(video.filename or "video").name[:120]
     options["source_filename"] = filename
     return _queue_post_job(new_id, input_name, options, f"External video: {filename}",
