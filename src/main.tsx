@@ -1878,7 +1878,10 @@ function App() {
     return job?.prompt || 'וידאו מההיסטוריה'
   }
 
-  const toggleAssetGroup = (key: string) => setCollapsedAssetGroups(current => ({ ...current, [key]: !current[key] }))
+  // Projects and their folders start folded closed (issue #78, user 2026-11-23: "annoying that they're all expanded");
+  // a tap opens one for the session. Only the "no project" group starts open.
+  const groupCollapsed = (groups: Record<string, boolean>, key: string) => groups[key] ?? key !== 'unassigned'
+  const toggleAssetGroup = (key: string) => setCollapsedAssetGroups(current => ({ ...current, [key]: !groupCollapsed(current, key) }))
 
   const renderResultAsset = (asset: ResultAsset) => {
     if (asset.kind === 'sequence') {
@@ -1899,8 +1902,8 @@ function App() {
   }))
 
   const renderAssetContainer = (key: string, title: string, assets: ResultAsset[], level: 'project'|'folder'|'unassigned', children?: React.ReactNode, onCreateFolder?: () => void, nestedKeys: string[] = []) => {
-    const collapsed = !!collapsedAssetGroups[key]
-    const allNestedCollapsed = !collapsed && nestedKeys.length > 0 && nestedKeys.every(nested => collapsedAssetGroups[nested])
+    const collapsed = groupCollapsed(collapsedAssetGroups, key)
+    const allNestedCollapsed = !collapsed && nestedKeys.length > 0 && nestedKeys.every(nested => groupCollapsed(collapsedAssetGroups, nested))
     return <section className={`asset-result-container ${level}${collapsed ? ' collapsed' : ''}`} key={key}>
       <div className="asset-container-head">
         <button type="button" className="asset-container-toggle" onClick={() => toggleAssetGroup(key)} aria-expanded={!collapsed}>
