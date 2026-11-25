@@ -68,7 +68,7 @@ SKIN_STEP_RANGE = (4, 16)
 SKIN_OPTION_DEFAULTS = {
     "model": "pruned", "speed_lora": "tier", "speed_strength": 1.0, "people_strength": 1.0,
     "shift_video": 12.0, "shift_audio": 3.0, "scheduler": "beta", "tail_steps": 0,
-    "flow": "t8", "ref_size": "max", "parts": 1,
+    "flow": "t8", "ref_size": "max", "parts": 1, "continuity": "visual",
 }
 # model "base" is H3's own pruned Ref2VA (reference) or FL2VA (other modes); speed_lora "pika" is the
 # matching Pika H3 Flex LoRA; flow "pika" samples with Pika's 6 knots instead of the T8 sampler.
@@ -82,6 +82,10 @@ SKIN_OPTION_CHOICES = {
     # Lab-tested: 3 parts, God, int8, 1.5 MP 9:16 (15.08 s in 29 min). The other tiers, 16:9 and 2 parts
     # are allowed by the user's choice and flagged as untested in the form.
     "parts": (1, 2, 3),
+    # How a long take continues into each later part (issue #80, the user chooses): "visual" guides it with the
+    # previous part's last 22 frames (default); "hard" locks the last 39 frames of picture and sound. Ignored
+    # without a long take.
+    "continuity": ("visual", "hard"),
 }
 LONG_TAKE_PART_SECONDS = 5
 LONG_TAKE_PROMPT_LIMIT = 4000  # per part

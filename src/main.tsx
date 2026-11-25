@@ -18,7 +18,8 @@ type PikaSpeed = 'direct' | 'turbo4'
 type SkinTier = 'skin_god' | 'skin_balanced' | 'skin_max' | 'skin_app'
 type SkinMegapixels = 1 | 1.5
 type OmniMegapixels = 0.6 | 1 | 1.5
-type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number; parts?: LongTakeParts }
+type LongTakeContinuity = 'visual' | 'hard'
+type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number; parts?: LongTakeParts; continuity?: LongTakeContinuity }
 // Singularity long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop; 1 = one normal pass.
 type LongTakeParts = 1 | 2 | 3
 type LtxQuality = 'balanced' | 'high'
@@ -2092,7 +2093,13 @@ function App() {
                 <div className="turbo-profile-toggle">
                   {([1, 2, 3] as LongTakeParts[]).map(parts => <button key={parts} type="button" className={longTakeParts === parts ? 'active' : ''} aria-pressed={longTakeParts === parts} onClick={() => { setSkinOption('parts', parts); setDuration(parts > 1 ? parts * LONG_TAKE_PART_SECONDS : Math.min(duration, SKIN_DURATION[1])) }}><strong dir="ltr">{parts === 1 ? 'Off' : `${parts * LONG_TAKE_PART_SECONDS} s · ${parts} parts`}</strong><small>{parts === 1 ? 'מעבר אחד, 2–7 שנ׳' : parts === 3 ? 'נבדק: 9:16 · God · int8 · ≈29 דק׳' : 'לא נבדק עדיין · ≈20 דק׳'}</small></button>)}
                 </div>
-                {longTakeParts > 1 && <p className="setting-note">כתבו {longTakeParts} פרומפטים מלאים בתיבה אחת, אחד לכל חלק, מופרדים בשורה שיש בה רק <span dir="ltr">---</span>. כל חלק ממשיך בדיוק מסוף הקודם (22 פריימים של תמונה וסאונד), כך שהטייק רציף. רק 9:16 · 15 שנ׳ · God · int8 נבדק במעבדה; 16:9, 10 שנ׳ ושאר הרמות לא נבדקו.</p>}
+                {longTakeParts > 1 && <>
+                  <div className="setting-title turbo-profile-title"><span>המשכיות בין החלקים</span><small>איך כל חלק ממשיך את הקודם</small></div>
+                  <div className="turbo-profile-toggle">
+                    {(['visual', 'hard'] as LongTakeContinuity[]).map(value => <button key={value} type="button" className={(preferences.skinOptions.continuity ?? 'visual') === value ? 'active' : ''} aria-pressed={(preferences.skinOptions.continuity ?? 'visual') === value} onClick={() => setSkinOption('continuity', value)}><strong dir="ltr">{value === 'visual' ? 'Visual continuity' : 'Hard picture'}</strong><small>{value === 'visual' ? 'ברירת מחדל · 22 פריימים מנחים · תנועה חופשית' : '39 פריימים נעולים · מעבר יציב יותר בסצנות כבדות · פחות תנועה'}</small></button>)}
+                  </div>
+                  <p className="setting-note">כתבו {longTakeParts} פרומפטים מלאים בתיבה אחת, אחד לכל חלק, מופרדים בשורה שיש בה רק <span dir="ltr">---</span>. כל חלק ממשיך מסוף הקודם: {(preferences.skinOptions.continuity ?? 'visual') === 'hard' ? '39 הפריימים האחרונים של תמונה וסאונד נעולים בדיוק (Hard picture), כדי שהמעבר לא יקפוץ בחדות או בבהירות; התנועה אחרי המעבר מעט מאופקת יותר.' : '22 הפריימים האחרונים של תמונה וסאונד מנחים אותו (Visual continuity), והתנועה חופשית. אם המעבר קופץ בסצנה כבדה, נסו Hard picture.'} רק 9:16 · 15 שנ׳ · God · int8 נבדק במעבדה; 16:9, 10 שנ׳ ושאר הרמות לא נבדקו.</p>
+                </>}
               </>}
               <details className="skin-advanced">
                 <summary>הגדרות מתקדמות</summary>
@@ -2706,7 +2713,7 @@ function skinSetupParts(job: { workflow_variant?: string; mode?: string; skin_op
   const tail = options.tail_steps ? `, +${options.tail_steps} tail steps` : ''
   const sampler = options.flow === 'pika' ? `Sampler: Pika, ${job.steps ?? 6} steps`
     : `Sampler: T8 Dual-Clock ${options.scheduler || 'beta'}, ${job.steps ?? 8} steps${shift}${tail}`
-  const longTake = (options.parts ?? 1) > 1 ? [`Long take: ${options.parts} × ${LONG_TAKE_PART_SECONDS} s (Context-Loop)`] : []
+  const longTake = (options.parts ?? 1) > 1 ? [`Long take: ${options.parts} × ${LONG_TAKE_PART_SECONDS} s (Context-Loop${options.continuity === 'hard' ? ', Hard picture' : ''})`] : []
   return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, ...longTake, 'Not Fused']
 }
 
