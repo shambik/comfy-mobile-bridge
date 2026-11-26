@@ -2095,7 +2095,7 @@ function App() {
               </div>
               <div className="setting-title turbo-profile-title"><span>גודל</span><small>9:16 או 16:9</small></div>
               <div className="turbo-profile-toggle">
-                {([1, 1.5] as SkinMegapixels[]).map(value => <button key={value} type="button" className={preferences.skinMegapixels === value ? 'active' : ''} aria-pressed={preferences.skinMegapixels === value} onClick={() => setPreferences(current => ({ ...current, skinMegapixels: value }))}><strong dir="ltr">{value.toFixed(1)} MP · {SKIN_SIZES[value][skinAspect].join('×')}</strong><small>{value === 1 ? 'נבדק · ≈5.5–8 דק׳' : 'בבדיקה · עור חד יותר, איטי יותר'}</small></button>)}
+                {([1, 1.5] as SkinMegapixels[]).map(value => <button key={value} type="button" className={preferences.skinMegapixels === value ? 'active' : ''} aria-pressed={preferences.skinMegapixels === value} onClick={() => { setPreferences(current => ({ ...current, skinMegapixels: value, skinOptions: value > 1 && current.skinOptions.part_seconds === 10 ? { ...current.skinOptions, part_seconds: 7 } : current.skinOptions })); if (value > 1 && longTakePartSeconds === 10 && longTakeParts > 1) setDuration(longTakeParts * 7) }}><strong dir="ltr">{value.toFixed(1)} MP · {SKIN_SIZES[value][skinAspect].join('×')}</strong><small>{value === 1 ? 'נבדק · ≈5.5–8 דק׳' : 'בבדיקה · עור חד יותר, איטי יותר'}</small></button>)}
               </div>
               {longTakeAllowed && <>
                 <div className="setting-title turbo-profile-title"><span>טייק ארוך</span><small>Context-Loop · חלקים רציפים</small></div>
