@@ -690,6 +690,29 @@ with Hard picture, 612 s vs 592 s, 9.5 GB each. On the PRISM beast (2 x 10 s, he
 jumped +97 % in sharpness at the join and Hard picture +41 %. So: keep Visual continuity for normal scenes; switch to
 Hard picture when a join visibly jumps. One seed per setting.
 
+**Long-take part length and up to 9 parts** (issue #84, skin options `part_seconds` 5 / 7 / 10 and `parts` up to 9;
+"אורך כל חלק" under the long-take buttons). Frames per part: 5 s 124 then 141 (Visual) or 158 (Hard picture); 7 s 175
+every part; 10 s 243 then 260. 7 and 10 s parts get the Chunk FeedForward + Low VRAM Attention memory nodes
+automatically. A take of more than 3 parts runs as batches of 3 on the same Context-Loop run inside the one job (RAM
+climbs ~2.5-3 GB per part within one prompt and drops between prompts); each batch resumes the saved parts before it,
+and only the last one deletes the checkpoints. Lab 2026-11-24/25 (God int8, man + redhead, rainy-café dialogue):
+- 7 s at 1.5 MP: 9 parts, Hard picture, the man, the redhead and a small layout still, the long prompts below: 52.6 s in
+  3 batches of 44-46 min (~2.3 h), no spill, peak RAM 47-51 GB, all 8 joins smooth including the batch boundaries;
+  layout held, one unrequested cutaway inside part 4 that came back to the wide by itself.
+- 10 s at 1 MP: 3 parts, Hard picture, 3 small pictures (face crops + layout): 28.5 s in 38 min, 79-90 s/step, no spill,
+  joins smooth, no mid-part cut. 60 s = 2 batches of 3 joined smoothly at 30 s (53.6 min batch). With big sheets and
+  short prompts a 10 s part cut mid-part (outfit and background changed at 5.2 s), so use the recipe below.
+- 10 s at 1.5 MP sat in step 1 for ~29 min at 135 W (a spill) even with the nodes, so the app refuses it. 10 s without
+  the nodes spilled in part 2 (594 s for step 1 at ~150 W). 15 s parts at 1 MP spilled with 3 pictures; not offered.
+- The recipe that held the layout: Hard picture; small pictures (face crops of the sheets, a small layout still as
+  `<Picture 3>`, ref size match), which also make every step faster; the same SETTING / CAMERA / AMBIENT text in every
+  part, new actions from 00:01.800 (Hard picture carries ~1.6 s), no face-only actions, and an exact end pose per part
+  that the next part opens on (`D:/h3-omnilab/tests/longtakes_multishot/prompts_h60.py`).
+- App run 2026-11-26 (test copy, job `13aa2cfa`): 4 x 7 s at 1 MP 16:9, Hard picture, the 3 small pictures and the
+  first 4 prompts of `prompts_h60.py` = 2 batches in one job: 24.3 s (583 frames = 175 + 3 x 136) in 30.3 min, ~6-7 min
+  per part, VRAM peak 9.6 GB, RAM peak 47 GB, no spill. Frame change at the joins 2.3 / 1.9 / 1.8 against 2.54 at most
+  elsewhere in the take; the batch boundary (frame 447) +0.6 % sharpness. Layout held in all 4 parts.
+
 **Realism reference** (keeper `a6331f7f`, 2026-11-20; user 2026-11-24: "This one is very good"). Start realistic
 people from this flow and change one thing at a time:
 
