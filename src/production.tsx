@@ -501,7 +501,7 @@ export function ProductionStudio({ csrf }: { csrf: string }) {
   const [models, setModels] = useState<Record<Runtime, ModelOption[]>>({ codex: [], agy: [] })
   const [modelsFetchedAt, setModelsFetchedAt] = useState('')
   const [modelsRefreshing, setModelsRefreshing] = useState(false)
-  const [settings, setSettings] = useState<AgentSettings>({ codex_runtime: 'codex', codex_model: 'gpt-5.6-sol', codex_effort: 'high', agy_runtime: 'agy', agy_model: 'gemini-3.1-pro-high', agy_effort: 'high' })
+  const [settings, setSettings] = useState<AgentSettings>({ codex_runtime: 'codex', codex_model: 'gpt-6.1-sol', codex_effort: 'high', agy_runtime: 'agy', agy_model: 'gemini-3.1-pro-high', agy_effort: 'high' })
   const [pipeline, setPipeline] = useState<Pipeline>('legacy_music_video_v1')
   const [councilMode, setCouncilMode] = useState<'solo'|'multi'>('multi')
   const [councilRoles, setCouncilRoles] = useState<CouncilRole[]>([])
