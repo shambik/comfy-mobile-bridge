@@ -27,6 +27,7 @@ from .media import assemble_clips, extract_last_frame
 from .reference_check import sheet_frames
 from .library import finalize_completed_asset, resolve_asset_path
 from .generation import pika_options
+from .spill_rules import SHORT_JOB_SECONDS, SpillWatch, StepClock, rule_cancel_reason, step_limit
 from .video_edit import H3_EDIT, edit_workflow
 from .post_process import (H3_DETAIL, VISUAL_ENHANCER_TIMEOUT_SECONDS, chunk_cut_command, chunk_join_command,
                            chunk_keep, decimate_command, h3_detail_workflow, post_node_classes, post_required_files,
@@ -87,6 +88,9 @@ class QueueWorker:
         # queued job can never run behind the canceled prompt.
         self.comfy_restart_required = False
         self.comfy_manual_stop = False
+        # Issue #82, the user's rule: after a spill or a spill-rule cancel, ComfyUI is stopped and started again
+        # before the next job (comfy_restart_required alone only makes sure it is running).
+        self.spill_restart_pending = False
         # ComfyUI prompts survive a bridge restart.  Recovery uses this map to
         # resume those prompts instead of submitting duplicate generations.
         self.recovered_prompts: dict[str, dict[str, str | None]] = {}
@@ -615,6 +619,13 @@ class QueueWorker:
     async def loop(self):
         await self.reconcile()
         while not self.stopping:
+            if self.spill_restart_pending and not self.comfy_manual_stop:
+                self.spill_restart_pending = False
+                try:
+                    await self.comfy.shutdown()
+                except Exception:
+                    pass
+                self.comfy_restart_required = True
             if self.comfy_restart_required and not self.comfy_manual_stop:
                 try:
                     await self.comfy.ensure_started()
@@ -1247,6 +1258,23 @@ class QueueWorker:
         swap_meta = json.loads(job.get("swap_options_json") or "null") if job["engine"] == "swap" else None
         swap_window_steps = int(swap_meta.get("steps") or 0) if swap_meta and int(swap_meta.get("windows") or 0) > 1 else 0
         swap_window = {"index": 0, "last": float("inf")}
+        # The user's spill rules (issue #82): watch every GPU sample for a spill, time each real sampling step, and
+        # cancel under the step limits unless the job has "No limits". After a spill or a rule cancel ComfyUI
+        # restarts before the next job.
+        step_state = {"step": 0, "total": 0}
+        spill_watch, step_clock = SpillWatch(), StepClock()
+        try:
+            skin_parts = int((json.loads(job.get("skin_options_json") or "null") or {}).get("parts") or 1)
+        except (TypeError, ValueError, AttributeError):
+            skin_parts = 1
+        long_take_job = job["engine"] == "singularity" and skin_parts > 1
+        clip_seconds = float(LONG_TAKE_PART_SECONDS if long_take_job else (job.get("duration") or 0))
+        megapixels = (int(job.get("width") or 0) * int(job.get("height") or 0)) / 1_000_000
+        rule_step_limit = step_limit(clip_seconds, megapixels)
+        single_short_job = not long_take_job and 0 < clip_seconds <= SHORT_JOB_SECONDS and job["engine"] != "post"
+        no_limits = bool(job.get("no_limits"))
+        runtime["spill_rules"] = {"step_limit_seconds": rule_step_limit, "single_short_job": single_short_job,
+                                  "no_limits": no_limits}
         ws_ready = asyncio.Event()
         ws_stop = asyncio.Event()
 
@@ -1297,6 +1325,7 @@ class QueueWorker:
                     swap_window["last"] = value
                 fraction = min(1.0, max(0.0, value / total))
                 step = min(total, max(0, int(round(value))))
+                step_state["step"], step_state["total"] = step, total
                 sample_elapsed = max(0.0, time.monotonic() - sampling_started)
                 step_eta = ((total - value) * sample_elapsed / value) if value > 0 else None
                 candidates = [eta for eta in (step_eta, historical_eta) if eta is not None]
@@ -1419,6 +1448,30 @@ class QueueWorker:
                     consecutive_comfy_down_failures = 0
 
                 sample = await asyncio.to_thread(gpu_sample, comfy_pid)
+                rule_now = time.monotonic()
+                if sample:
+                    spilling = spill_watch.feed(sample, rule_now)
+                    spill_state = runtime.get("spill") or {}
+                    if spilling and not spill_state.get("active"):
+                        runtime["spill"] = {"active": True, "detected_at": now_iso(), "sample": spill_watch.last,
+                                            "no_limits": no_limits}
+                        self.spill_restart_pending = True   # the user's rule: restart before the next job
+                        update_job(job["id"], runtime=runtime)
+                    elif not spilling and spill_state.get("active"):
+                        spill_state.update(active=False, longest_seconds=round(spill_watch.longest))
+                        update_job(job["id"], runtime=runtime)
+                step_seconds = step_clock.feed(step_state["step"], step_state["total"], rule_now)
+                if not no_limits:
+                    reason = rule_cancel_reason(
+                        step_seconds=step_seconds, step=step_state["step"], total=step_state["total"],
+                        limit=rule_step_limit, single_short_job=single_short_job,
+                        running_seconds=rule_now - started)
+                    if reason:
+                        self.spill_restart_pending = True
+                        runtime["spill_rules"]["canceled"] = reason
+                        update_job(job["id"], runtime=runtime)
+                        await self._cancel_comfy_prompt(prompt_id)
+                        raise RuntimeError(reason)
                 if sample:
                     samples.append({"at_seconds": round(time.monotonic() - started, 1), **sample})
                     if (sample.get("vram_used_mib") or 0) > (peak.get("vram_used_mib") or 0):

@@ -66,6 +66,7 @@ def _create_jobs_table(db):
         source_audio_path TEXT,
         source_audio_name TEXT,
         no_audio INTEGER NOT NULL DEFAULT 0,
+        no_limits INTEGER NOT NULL DEFAULT 0,
         first_frame_path TEXT,
         first_frame_name TEXT,
         last_frame_path TEXT,
@@ -203,7 +204,7 @@ def _rebuild_jobs_table(db):
         "ltx_reference_model", "ltx_sharp_decode", "ltx_calm_sampler", "skin_options_json", "ltx_recipe", "post_options_json", "swap_options_json", "encoder", "steps", "width", "height", "megapixels", "aspect_ratio",
         "seed", "sequence_id", "sequence_index", "sequence_total", "status", "position",
         "input_path", "input_name", "reference_images_json", "reference_videos_json",
-        "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio",
+        "reference_audio_path", "reference_audio_name", "source_audio_path", "source_audio_name", "no_audio", "no_limits",
         "first_frame_path", "first_frame_name",
         "last_frame_path", "last_frame_name", "output_path", "prompt_id",
         "progress", "phase", "step", "total_steps", "eta_seconds", "error",
@@ -236,6 +237,7 @@ def _rebuild_jobs_table(db):
         "source_audio_path": "NULL",
         "source_audio_name": "NULL",
         "no_audio": "0",
+        "no_limits": "0",
         "runtime_json": "NULL",
     }
     select_values = []
@@ -318,6 +320,8 @@ def init_db():
                     db.execute("ALTER TABLE jobs ADD COLUMN skin_options_json TEXT")
                 if "ltx_recipe" not in columns:
                     db.execute("ALTER TABLE jobs ADD COLUMN ltx_recipe TEXT")
+                if "no_limits" not in columns:  # issue #82: the per-job "No limits" switch for the spill rules
+                    db.execute("ALTER TABLE jobs ADD COLUMN no_limits INTEGER NOT NULL DEFAULT 0")
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, position)")
                 db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_sequence ON jobs(sequence_id, sequence_index)")
         elif not table:
@@ -394,6 +398,7 @@ def row_dict(row):
         add_source("last_frame", item.get("last_frame_name"), "closing frame")
     item["source_assets"] = source_assets
     item["no_audio"] = bool(item.get("no_audio"))
+    item["no_limits"] = bool(item.get("no_limits"))
     try:
         item["post_options"] = json.loads(item.pop("post_options_json", None) or "null")
     except json.JSONDecodeError:
