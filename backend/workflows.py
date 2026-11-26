@@ -910,9 +910,63 @@ def long_take_parts(prompt: str) -> list[str]:
     return [part for part in parts if part]
 
 
-def long_take_frames(parts: int, continuity: str = "visual") -> list[int]:
-    carried = LONG_TAKE_CONTINUITY[continuity][1]
-    return [LONG_TAKE_FIRST_FRAMES] + [LONG_TAKE_LATER_FRAMES - LONG_TAKE_OVERLAP + carried] * (parts - 1)
+# Issue #84: frames per part (17n+5) by part length and continuity, as rendered in the lab (2026-11-24/25):
+# 5 s 124 / 141 (Visual) or 158 (Hard picture); 7 s 175 / 175 (9 x 7 s at 1.5 MP = 52.6 s, cut-back takes);
+# 10 s 243 / 260 (3 x 10 s at 1 MP = 28.5 s, 60 s in 2 batches).
+LONG_TAKE_PART_FRAMES = {
+    5: {"visual": (124, 141), "hard": (124, 158)},
+    7: {"visual": (175, 175), "hard": (175, 175)},
+    10: {"visual": (243, 260), "hard": (243, 260)},
+}
+LONG_TAKE_BATCH_PARTS = 3  # parts per batch inside one job; RAM climbs ~2.5-3 GB per part within one prompt
+# MiniMax Chunk FeedForward + Low VRAM Attention (T8 pack): needed for 7 s and 10 s parts on 10 GB (lab 2026-11-24:
+# 10 s parts spill without them; the 15 s beast pass went from 2 h 13 min to 51 min with them).
+MEMORY_NODE_CLASSES = {"MiniMaxH3ChunkFeedForwardT8Advanced", "MiniMaxH3LowVRAMAttentionT8Advanced"}
+
+
+def long_take_frames(parts: int, continuity: str = "visual", part_seconds: int = LONG_TAKE_PART_SECONDS) -> list[int]:
+    first, later = LONG_TAKE_PART_FRAMES[part_seconds][continuity]
+    return [first] + [later] * (parts - 1)
+
+
+def apply_memory_nodes(workflow: dict) -> dict:
+    """Return a copy with the two memory nodes right after every H3 model loader; its consumers read the patched model."""
+    nodes = deepcopy(workflow)
+    loaders = [key for key, node in nodes.items() if node.get("class_type") == "UNETLoader"]
+    for index, key in enumerate(loaders):
+        chunk, attention = f"mem_ff_{key}", f"mem_attn_{key}"
+        for node in nodes.values():
+            for name, value in node["inputs"].items():
+                if value == [key, 0]:
+                    node["inputs"][name] = [attention, 0]
+        nodes[chunk] = {"class_type": "MiniMaxH3ChunkFeedForwardT8Advanced",
+                        "inputs": {"model": [key, 0], "chunks": 4, "seq_threshold": 2048}}
+        nodes[attention] = {"class_type": "MiniMaxH3LowVRAMAttentionT8Advanced",
+                            "inputs": {"model": [chunk, 0], "head_chunks": 4}}
+    return nodes
+
+
+def long_take_batches(workflow: dict, parts: int, prefix: str, size: int = LONG_TAKE_BATCH_PARTS) -> list[dict]:
+    """Split a long take of more than `size` parts into batches on the same Context-Loop run: each batch renders its
+    part range (start_clip + scene_range) and resumes the saved parts before it; only the last batch deletes the
+    checkpoints and saves under the job's prefix (earlier batches save under <prefix>_batchN, removed afterwards)."""
+    if parts <= size:
+        return [workflow]
+    batches = []
+    starts = list(range(1, parts + 1, size))
+    for number, first in enumerate(starts, 1):
+        last = min(first + size - 1, parts)
+        graph = deepcopy(workflow)
+        for node in ("303", "304"):
+            graph[node]["inputs"].update(start_clip=first, scene_range=f"{first}:{last}")
+        final = number == len(starts)
+        graph["311"]["inputs"]["delete_checkpoints_after_assembly"] = final
+        if not final:
+            for node in graph.values():
+                if node.get("class_type") == "SaveVideo":
+                    node["inputs"]["filename_prefix"] = f"{prefix}_batch{number}"
+        batches.append(graph)
+    return batches
 
 
 _LONG_TAKE_RUN = re.compile(r"[A-Za-z0-9_.-]{1,120}")
@@ -985,7 +1039,8 @@ def long_take_saved_count(saved: list[Path], start_clip: int, since: float) -> i
 
 
 def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, width: int, height: int,
-                       run_name: str, include_audio: bool = True, continuity: str = "visual") -> dict:
+                       run_name: str, include_audio: bool = True, continuity: str = "visual",
+                       part_seconds: int = LONG_TAKE_PART_SECONDS) -> dict:
     """Wrap a Singularity reference graph (singularity_workflow, mode "reference") in Context-Loop's scene loop.
 
     The model chain, LoRAs, sampler, attention, VAEs and references stay exactly as built; per part, Chain Current
@@ -997,7 +1052,9 @@ def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, w
     nodes = deepcopy(nodes)
     if continuity not in LONG_TAKE_CONTINUITY:
         raise ValueError("Long-take continuity must be visual or hard")
-    frames = long_take_frames(len(prompts), continuity)
+    if part_seconds not in LONG_TAKE_PART_FRAMES:
+        raise ValueError("Long-take parts are 5, 7 or 10 seconds")
+    frames = long_take_frames(len(prompts), continuity, part_seconds)
     shots = [{"id": f"part_{index + 1}", "prompt": text, "length": length,
               "seed": str((seed + index * 7919) % 2**48)}
              for index, (text, length) in enumerate(zip(prompts, frames))]
@@ -1007,7 +1064,7 @@ def long_take_workflow(nodes: dict, prompts: list[str], seed: int, steps: int, w
     nodes["301"] = {"class_type": "MiniMaxH3ChainPlanModern", "inputs": {
         "plan_json": json.dumps({"shots": shots}, ensure_ascii=False), "chain_policy": ["300", 0],
         "run_name": run_name, "generation_fingerprint": "singularity-long-take", "width": width, "height": height,
-        "encode_mode": "video", "crop": "disabled", "default_duration_seconds": float(LONG_TAKE_PART_SECONDS),
+        "encode_mode": "video", "crop": "disabled", "default_duration_seconds": float(part_seconds),
         "default_steps": steps, "base_seed": 0, "segment_crf": 12, "video_blend_frames": 0}}
     nodes["302"] = {"class_type": "MiniMaxH3ChainScenePromptEditor", "inputs": {"plan": ["301", 0]}}
     nodes["303"] = {"class_type": "MiniMaxH3ChainPreflight", "inputs": {

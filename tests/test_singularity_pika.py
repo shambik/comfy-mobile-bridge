@@ -135,10 +135,11 @@ class LongTakeTests(unittest.TestCase):
         self.assertEqual(long_take_parts("one\n\ntwo\n\nthree"), ["one", "two", "three"])
         self.assertEqual(long_take_parts("a\r\n---\r\n\r\nb"), ["a", "b"])
 
-    def test_option_accepts_two_or_three_parts(self):
+    def test_option_accepts_up_to_nine_parts(self):
         self.assertEqual(normalize_skin_options('{"parts": 3}')["parts"], 3)
+        self.assertEqual(normalize_skin_options('{"parts": 9}')["parts"], 9)  # issue #84
         self.assertEqual(normalize_skin_options(None)["parts"], 1)
-        for raw in ('{"parts": 4}', '{"parts": 0}', '{"parts": "3"}'):
+        for raw in ('{"parts": 10}', '{"parts": 0}', '{"parts": "3"}'):
             with self.subTest(raw), self.assertRaises(ValueError):
                 normalize_skin_options(raw)
 
@@ -256,6 +257,57 @@ class LongTakeTests(unittest.TestCase):
         self.assertEqual(normalize_skin_options('{"parts": 2}')["continuity"], "visual")
         with self.assertRaises(ValueError):
             normalize_skin_options('{"parts": 2, "continuity": "loose"}')
+
+    def test_part_length_sets_the_frames_of_every_part(self):
+        # Issue #84: 5, 7 or 10 s parts, frames as rendered in the lab (17n+5 lattice)
+        from backend.workflows import long_take_frames
+        self.assertEqual(long_take_frames(3, "visual", 5), [124, 141, 141])
+        self.assertEqual(long_take_frames(3, "hard", 5), [124, 158, 158])
+        self.assertEqual(long_take_frames(9, "visual", 7), [175] * 9)
+        self.assertEqual(long_take_frames(9, "hard", 7), [175] * 9)
+        self.assertEqual(long_take_frames(3, "hard", 10), [243, 260, 260])
+        base = singularity_workflow(self.PROMPT, 7, 7, "h3_bridge_x", "skin_god", 928, 1632, ["ref.png"],
+                                    mode="reference", steps=8)
+        graph = long_take_workflow(base, ["a", "b"], 7, 8, 928, 1632, "run", part_seconds=7)
+        self.assertEqual([s["length"] for s in json.loads(graph["301"]["inputs"]["plan_json"])["shots"]], [175, 175])
+        self.assertEqual(graph["301"]["inputs"]["default_duration_seconds"], 7.0)
+        with self.assertRaises(ValueError):
+            long_take_workflow(base, ["a", "b"], 7, 8, 928, 1632, "run", part_seconds=15)
+        self.assertEqual(normalize_skin_options('{"parts": 9, "part_seconds": 7}')["part_seconds"], 7)
+        self.assertEqual(normalize_skin_options('{"parts": 2}')["part_seconds"], 5)
+        for bad in ('{"parts": 10}', '{"parts": 2, "part_seconds": 15}'):
+            with self.assertRaises(ValueError):
+                normalize_skin_options(bad)
+
+    def test_memory_nodes_sit_between_the_loader_and_its_users(self):
+        from backend.workflows import MEMORY_NODE_CLASSES, apply_memory_nodes
+        graph = self.build()
+        loaders = [key for key, node in graph.items() if node["class_type"] == "UNETLoader"]
+        users = {(key, name) for key, node in graph.items() for name, value in node["inputs"].items()
+                 if value in [[loader, 0] for loader in loaders]}
+        patched = apply_memory_nodes(graph)
+        self.assertNotIn("mem_ff_" + loaders[0], graph)  # the original graph is left as it was
+        for loader in loaders:
+            chunk, attention = patched[f"mem_ff_{loader}"], patched[f"mem_attn_{loader}"]
+            self.assertEqual(chunk["inputs"], {"model": [loader, 0], "chunks": 4, "seq_threshold": 2048})
+            self.assertEqual(attention["inputs"], {"model": [f"mem_ff_{loader}", 0], "head_chunks": 4})
+        for key, name in users:
+            self.assertTrue(str(patched[key]["inputs"][name][0]).startswith("mem_attn_"), (key, name))
+        self.assertEqual({node["class_type"] for node in patched.values()} - {n["class_type"] for n in graph.values()},
+                         MEMORY_NODE_CLASSES)
+
+    def test_more_than_three_parts_run_in_batches_of_one_take(self):
+        from backend.workflows import long_take_batches
+        graph = self.build(parts=[f"part {n}" for n in range(1, 8)])
+        self.assertEqual(long_take_batches(self.build(), 3, "h3_bridge_x"), [self.build()])
+        batches = long_take_batches(graph, 7, "h3_bridge_x")
+        self.assertEqual([b["303"]["inputs"]["scene_range"] for b in batches], ["1:3", "4:6", "7:7"])
+        self.assertEqual([b["304"]["inputs"]["start_clip"] for b in batches], [1, 4, 7])
+        self.assertEqual([b["311"]["inputs"]["delete_checkpoints_after_assembly"] for b in batches], [False, False, True])
+        saves = [[n["inputs"]["filename_prefix"] for n in b.values() if n["class_type"] == "SaveVideo"] for b in batches]
+        self.assertEqual(saves, [["h3_bridge_x_batch1"], ["h3_bridge_x_batch2"], ["h3_bridge_x"]])
+        self.assertEqual({b["301"]["inputs"]["run_name"] for b in batches}, {"bridge_x"})  # one run folder
+        self.assertEqual(graph["303"]["inputs"]["start_clip"], 1)  # the job's own graph is unchanged
 
     def test_only_the_reference_graph_can_be_wrapped(self):
         opening = singularity_workflow("x", 5, 1, "p", "skin_god", 928, 1632, [], mode="opening", steps=8, first_frame_name="a.png")

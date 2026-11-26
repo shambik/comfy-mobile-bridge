@@ -41,7 +41,8 @@ from .workflows import (long_take_info, long_take_saved_count, long_take_saved_p
                         official_fused_workflow, omni_workflow,
                         reference_workflow, singularity_app_workflow, singularity_workflow,
                         spectrum_workflow, standard_workflow, turbo_workflow,
-                        LONG_TAKE_NODE_CLASSES, LONG_TAKE_PART_SECONDS, long_take_parts, long_take_workflow)
+                        LONG_TAKE_NODE_CLASSES, LONG_TAKE_PART_SECONDS, MEMORY_NODE_CLASSES, apply_memory_nodes,
+                        long_take_batches, long_take_parts, long_take_workflow)
 
 
 SAMPLER_NODE_ID = "14"
@@ -911,6 +912,8 @@ class QueueWorker:
                     required |= {"LoadVideo", "GetVideoComponents"}
                 if not pika and int(json.loads(job.get("skin_options_json") or "{}").get("parts") or 1) > 1:
                     required |= LONG_TAKE_NODE_CLASSES  # Context-Loop pack + VHS path loader (issue #65)
+                    if int(json.loads(job.get("skin_options_json") or "{}").get("part_seconds") or 5) >= 7:
+                        required |= MEMORY_NODE_CLASSES  # issue #84: 7 s and 10 s parts need them
             elif job["mode"] == "lip_sync":
                 required |= {"LoadAudio", "MiniMaxH3NativeAudioLock"}
                 if not (AUDIOLOCK_NODE_DIR / "__init__.py").exists():
@@ -1111,7 +1114,10 @@ class QueueWorker:
                     workflow = long_take_workflow(
                         workflow, parts, seed, job["steps"], job["width"], job["height"],
                         run_name=f"bridge_{job['id']}", include_audio=not bool(job.get("no_audio")),
-                        continuity=(skin_options or {}).get("continuity") or "visual")
+                        continuity=(skin_options or {}).get("continuity") or "visual",
+                        part_seconds=int((skin_options or {}).get("part_seconds") or LONG_TAKE_PART_SECONDS))
+                    if int((skin_options or {}).get("part_seconds") or LONG_TAKE_PART_SECONDS) >= 7:
+                        workflow = apply_memory_nodes(workflow)  # issue #84
         elif job["mode"] == "lip_sync":
             if job["engine"] == "fused_sla":
                 workflow_builder = "fused_sla_audio_lock_workflow"
@@ -1223,6 +1229,12 @@ class QueueWorker:
         }
         update_job(job["id"], runtime=runtime)
 
+        # Issue #84: more than 3 parts run as batches of 3 on the same Context-Loop run, one prompt after another
+        # inside this job (RAM climbs per part within one prompt and resets between them).
+        batch_graphs = long_take_batches(workflow, long_take["parts"], prefix) if long_take else [workflow]
+        if len(batch_graphs) > 1:
+            runtime["long_take"]["batches"] = len(batch_graphs)
+            update_job(job["id"], runtime=runtime)
         timeline = JobTimeline(workflow)
         comfy_log = LOGS / "comfy-8190.log"
         log_start = log_offset(comfy_log)
@@ -1268,7 +1280,9 @@ class QueueWorker:
         except (TypeError, ValueError, AttributeError):
             skin_parts = 1
         long_take_job = job["engine"] == "singularity" and skin_parts > 1
-        clip_seconds = float(LONG_TAKE_PART_SECONDS if long_take_job else (job.get("duration") or 0))
+        part_seconds_option = int((json.loads(job.get("skin_options_json") or "null") or {}).get("part_seconds")
+                                  or LONG_TAKE_PART_SECONDS) if long_take_job else 0
+        clip_seconds = float(part_seconds_option if long_take_job else (job.get("duration") or 0))
         megapixels = (int(job.get("width") or 0) * int(job.get("height") or 0)) / 1_000_000
         rule_step_limit = step_limit(clip_seconds, megapixels)
         single_short_job = not long_take_job and 0 < clip_seconds <= SHORT_JOB_SECONDS and job["engine"] != "post"
@@ -1351,145 +1365,153 @@ class QueueWorker:
             except asyncio.TimeoutError:
                 pass
 
-            if not prompt_id:
-                await self._unload_other_engine_family(job)
-                prompt_id = await self.comfy.submit(workflow, client_id)
-            update_job(
-                job["id"], status="running", phase="starting", prompt_id=prompt_id,
-                progress=0, step=0, total_steps=0,
-                eta_seconds=round(estimated_total, 1) if estimated_total else None,
-            )
-            runtime.setdefault("comfy", {})["prompt_id"] = prompt_id
-            update_job(job["id"], runtime=runtime)
             peak = {}
             samples = []
             polls = 0
-            consecutive_history_failures = 0
-            consecutive_comfy_down_failures = 0
-            total_history_failures = 0
-            # Keep polling until Comfy reports completion, the prompt becomes
-            # unreachable, or the user cancels the job. Generation time is
-            # deliberately unbounded because H3 runtime varies sharply with
-            # duration, resolution, VRAM, and model offload behavior.
-            while True:
-                if job["id"] in self.cancelled:
-                    raise RuntimeError("Generation canceled")
-                if long_take:
-                    saved = long_take_saved_count(await asyncio.to_thread(long_take_saved_parts, OUTPUT, long_take["run"]),
-                                                  long_take_start, long_take_since)
-                    if saved != runtime["long_take"]["saved"]:
-                        runtime["long_take"]["saved"] = saved
-                        update_job(job["id"], runtime=runtime)
-                history, history_error = await self._read_comfy_history(prompt_id)
-                if history_error is not None:
-                    consecutive_history_failures += 1
-                    total_history_failures += 1
-                    poll_error = self._error_text(history_error)
-                    observation = await self._observe_comfy_prompt(prompt_id)
-                    queue_state = observation["queue_state"]
-                    queue_available = bool(observation["queue_available"])
-                    server_ready = bool(observation["server_ready"])
-                    process_alive = bool(observation["process_alive"])
-                    process_pid = observation["process_pid"]
-                    # A prompt visible in either Comfy queue is definitive
-                    # evidence that the generation is still owned by Comfy.
-                    # A responsive queue, live process, or listening port is
-                    # also enough to classify this as transport noise rather
-                    # than a terminal generation failure.
-                    if queue_state or queue_available or server_ready or process_alive:
+            for batch_index, batch_graph in enumerate(batch_graphs):
+                if batch_index:  # the next batch of the same take: a new prompt
+                    prompt_id = None
+                    runtime["long_take"]["batch"] = batch_index + 1
+                    update_job(job["id"], runtime=runtime)
+                if not prompt_id:
+                    await self._unload_other_engine_family(job)
+                    prompt_id = await self.comfy.submit(batch_graph, client_id)
+                update_job(
+                    job["id"], status="running", phase="starting", prompt_id=prompt_id,
+                    progress=0, step=0, total_steps=0,
+                    eta_seconds=round(estimated_total, 1) if estimated_total else None,
+                )
+                runtime.setdefault("comfy", {})["prompt_id"] = prompt_id
+                update_job(job["id"], runtime=runtime)
+                consecutive_history_failures = 0
+                consecutive_comfy_down_failures = 0
+                total_history_failures = 0
+                # Keep polling until Comfy reports completion, the prompt becomes
+                # unreachable, or the user cancels the job. Generation time is
+                # deliberately unbounded because H3 runtime varies sharply with
+                # duration, resolution, VRAM, and model offload behavior.
+                while True:
+                    if job["id"] in self.cancelled:
+                        raise RuntimeError("Generation canceled")
+                    if long_take:
+                        saved = long_take_saved_count(await asyncio.to_thread(long_take_saved_parts, OUTPUT, long_take["run"]),
+                                                      long_take_start, long_take_since)
+                        if saved != runtime["long_take"]["saved"]:
+                            runtime["long_take"]["saved"] = saved
+                            update_job(job["id"], runtime=runtime)
+                    history, history_error = await self._read_comfy_history(prompt_id)
+                    if history_error is not None:
+                        consecutive_history_failures += 1
+                        total_history_failures += 1
+                        poll_error = self._error_text(history_error)
+                        observation = await self._observe_comfy_prompt(prompt_id)
+                        queue_state = observation["queue_state"]
+                        queue_available = bool(observation["queue_available"])
+                        server_ready = bool(observation["server_ready"])
+                        process_alive = bool(observation["process_alive"])
+                        process_pid = observation["process_pid"]
+                        # A prompt visible in either Comfy queue is definitive
+                        # evidence that the generation is still owned by Comfy.
+                        # A responsive queue, live process, or listening port is
+                        # also enough to classify this as transport noise rather
+                        # than a terminal generation failure.
+                        if queue_state or queue_available or server_ready or process_alive:
+                            consecutive_comfy_down_failures = 0
+                        else:
+                            consecutive_comfy_down_failures += 1
+                        runtime.setdefault("comfy", {})["history_poll"] = {
+                            "status": "retrying",
+                            "consecutive_failures": consecutive_history_failures,
+                            "server_ready": server_ready,
+                            "queue_available": queue_available,
+                            "queue_state": queue_state,
+                            "queue_error": observation["queue_error"],
+                            "process_alive": process_alive,
+                            "process_pid": process_pid,
+                            "consecutive_comfy_down_failures": consecutive_comfy_down_failures,
+                            "total_failures": total_history_failures,
+                            "last_error": poll_error,
+                            "last_attempt_at": now_iso(),
+                        }
+                        # Do not fail solely because /history and /system_stats
+                        # timed out.  Only terminalize after the queue endpoint is
+                        # also unavailable and neither the configured process nor
+                        # its listening port can be found.
+                        if not queue_available and not server_ready and not process_alive and consecutive_comfy_down_failures >= 3:
+                            update_job(job["id"], runtime=runtime)
+                            raise RuntimeError(
+                                "ComfyUI process and prompt became unreachable while this generation was running"
+                            )
+                        if consecutive_history_failures == 1 or consecutive_history_failures % 5 == 0:
+                            update_job(
+                                job["id"],
+                                status="running",
+                                **history_retry_phase(sampling_started),
+                                runtime=runtime,
+                                error=None,
+                            )
+                        await asyncio.sleep(5)
+                        continue
+
+                    if consecutive_history_failures:
+                        runtime.setdefault("comfy", {})["history_poll"] = {
+                            "status": "recovered",
+                            "consecutive_failures": consecutive_history_failures,
+                            "server_ready": True,
+                            "consecutive_comfy_down_failures": 0,
+                            "total_failures": total_history_failures,
+                            "recovered_at": now_iso(),
+                        }
+                        update_job(job["id"], runtime=runtime, error=None)
+                        consecutive_history_failures = 0
                         consecutive_comfy_down_failures = 0
-                    else:
-                        consecutive_comfy_down_failures += 1
-                    runtime.setdefault("comfy", {})["history_poll"] = {
-                        "status": "retrying",
-                        "consecutive_failures": consecutive_history_failures,
-                        "server_ready": server_ready,
-                        "queue_available": queue_available,
-                        "queue_state": queue_state,
-                        "queue_error": observation["queue_error"],
-                        "process_alive": process_alive,
-                        "process_pid": process_pid,
-                        "consecutive_comfy_down_failures": consecutive_comfy_down_failures,
-                        "total_failures": total_history_failures,
-                        "last_error": poll_error,
-                        "last_attempt_at": now_iso(),
-                    }
-                    # Do not fail solely because /history and /system_stats
-                    # timed out.  Only terminalize after the queue endpoint is
-                    # also unavailable and neither the configured process nor
-                    # its listening port can be found.
-                    if not queue_available and not server_ready and not process_alive and consecutive_comfy_down_failures >= 3:
-                        update_job(job["id"], runtime=runtime)
-                        raise RuntimeError(
-                            "ComfyUI process and prompt became unreachable while this generation was running"
-                        )
-                    if consecutive_history_failures == 1 or consecutive_history_failures % 5 == 0:
-                        update_job(
-                            job["id"],
-                            status="running",
-                            **history_retry_phase(sampling_started),
-                            runtime=runtime,
-                            error=None,
-                        )
+
+                    sample = await asyncio.to_thread(gpu_sample, comfy_pid)
+                    rule_now = time.monotonic()
+                    if sample:
+                        spilling = spill_watch.feed(sample, rule_now)
+                        spill_state = runtime.get("spill") or {}
+                        if spilling and not spill_state.get("active"):
+                            runtime["spill"] = {"active": True, "detected_at": now_iso(), "sample": spill_watch.last,
+                                                "no_limits": no_limits}
+                            self.spill_restart_pending = True   # the user's rule: restart before the next job
+                            update_job(job["id"], runtime=runtime)
+                        elif not spilling and spill_state.get("active"):
+                            spill_state.update(active=False, longest_seconds=round(spill_watch.longest))
+                            update_job(job["id"], runtime=runtime)
+                    step_seconds = step_clock.feed(step_state["step"], step_state["total"], rule_now)
+                    if not no_limits:
+                        reason = rule_cancel_reason(
+                            step_seconds=step_seconds, step=step_state["step"], total=step_state["total"],
+                            limit=rule_step_limit, single_short_job=single_short_job,
+                            running_seconds=rule_now - started)
+                        if reason:
+                            self.spill_restart_pending = True
+                            runtime["spill_rules"]["canceled"] = reason
+                            update_job(job["id"], runtime=runtime)
+                            await self._cancel_comfy_prompt(prompt_id)
+                            raise RuntimeError(reason)
+                    if sample:
+                        samples.append({"at_seconds": round(time.monotonic() - started, 1), **sample})
+                        if (sample.get("vram_used_mib") or 0) > (peak.get("vram_used_mib") or 0):
+                            peak = sample
+                    polls += 1
+                    if polls % DIAGNOSTICS_PERSIST_POLLS == 0:
+                        update_job(job["id"], metrics={"diagnostics": diagnostics_payload(),
+                                                       "samples": keep_samples(samples)})
+                    if history:
+                        status = history.get("status", {})
+                        if status.get("status_str") == "error" or not status.get("completed", False):
+                            messages = status.get("messages", [])
+                            errors = [m for m in messages if m and m[0] == "execution_error"]
+                            if errors:
+                                raise RuntimeError("ComfyUI execution error: " + json.dumps(errors[-1][1], ensure_ascii=False)[:7500])
+                        if status.get("completed"):
+                            break
                     await asyncio.sleep(5)
-                    continue
-
-                if consecutive_history_failures:
-                    runtime.setdefault("comfy", {})["history_poll"] = {
-                        "status": "recovered",
-                        "consecutive_failures": consecutive_history_failures,
-                        "server_ready": True,
-                        "consecutive_comfy_down_failures": 0,
-                        "total_failures": total_history_failures,
-                        "recovered_at": now_iso(),
-                    }
-                    update_job(job["id"], runtime=runtime, error=None)
-                    consecutive_history_failures = 0
-                    consecutive_comfy_down_failures = 0
-
-                sample = await asyncio.to_thread(gpu_sample, comfy_pid)
-                rule_now = time.monotonic()
-                if sample:
-                    spilling = spill_watch.feed(sample, rule_now)
-                    spill_state = runtime.get("spill") or {}
-                    if spilling and not spill_state.get("active"):
-                        runtime["spill"] = {"active": True, "detected_at": now_iso(), "sample": spill_watch.last,
-                                            "no_limits": no_limits}
-                        self.spill_restart_pending = True   # the user's rule: restart before the next job
-                        update_job(job["id"], runtime=runtime)
-                    elif not spilling and spill_state.get("active"):
-                        spill_state.update(active=False, longest_seconds=round(spill_watch.longest))
-                        update_job(job["id"], runtime=runtime)
-                step_seconds = step_clock.feed(step_state["step"], step_state["total"], rule_now)
-                if not no_limits:
-                    reason = rule_cancel_reason(
-                        step_seconds=step_seconds, step=step_state["step"], total=step_state["total"],
-                        limit=rule_step_limit, single_short_job=single_short_job,
-                        running_seconds=rule_now - started)
-                    if reason:
-                        self.spill_restart_pending = True
-                        runtime["spill_rules"]["canceled"] = reason
-                        update_job(job["id"], runtime=runtime)
-                        await self._cancel_comfy_prompt(prompt_id)
-                        raise RuntimeError(reason)
-                if sample:
-                    samples.append({"at_seconds": round(time.monotonic() - started, 1), **sample})
-                    if (sample.get("vram_used_mib") or 0) > (peak.get("vram_used_mib") or 0):
-                        peak = sample
-                polls += 1
-                if polls % DIAGNOSTICS_PERSIST_POLLS == 0:
-                    update_job(job["id"], metrics={"diagnostics": diagnostics_payload(),
-                                                   "samples": keep_samples(samples)})
-                if history:
-                    status = history.get("status", {})
-                    if status.get("status_str") == "error" or not status.get("completed", False):
-                        messages = status.get("messages", [])
-                        errors = [m for m in messages if m and m[0] == "execution_error"]
-                        if errors:
-                            raise RuntimeError("ComfyUI execution error: " + json.dumps(errors[-1][1], ensure_ascii=False)[:7500])
-                    if status.get("completed"):
-                        break
-                await asyncio.sleep(5)
+                if batch_index < len(batch_graphs) - 1:  # an earlier batch's partial take is not the result
+                    for partial in OUTPUT.glob(f"{prefix}_batch{batch_index + 1}_*"):
+                        partial.unlink(missing_ok=True)
 
             elapsed = time.monotonic() - started
             eta = max(0.0, estimated_total - elapsed) if estimated_total else None

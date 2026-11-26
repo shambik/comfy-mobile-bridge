@@ -19,9 +19,11 @@ type SkinTier = 'skin_god' | 'skin_balanced' | 'skin_max' | 'skin_app'
 type SkinMegapixels = 1 | 1.5
 type OmniMegapixels = 0.6 | 1 | 1.5
 type LongTakeContinuity = 'visual' | 'hard'
-type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number; parts?: LongTakeParts; continuity?: LongTakeContinuity }
-// Singularity long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop; 1 = one normal pass.
-type LongTakeParts = 1 | 2 | 3
+type SkinOptions = { model: 'pruned' | 'full' | 'base'; speed_lora: 'tier' | 'ema600' | 'ref8' | 'ref_v01' | 'pika' | 'none'; flow?: 't8' | 'pika'; ref_size?: 'max' | 'match'; speed_strength: number; people_strength: number; shift_video: number; shift_audio: number; scheduler: 'beta' | 'beta57' | 'native_flow'; tail_steps: number; parts?: LongTakeParts; continuity?: LongTakeContinuity; part_seconds?: LongTakePartSeconds }
+// Singularity long take (issue #65): continuous parts through Context-Loop; 1 = one normal pass. Issue #84: up to 9
+// parts (more than 3 run as batches of 3 inside the job) of 5, 7 or 10 s (7 and 10 s get the memory nodes).
+type LongTakeParts = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+type LongTakePartSeconds = 5 | 7 | 10
 type LtxQuality = 'balanced' | 'high'
 type LtxReferenceModel = '2.5' | '2.3'
 type FusedWorkflow = 'direct' | 'i2v_fl2v' | 'ref2va' | 'ref2va_multiref' | 'derope' | 'dyrope'
@@ -1146,7 +1148,8 @@ function App() {
   const skinPikaFlow = effectiveEngine === 'singularity' && effectiveSkinTier !== 'skin_app' && preferences.skinOptions.flow === 'pika'
   const longTakeAllowed = effectiveEngine === 'singularity' && mode === 'reference' && effectiveSkinTier !== 'skin_app'
   const longTakeParts: LongTakeParts = longTakeAllowed ? (preferences.skinOptions.parts ?? 1) : 1
-  const effectiveSkinOptions: SkinOptions = { ...preferences.skinOptions, flow: skinPikaFlow ? 'pika' : 't8', parts: longTakeParts }
+  const longTakePartSeconds: LongTakePartSeconds = preferences.skinOptions.part_seconds ?? LONG_TAKE_PART_SECONDS
+  const effectiveSkinOptions: SkinOptions = { ...preferences.skinOptions, flow: skinPikaFlow ? 'pika' : 't8', parts: longTakeParts, part_seconds: longTakePartSeconds }
   const omniMegapixels: OmniMegapixels = preferences.omniMegapixels
   const fusedWorkflowHasFixedSteps = effectiveFusedWorkflow === 'i2v_fl2v' || effectiveFusedWorkflow === 'derope' || effectiveFusedWorkflow === 'dyrope'
   const generationSteps = effectiveEngine === 'omni'
@@ -1437,7 +1440,7 @@ function App() {
       setPage('studio')
       setPrompt(job.prompt)
       setMode(job.mode)
-      setDuration(Math.max(0.5, Math.min(60, job.duration)))
+      setDuration(Math.max(0.5, Math.min(job.engine === 'singularity' ? 90 : 60, job.duration)))  // 90: a 9-part long take (issue #84)
       setBatch(false)
       setConnected(false)
       setNoAudio(Boolean(job.no_audio))
@@ -1705,7 +1708,8 @@ function App() {
     if (effectiveEngine === 'omni' && referenceVideos.length > 1) return setMainError('generation', 'Omni נבדק עם סרטון רפרנס אחד')
     if (pikaTurbo && duration > PIKA_TURBO_MAX_SECONDS) return setMainError('generation', `Pika Turbo נבדק עד ${PIKA_TURBO_MAX_SECONDS} שניות`)
     if (effectiveEngine === 'singularity' && longTakeParts > 1) {
-      if (duration !== longTakeParts * LONG_TAKE_PART_SECONDS) return setMainError('generation', `טייק ארוך של ${longTakeParts} חלקים הוא ${longTakeParts * LONG_TAKE_PART_SECONDS} שניות`)
+      if (duration !== longTakeParts * longTakePartSeconds) return setMainError('generation', `טייק ארוך של ${longTakeParts} חלקים של ${longTakePartSeconds} שנ׳ הוא ${longTakeParts * longTakePartSeconds} שניות`)
+      if (longTakePartSeconds === 10 && preferences.skinMegapixels > 1) return setMainError('generation', 'חלקים של 10 שנ׳ רק ב־1 MP; ב־1.5 MP בחרו חלקים של 7 שנ׳')
       const found = longTakePromptParts(prompt).length
       if (found !== longTakeParts) return setMainError('generation', `טייק ארוך: כתבו ${longTakeParts} חלקים, מופרדים בשורה שיש בה רק --- (נמצאו ${found})`)
       if (batch) return setMainError('generation', 'טייק ארוך הוא עבודה אחת: בטלו את מצב הבאץ׳')
@@ -2094,16 +2098,20 @@ function App() {
                 {([1, 1.5] as SkinMegapixels[]).map(value => <button key={value} type="button" className={preferences.skinMegapixels === value ? 'active' : ''} aria-pressed={preferences.skinMegapixels === value} onClick={() => setPreferences(current => ({ ...current, skinMegapixels: value }))}><strong dir="ltr">{value.toFixed(1)} MP · {SKIN_SIZES[value][skinAspect].join('×')}</strong><small>{value === 1 ? 'נבדק · ≈5.5–8 דק׳' : 'בבדיקה · עור חד יותר, איטי יותר'}</small></button>)}
               </div>
               {longTakeAllowed && <>
-                <div className="setting-title turbo-profile-title"><span>טייק ארוך</span><small>Context-Loop · חלקים רציפים של 5 שנ׳</small></div>
-                <div className="turbo-profile-toggle">
-                  {([1, 2, 3] as LongTakeParts[]).map(parts => <button key={parts} type="button" className={longTakeParts === parts ? 'active' : ''} aria-pressed={longTakeParts === parts} onClick={() => { setSkinOption('parts', parts); setDuration(parts > 1 ? parts * LONG_TAKE_PART_SECONDS : Math.min(duration, SKIN_DURATION[1])) }}><strong dir="ltr">{parts === 1 ? 'Off' : `${parts * LONG_TAKE_PART_SECONDS} s · ${parts} parts`}</strong><small>{parts === 1 ? 'מעבר אחד, 2–7 שנ׳' : parts === 3 ? 'נבדק: 9:16 · God · int8 · ≈29 דק׳' : 'לא נבדק עדיין · ≈20 דק׳'}</small></button>)}
+                <div className="setting-title turbo-profile-title"><span>טייק ארוך</span><small>Context-Loop · חלקים רציפים</small></div>
+                <div className="turbo-profile-toggle long-take-parts">
+                  {([1, 2, 3, 4, 5, 6, 7, 8, 9] as LongTakeParts[]).map(parts => <button key={parts} type="button" className={longTakeParts === parts ? 'active' : ''} aria-pressed={longTakeParts === parts} onClick={() => { setSkinOption('parts', parts); setDuration(parts > 1 ? parts * longTakePartSeconds : Math.min(duration, SKIN_DURATION[1])) }}><strong dir="ltr">{parts === 1 ? 'Off' : `${parts} parts`}</strong><small dir="ltr">{parts === 1 ? '2–7 s' : `${parts * longTakePartSeconds} s`}</small></button>)}
                 </div>
                 {longTakeParts > 1 && <>
+                  <div className="setting-title turbo-profile-title"><span>אורך כל חלק</span><small>7 ו־10 שנ׳ עם Memory nodes אוטומטית</small></div>
+                  <div className="turbo-profile-toggle long-take-seconds">
+                    {([5, 7, 10] as LongTakePartSeconds[]).map(value => <button key={value} type="button" disabled={value === 10 && preferences.skinMegapixels > 1} className={longTakePartSeconds === value ? 'active' : ''} aria-pressed={longTakePartSeconds === value} onClick={() => { setSkinOption('part_seconds', value); setDuration(longTakeParts * value) }}><strong dir="ltr">{value} s</strong><small>{value === 5 ? 'ברירת מחדל · נבדק' : value === 7 ? 'נבדק ב־1.5 MP · 9 חלקים' : 'רק 1 MP · נבדק עד 60 שנ׳'}</small></button>)}
+                  </div>
                   <div className="setting-title turbo-profile-title"><span>המשכיות בין החלקים</span><small>איך כל חלק ממשיך את הקודם</small></div>
                   <div className="turbo-profile-toggle">
                     {(['visual', 'hard'] as LongTakeContinuity[]).map(value => <button key={value} type="button" className={(preferences.skinOptions.continuity ?? 'visual') === value ? 'active' : ''} aria-pressed={(preferences.skinOptions.continuity ?? 'visual') === value} onClick={() => setSkinOption('continuity', value)}><strong dir="ltr">{value === 'visual' ? 'Visual continuity' : 'Hard picture'}</strong><small>{value === 'visual' ? 'ברירת מחדל · 22 פריימים מנחים · תנועה חופשית' : '39 פריימים נעולים · מעבר יציב יותר בסצנות כבדות · פחות תנועה'}</small></button>)}
                   </div>
-                  <p className="setting-note">כתבו {longTakeParts} פרומפטים מלאים בתיבה אחת, אחד לכל חלק, מופרדים בשורה שיש בה רק <span dir="ltr">---</span>. כל חלק ממשיך מסוף הקודם: {(preferences.skinOptions.continuity ?? 'visual') === 'hard' ? '39 הפריימים האחרונים של תמונה וסאונד נעולים בדיוק (Hard picture), כדי שהמעבר לא יקפוץ בחדות או בבהירות; התנועה אחרי המעבר מעט מאופקת יותר.' : '22 הפריימים האחרונים של תמונה וסאונד מנחים אותו (Visual continuity), והתנועה חופשית. אם המעבר קופץ בסצנה כבדה, נסו Hard picture.'} רק 9:16 · 15 שנ׳ · God · int8 נבדק במעבדה; 16:9, 10 שנ׳ ושאר הרמות לא נבדקו.</p>
+                  <p className="setting-note">כתבו {longTakeParts} פרומפטים מלאים בתיבה אחת, אחד לכל חלק, מופרדים בשורה שיש בה רק <span dir="ltr">---</span>. כל חלק ממשיך מסוף הקודם: {(preferences.skinOptions.continuity ?? 'visual') === 'hard' ? '39 הפריימים האחרונים של תמונה וסאונד נעולים בדיוק (Hard picture), כדי שהמעבר לא יקפוץ בחדות או בבהירות; התנועה אחרי המעבר מעט מאופקת יותר.' : '22 הפריימים האחרונים של תמונה וסאונד מנחים אותו (Visual continuity), והתנועה חופשית. אם המעבר קופץ בסצנה כבדה, נסו Hard picture.'} {longTakeParts > 3 ? ` יותר מ־3 חלקים רצים בבאצ׳ים של 3 באותה עבודה: כל באץ׳ ממשיך מהחלקים השמורים, והטייק המלא נשמר בסוף.` : ''} נבדק במעבדה עם God · int8: חלקים של 5 שנ׳, 7 שנ׳ ב־1.5 MP ו־10 שנ׳ ב־1 MP; שאר הרמות לא נבדקו.</p>
                 </>}
               </>}
               <details className="skin-advanced">
@@ -2683,7 +2691,7 @@ const SKIN_SIZES: Record<SkinMegapixels, Record<'9:16' | '16:9', [number, number
   1.5: { '9:16': [928, 1632], '16:9': [1632, 928] },
 }
 const SKIN_DURATION: [number, number] = [2, 7]
-const LONG_TAKE_PART_SECONDS = 5
+const LONG_TAKE_PART_SECONDS: LongTakePartSeconds = 5
 // Mirrors backend/generation.py OMNI_SIZES and OMNI_DURATION_RANGE.
 const OMNI_SIZES: Record<OmniMegapixels, Record<'9:16' | '16:9', [number, number]>> = {
   0.6: { '9:16': [576, 1024], '16:9': [1024, 576] },
@@ -2723,7 +2731,7 @@ function skinSetupParts(job: { workflow_variant?: string; mode?: string; skin_op
   const tail = options.tail_steps ? `, +${options.tail_steps} tail steps` : ''
   const sampler = options.flow === 'pika' ? `Sampler: Pika, ${job.steps ?? 6} steps`
     : `Sampler: T8 Dual-Clock ${options.scheduler || 'beta'}, ${job.steps ?? 8} steps${shift}${tail}`
-  const longTake = (options.parts ?? 1) > 1 ? [`Long take: ${options.parts} × ${LONG_TAKE_PART_SECONDS} s (Context-Loop${options.continuity === 'hard' ? ', Hard picture' : ''})`] : []
+  const longTake = (options.parts ?? 1) > 1 ? [`Long take: ${options.parts} × ${options.part_seconds ?? LONG_TAKE_PART_SECONDS} s (Context-Loop${options.continuity === 'hard' ? ', Hard picture' : ''}${(options.part_seconds ?? LONG_TAKE_PART_SECONDS) >= 7 ? ', memory nodes' : ''})`] : []
   return [model, `Speed LoRA: ${speed ? `${speed} ${options.speed_strength ?? 1}` : 'none'}`, `Realism LoRA: ${realism}`, sampler, ...longTake, 'Not Fused']
 }
 
