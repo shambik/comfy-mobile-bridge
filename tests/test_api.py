@@ -245,6 +245,36 @@ class JobApiTests(unittest.TestCase):
         self.assertTrue(all(part.startswith("r34l1sm\n\n") for part in stored))  # People trigger on every part
         self.assertIn("she starts\n\nmore of part one", stored[0])
 
+    def test_long_take_part_length_and_nine_parts(self):
+        # Issue #84: duration = parts x part length; 10 s parts only at 1 MP; up to 9 parts.
+        files = {"reference_images": ("sheet.png", b"image-placeholder", "image/png")}
+        nine = "\n---\n".join(f"summary:\npart {n}" for n in range(1, 10))
+        three = "a\n---\nb\n---\nc"
+        data = {"prompt": nine, "mode": "reference", "engine": "singularity", "workflow_variant": "skin_god",
+                "steps": "8", "attention_mode": "int8", "aspect_ratio": "16:9", "megapixels": "1.5",
+                "skin_options": '{"parts": 9, "part_seconds": 7}'}
+        post = lambda **extra: self.client.post("/api/jobs", data={**data, **extra}, files=files,
+                                                headers={"X-CSRF-Token": self.token})
+        with patch("backend.main.singularity_ready", return_value=True), \
+             patch("backend.main.save_image", new=AsyncMock(return_value=("C:/safe/sheet.png", "sheet.png"))):
+            wrong = post(duration="45")
+            ten_high = post(duration="30", prompt=three, skin_options='{"parts": 3, "part_seconds": 10}')
+            ten_one = post(duration="30", prompt=three, megapixels="1", skin_options='{"parts": 3, "part_seconds": 10}')
+            nine_seven = post(duration="63")
+        self.assertEqual(wrong.status_code, 400, wrong.text)
+        self.assertIn("63", wrong.text)
+        self.assertEqual(ten_high.status_code, 400, ten_high.text)
+        self.assertIn("1 MP only", ten_high.text)
+        self.assertEqual(ten_one.status_code, 200, ten_one.text)
+        self.assertEqual(nine_seven.status_code, 200, nine_seven.text)
+        connection = sqlite3.connect(self.path)
+        try:
+            rows = connection.execute("SELECT duration,skin_options_json FROM jobs ORDER BY id").fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(sorted(row[0] for row in rows), [30, 63])
+        self.assertTrue(any('"part_seconds": 7' in row[1] and '"parts": 9' in row[1] for row in rows))
+
     def test_pika_turbo_is_persisted_and_keeps_its_tested_length(self):
         files = {"image": ("face.png", b"image-placeholder", "image/png")}
         data = {"prompt": "A fighter turns to camera", "mode": "opening", "engine": "pika", "workflow_variant": "turbo4",

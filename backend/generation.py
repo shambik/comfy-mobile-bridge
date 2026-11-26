@@ -68,7 +68,7 @@ SKIN_STEP_RANGE = (4, 16)
 SKIN_OPTION_DEFAULTS = {
     "model": "pruned", "speed_lora": "tier", "speed_strength": 1.0, "people_strength": 1.0,
     "shift_video": 12.0, "shift_audio": 3.0, "scheduler": "beta", "tail_steps": 0,
-    "flow": "t8", "ref_size": "max", "parts": 1, "continuity": "visual",
+    "flow": "t8", "ref_size": "max", "parts": 1, "continuity": "visual", "part_seconds": 5,
 }
 # model "base" is H3's own pruned Ref2VA (reference) or FL2VA (other modes); speed_lora "pika" is the
 # matching Pika H3 Flex LoRA; flow "pika" samples with Pika's 6 knots instead of the T8 sampler.
@@ -81,7 +81,11 @@ SKIN_OPTION_CHOICES = {
     # Long take (issue #65): 2 or 3 continuous ~5 s parts through Context-Loop, reference mode only.
     # Lab-tested: 3 parts, God, int8, 1.5 MP 9:16 (15.08 s in 29 min). The other tiers, 16:9 and 2 parts
     # are allowed by the user's choice and flagged as untested in the form.
-    "parts": (1, 2, 3),
+    # Issue #84: up to 9 parts; a take of more than 3 runs in batches of 3 inside the job.
+    "parts": (1, 2, 3, 4, 5, 6, 7, 8, 9),
+    # Issue #84: seconds per long-take part. 7 s and 10 s get the memory nodes; 10 s only at 1 MP (lab: 1.5 MP
+    # spills even with them).
+    "part_seconds": (5, 7, 10),
     # How a long take continues into each later part (issue #80, the user chooses): "visual" guides it with the
     # previous part's last 22 frames (default); "hard" locks the last 39 frames of picture and sound. Ignored
     # without a long take.

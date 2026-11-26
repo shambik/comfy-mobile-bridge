@@ -192,6 +192,14 @@ Context-Loop keeps each part as a scene MP4 plus a ~0.4 GB latent checkpoint und
 the app asks Assemble to delete the checkpoints once the final MP4 exists, so a finished long take leaves only the
 scene videos and metadata.
 
+**Longer parts and more of them (issue #84).** 7 s (175 frames) and 10 s (243/260) parts fit 10 GB only with the
+MiniMax Chunk FeedForward (4 chunks, threshold 2048) and Low VRAM Attention (4 head chunks) nodes, which the app inserts
+after every model loader for those lengths; 10 s at 1.5 MP still spills, so 10 s is 1 MP only. The nodes save VRAM, not
+system RAM: Context-Loop caches the decoded frames of every part in one prompt (~2.5-3 GB per part, 47-51 GB peak for
+3 x 7 s at 1.5 MP), so a take of more than 3 parts runs as batches of 3 prompts in the same job, and RAM falls back
+between batches. The total reference area matters too: four full-size pictures pushed a 7 s part into a spill, the
+same four cropped small (~1.2 MP in all) fit and were faster.
+
 Tried without effect on the stall: unloading before sampling, the fp16 VAE, `--reserve-vram 1.5` and `3`,
 `--disable-nvml-pressure`, `empty_cache` on slowdown, a preallocated pool, a 0.2 GB VBAR cap, async offload off alone, and
 waits only after each block. Sparse attention stays refused for Pika opening and first + last: it was not retested.

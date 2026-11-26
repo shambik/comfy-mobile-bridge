@@ -2808,8 +2808,10 @@ async def create_jobs(
     project_id: str = Form(""), folder_id: str = Form(""),
 ):
     require_csrf(request)
-    if mode not in ("text", "opening", "closing", "frames", "reference", "lip_sync") or not 0.5 <= duration <= 60:
-        raise HTTPException(400, "Duration must be between 0.5 and 60 seconds")
+    # Issue #84: a Singularity long take of 9 parts runs up to 90 s (its own checks below hold it to parts x length).
+    max_duration = 90 if (engine or "") == "singularity" else 60
+    if mode not in ("text", "opening", "closing", "frames", "reference", "lip_sync") or not 0.5 <= duration <= max_duration:
+        raise HTTPException(400, f"Duration must be between 0.5 and {max_duration} seconds")
     selected_seed = normalize_seed(seed)
     selected_project = project_id.strip() or None
     selected_folder = folder_id.strip() or None
@@ -2881,8 +2883,13 @@ async def create_jobs(
                 raise HTTPException(400, "The long take uses the T8 tiers (God, Balanced, Max), not App flow")
             if batch:
                 raise HTTPException(400, "A long take is one job: write its parts in one prompt")
-            if duration != long_parts * LONG_TAKE_PART_SECONDS:
-                raise HTTPException(400, f"A {long_parts}-part long take is {long_parts * LONG_TAKE_PART_SECONDS:g} seconds")
+            part_seconds = skin_options_value["part_seconds"]
+            if duration != long_parts * part_seconds:
+                raise HTTPException(400, f"A {long_parts}-part long take of {part_seconds} s parts is "
+                                         f"{long_parts * part_seconds:g} seconds")
+            if part_seconds == 10 and generation.width * generation.height > 1_100_000:
+                # Issue #84, lab 2026-11-25: 10 s parts at 1.5 MP spill even with the memory nodes.
+                raise HTTPException(400, "10 s parts run at 1 MP only; at 1.5 MP use 7 s parts")
         elif not SKIN_DURATION_RANGE[0] <= duration <= SKIN_DURATION_RANGE[1]:
             raise HTTPException(400, "The Singularity skin engine supports 2 to 7 seconds")
         if skin_options_value["flow"] == "pika" and (generation.steps != PIKA_STEPS or generation.workflow_variant == "skin_app"):

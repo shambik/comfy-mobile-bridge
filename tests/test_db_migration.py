@@ -98,6 +98,33 @@ class DatabaseMigrationTests(unittest.TestCase):
             ["reference-old", "turbo-old"],
         )
 
+    def test_sixty_second_table_is_rebuilt_for_nine_part_long_takes(self):
+        # Issue #84: the duration CHECK went from 60 to 90 s; a table with the old CHECK is rebuilt, rows kept.
+        db_module.init_db()
+        connection = sqlite3.connect(self.path)
+        try:
+            current = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()[0]
+            old = current.replace("BETWEEN 0.5 AND 90", "BETWEEN 0.5 AND 60")
+            self.assertNotEqual(old, current)
+            connection.executescript(f"ALTER TABLE jobs RENAME TO jobs_tmp; {old}; "
+                                     "INSERT INTO jobs SELECT * FROM jobs_tmp; DROP TABLE jobs_tmp;")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE jobs SET duration=63 WHERE id='turbo-old'")
+            connection.commit()
+        finally:
+            connection.close()
+        db_module.init_db()
+        connection = sqlite3.connect(self.path)
+        try:
+            sql = connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()[0]
+            self.assertIn("BETWEEN 0.5 AND 90", sql)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
+            connection.execute("UPDATE jobs SET duration=63 WHERE id='turbo-old'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE jobs SET duration=91 WHERE id='turbo-old'")
+        finally:
+            connection.close()
+
     def test_runtime_metadata_is_serialized_and_restored(self):
         db_module.init_db()
         runtime = {

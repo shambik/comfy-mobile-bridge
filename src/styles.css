@@ -986,3 +986,4 @@ main section :where(h1, h2, h3, p, small) { margin-block: 5px; }
 .long-take-parts .long-take-assemble-error { color: #e9aaa2; flex: 1 1 100%; }
 /* issue #82: the spill rules: the card says when the GPU is spilling into RAM */
 .job-spill { color: #f0b37e; font-weight: 600; }
+.turbo-profile-toggle.long-take-parts { grid-template-columns: repeat(5, 1fr); }.turbo-profile-toggle.long-take-parts button { min-height: 40px; padding: 5px 3px; }.turbo-profile-toggle.long-take-seconds { grid-template-columns: repeat(3, 1fr); }
