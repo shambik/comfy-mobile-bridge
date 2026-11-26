@@ -2803,6 +2803,7 @@ async def create_jobs(
     audio_pretrimmed: bool = Form(False),
     audio_original_start: float | None = Form(None),
     no_audio: bool = Form(False),
+    no_limits: bool = Form(False),
     first_frame: UploadFile | None = File(None), last_frame: UploadFile | None = File(None),
     project_id: str = Form(""), folder_id: str = Form(""),
 ):
@@ -3104,6 +3105,8 @@ async def create_jobs(
                     db.execute("UPDATE jobs SET skin_options_json=? WHERE id=?", (json.dumps(skin_options_value), job_id))
                 if ltx_recipe == "official":
                     db.execute("UPDATE jobs SET ltx_recipe=? WHERE id=?", ("official", job_id))
+            if no_limits:  # issue #82: this job runs without the spill rules' cancels
+                db.execute("UPDATE jobs SET no_limits=1 WHERE id=?", (job_id,))
             created.append(job_id)
     try:
         if selected_project:

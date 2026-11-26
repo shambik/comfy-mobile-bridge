@@ -35,6 +35,8 @@ type Page = 'studio' | 'production' | 'comfy' | 'video_vault' | 'h3_still' | 'bo
 type RuntimeMetadata = {
   swap?: { window_now?: number }   // character swap: the window being sampled
   long_take?: { run: string; parts: number; saved?: number }   // Context-Loop long take: parts saved so far
+  spill?: { active?: boolean; longest_seconds?: number }   // the spill rules (issue #82): GPU busy but starved
+  spill_rules?: { step_limit_seconds?: number; no_limits?: boolean; canceled?: string }
   captured_at?: string
   capture_error?: string
   bridge?: { python?: string; pid?: number }
@@ -56,7 +58,7 @@ type Job = {
   error?: string; video_url?: string; video_filename?: string; created_at: string; started_at?: string; finished_at?: string;
   metrics?: { generation_seconds?: number; ffprobe?: { streams?: { codec_type?: string; width?: number; height?: number }[] } }; runtime?: RuntimeMetadata | null; runtime_details?: boolean;
   swap_options?: { windows?: number; steps?: number; card?: { kind?: string; tags?: string[]; variant?: string };
-    graph?: { set?: Record<string, unknown>; add?: Record<string, { class_type?: string; inputs?: Record<string, unknown> }> } } | null; no_audio?: boolean; source_assets?: JobSourceAsset[];
+    graph?: { set?: Record<string, unknown>; add?: Record<string, { class_type?: string; inputs?: Record<string, unknown> }> } } | null; no_audio?: boolean; no_limits?: boolean; source_assets?: JobSourceAsset[];
 }
 
 type SequenceKind = 'connected' | 'history'
@@ -726,6 +728,8 @@ function App() {
   const [gpuConflict, setGpuConflict] = useState(false)
   const [gpuBusy, setGpuBusy] = useState(false)
   const [noAudio, setNoAudio] = useState(false)
+  // Issue #82: the spill rules cancel a stuck job; "No limits" lets this job run as long as it needs
+  const [noLimits, setNoLimits] = useState(false)
   const [selectedResults, setSelectedResults] = useState<string[]>([])
   const [joining, setJoining] = useState(false)
   const [bulkMode, setBulkMode] = useState(false)
@@ -1437,6 +1441,7 @@ function App() {
       setBatch(false)
       setConnected(false)
       setNoAudio(Boolean(job.no_audio))
+      setNoLimits(Boolean(job.no_limits))
       setSeedEnabled(Boolean(job.seed))
       setSeedInput(job.seed || '')
       setAudioTrimStart(Math.max(0, Number(job.audio_start) || 0))
@@ -1718,7 +1723,7 @@ function App() {
       const form = new FormData()
       const requestPrompt = prompt.trim() || 'The subject is actively singing or speaking along to the uploaded audio. Synchronize mouth opening, vowels, consonants, jaw and facial movement to each audible vocal phrase. During instrumental-only moments keep the mouth naturally closed. Do not smile continuously, invent words, or add unrelated speech. Keep the face and camera stable.'
       form.set('prompt', requestPrompt); form.set('mode', mode); form.set('duration', String(duration)); form.set('batch', String(batch && mode !== 'lip_sync'))
-      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : effectiveEngine === 'singularity' ? (mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier) : pikaTurbo ? 'turbo4' : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('seed', seedEnabled ? seedInput.trim() : '')
+      form.set('engine', effectiveEngine); form.set('workflow_variant', effectiveEngine === 'fused_sla' ? effectiveFusedWorkflow : effectiveEngine === 'singularity' ? (mode === 'reference' && preferences.skinTier === 'skin_app' ? 'skin_god' : preferences.skinTier) : pikaTurbo ? 'turbo4' : 'direct'); form.set('encoder', effectiveEncoder); form.set('steps', String(generationSteps)); form.set('megapixels', String(preferences.megapixels)); form.set('aspect_ratio', preferences.aspect); form.set('connected', String(connected)); form.set('no_audio', String(noAudio)); form.set('no_limits', String(noLimits)); form.set('seed', seedEnabled ? seedInput.trim() : '')
       if (destinationProject) { form.set('project_id', destinationProject); if (destinationFolder) form.set('folder_id', destinationFolder) }
       if (effectiveEngine === 'turbo' && mode !== 'reference') form.set('turbo_profile', preferences.turboProfile)
       form.set('attention_mode', effectiveAttention)
@@ -2226,6 +2231,11 @@ function App() {
             {mode === 'lip_sync' ? <div className="audio-output-toggle fixed-audio"><AudioLines size={17} /><span>האודיו שהועלה</span><small>יישמר בתוצאה</small></div> : <label className="audio-output-toggle"><input type="checkbox" checked={!noAudio} onChange={event => setNoAudio(!event.target.checked)} /><span>{noAudio ? 'ללא אודיו' : 'כולל אודיו'}</span><small>{noAudio ? 'MP4 ללא ערוץ שמע' : effectiveEngine === 'ltx' ? 'LTX ייצור וימזג אודיו' : 'H3 ייצור וימזג אודיו'}</small></label>}
           </div>
 
+          <div className="setting-block audio-setting-block">
+            <div className="setting-title"><span>חוקי זליגה</span><small>ביטול עבודה תקועה</small></div>
+            <label className="audio-output-toggle"><input type="checkbox" checked={noLimits} onChange={event => setNoLimits(event.target.checked)} /><span>{noLimits ? 'ללא מגבלות — תן לזה לרוץ' : 'חוקי הזליגה פעילים'}</span><small>{noLimits ? 'העבודה לא תבוטל גם אם תזלוג ל־RAM; הכרטיס יראה שהיא זולגת' : 'צעד שנתקע מעבר למגבלה מבוטל, ו־ComfyUI מופעל מחדש'}</small></label>
+          </div>
+
           <div className="setting-block resolution-block">
             <div className="setting-title"><span>רזולוציה</span><small>כפולות 32 שמתאימות ל־H3</small></div>
             <div className="aspect-grid">{aspectOptions.map(aspect => <button type="button" key={aspect} className={(ltxReference ? aspect === '16:9' : preferences.aspect === aspect) ? 'active' : ''} disabled={ltxReference && aspect !== '16:9'} onClick={() => setPreferences(current => ({ ...current, aspect }))}>{aspect}</button>)}</div>
@@ -2506,7 +2516,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
       {swap ? <div className="job-config" dir="ltr">{swap.tags.map(tag => <span key={tag}>{tag}</span>)}{swap.size && <span>{swap.size}</span>}<span className="job-seed">Seed {job.seed}</span></div>
       : engine === 'post' && job.mode === 'edit' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{job.post_options?.task_label}</span><span dir="ltr">{width}×{height}</span>{job.post_options && <span dir="ltr">{job.post_options.frames} frames · {job.post_options.seconds} s</span>}{job.post_options?.pad_frames ? <span>{job.post_options.pad_frames} פריימים אחרונים הוחזקו</span> : null}<span dir="ltr">Ref2VA · DMAD 4-step</span>{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>
       : engine === 'post' ? <div className="job-config"><span>{modeLabel(job.mode)}</span><span dir="ltr">{POST_METHOD_LABELS[job.workflow_variant || ''] || job.workflow_variant}</span>{job.post_options && <span dir="ltr">{job.post_options.source_width}×{job.post_options.source_height} → {width}×{height}</span>}{job.post_options && <span dir="ltr">{job.post_options.source_fps} → {job.post_options.fps} fps</span>}{job.post_options && <span dir="ltr">{job.post_options.frames} frames</span>}{job.post_options?.detail_label && <span dir="ltr">{job.post_options.detail_label}</span>}{job.post_options?.trimmed_frames ? <span>{job.post_options.trimmed_frames} פריימים נחתכו בסוף</span> : null}</div>
-      : <div className="job-config">{engine !== 'singularity' && engine !== 'pika' && <span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>}{engine === 'ltx' && job.ltx_recipe === 'official' && <span className="job-loras" dir="ltr">Official ComfyUI template ({job.mode === 'frames' ? 'video_ltx2_5_flf2v' : 'video_ltx2_5_i2v'})</span>}{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'pika' && pikaSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{engine === 'singularity' && <span className="job-setup job-tier" dir="ltr">{skinJobTag(job)}</span>}{engine === 'singularity' && skinSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{(engine === 'singularity' || engine === 'pika' || engine === 'ltx' || engine === 'omni') && <span className="job-inputs" dir="ltr">{job.mode} · {jobInputsLabel(job.source_assets)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span>{engine !== 'singularity' && <span>{steps} סטפים</span>}<span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}</div>}
+      : <div className="job-config">{engine !== 'singularity' && engine !== 'pika' && <span>{engine === 'ltx' && job.ltx_reference_model ? `LTX ${job.ltx_reference_model} · רפרנס` : engineLabel(engine)}</span>}{engine === 'ltx' && job.ltx_recipe === 'official' && <span className="job-loras" dir="ltr">Official ComfyUI template ({job.mode === 'frames' ? 'video_ltx2_5_flf2v' : 'video_ltx2_5_i2v'})</span>}{engine === 'ltx' && Boolean(job.ltx_sharp_decode) && <span>פענוח חד</span>}{engine === 'ltx' && Boolean(job.ltx_calm_sampler) && <span>סמפלר רגוע</span>}{engine === 'fused_sla' && <span>{fusedWorkflowLabel(job.workflow_variant)}</span>}{engine === 'pika' && pikaSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{engine === 'singularity' && <span className="job-setup job-tier" dir="ltr">{skinJobTag(job)}</span>}{engine === 'singularity' && skinSetupParts(job).map(part => <span key={part} className="job-setup" dir="ltr">{part}</span>)}{(engine === 'singularity' || engine === 'pika' || engine === 'ltx' || engine === 'omni') && <span className="job-inputs" dir="ltr">{job.mode} · {jobInputsLabel(job.source_assets)}</span>}{engine === 'turbo' && <span>{(job.turbo_profile || 'v1').toUpperCase()}</span>}{job.attention_mode && job.attention_mode !== 'standard' && <span dir="ltr">{attentionLabel(job.attention_mode)}</span>}<span>{engine === 'ltx' ? 'Gemma 12B' : encoderLabel(job.encoder || 'native')}</span>{engine !== 'singularity' && <span>{steps} סטפים</span>}<span>{width}×{height}</span>{megapixels !== undefined && <span>{megapixels.toFixed(2)} MP</span>}{job.seed && <span className="job-seed" dir="ltr">Seed {job.seed}</span>}{job.no_limits && <span dir="ltr">No limits</span>}</div>}
       {active && <div className="progress-shell">
         <div className={`progress ${hasStepProgress ? 'determinate' : 'indeterminate'}`} role="progressbar"
           aria-label="התקדמות יצירת הווידאו" aria-valuemin={hasStepProgress ? 0 : undefined}
@@ -2516,7 +2526,7 @@ function JobCard({ job, assignment, csrf, index, total, selectedOrder, onSelect,
         <div className="progress-meta">
           {swap ? (phase === 'sampling' ? <span dir="ltr">{`Swapping${swapWindow ? ` · window ${swapWindow}` : ''}${hasStepProgress ? ` · step ${job.step || 0}/${job.total_steps}` : ''}`}</span>
             : <span>{phaseLabels[phase as Phase] || labels[job.status]}{swapWindow && active ? <bdi dir="ltr"> · window {swapWindow}</bdi> : ''}</span>)
-          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{longTakePart && phase === 'sampling' ? <> · חלק <bdi dir="ltr">{longTakePart}</bdi></> : ''}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}</span>}
+          : <span>{phaseLabels[phase as Phase] || labels[job.status]}{longTakePart && phase === 'sampling' ? <> · חלק <bdi dir="ltr">{longTakePart}</bdi></> : ''}{hasStepProgress ? ` · ${percent}% · שלב ${job.step || 0}/${job.total_steps}` : ''}{job.runtime?.spill?.active ? <b className="job-spill"> · זולג ל־RAM (GPU מורעב)</b> : ''}</span>}
           <span>{elapsedSeconds !== undefined ? `עבר ${formatDuration(elapsedSeconds)}` : ''}{job.eta_seconds !== null && job.eta_seconds !== undefined ? ` · נשאר ~${formatDuration(job.eta_seconds)}` : ''}</span>
         </div>
       </div>}
